@@ -1052,13 +1052,24 @@ async function claimCallForRetry(orgId, rowId) {
   const nowIso = new Date().toISOString();
   const client = await _pool.connect();
   try {
+    // MySQL rejects UPDATE call_logs ... WHERE NOT EXISTS (SELECT ... FROM call_logs ...)
+    // when the subquery correlates to the target row (Error 1093). Wrap the
+    // inner scan in a derived table so the existence check is evaluated safely.
     const updateResult = await client.query(`UPDATE call_logs AS c SET retry_status = 'retrying', retry_claimed_at = $4
       WHERE c.id = $2 AND c.org_id = $1 AND c.retry_status = 'pending'
       AND c.next_retry_at <= $3
       AND c.status IN ('No Answer','Answering Machine','Callback Scheduled')
-      AND NOT EXISTS (SELECT 1 FROM call_logs AS newer WHERE newer.org_id = c.org_id AND newer.id <> c.id
-        AND newer.created_at > c.created_at
-        AND REGEXP_REPLACE(COALESCE(newer.caller_number,newer.lead_name,''),'[^0-9]','') = REGEXP_REPLACE(COALESCE(c.caller_number,c.lead_name,''),'[^0-9]',''))`, [orgId, rowId, nowIso, nowIso]);
+      AND NOT EXISTS (
+        SELECT 1 FROM (
+          SELECT newer.id
+          FROM call_logs AS newer
+          WHERE newer.org_id = c.org_id
+            AND newer.id <> c.id
+            AND newer.created_at > c.created_at
+            AND REGEXP_REPLACE(COALESCE(newer.caller_number, newer.lead_name, ''), '[^0-9]', '')
+              = REGEXP_REPLACE(COALESCE(c.caller_number, c.lead_name, ''), '[^0-9]', '')
+        ) AS newer_call_for_same_number
+      )`, [orgId, rowId, nowIso, nowIso]);
     // Compare-and-set semantics: exactly one worker can transition pending -> retrying.
     if (Number(updateResult.affectedRows || updateResult.rowCount || 0) !== 1) return null;
     const { rows } = await client.query(`SELECT * FROM call_logs WHERE id = $1 AND org_id = $2 AND retry_status = 'retrying'`, [rowId, orgId]);
