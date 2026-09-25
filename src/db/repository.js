@@ -17,6 +17,11 @@
 
 const supabase = require("./client");
 const industryPacks = require("../seed/industryPacks");
+const {
+  SCHEDULE_STATUS_RANK,
+  pendingScheduleRowsConflict,
+  dedupePendingScheduleRows,
+} = require("../crm/postCallScheduleDedupe");
 const { getLogger } = require("../observability/logger");
 const organizationRepository = require("./repositories/organizationRepository");
 const aiUsageRepository = require("./repositories/aiUsageRepository");
@@ -1074,6 +1079,37 @@ async function getCallsDueForRetry() {
   return (data || []).map((row) => ({ ...fromDbRow("calllogs", row), orgId: row.org_id }));
 }
 
+const PENDING_SCHEDULE_STATUSES = ["Callback Scheduled", "No Answer", "Answering Machine"];
+
+// When a call is finalized, retire other pending retry rows for the same
+// provider call / lead so Scheduled Callbacks never shows callback + no-answer twice.
+async function supersedeConflictingPendingCallLogs(orgId, keepRow) {
+  if (!orgId || !keepRow?.id) return;
+  const { data, error } = await supabase
+    .from("call_logs")
+    .select("*")
+    .eq("org_id", orgId)
+    .in("status", PENDING_SCHEDULE_STATUSES)
+    .eq("retry_status", "pending");
+  if (error) throw new Error(`[db.supersedeConflictingPendingCallLogs] ${error.message}`);
+
+  const keepRank = SCHEDULE_STATUS_RANK[keepRow.status] || 0;
+  for (const raw of data || []) {
+    const row = fromDbRow("calllogs", raw);
+    if (row.id === keepRow.id) continue;
+    if (!pendingScheduleRowsConflict(keepRow, row)) continue;
+    const rowRank = SCHEDULE_STATUS_RANK[row.status] || 0;
+    if (keepRank < rowRank) continue;
+    await patch("calllogs", orgId, row.id, {
+      retryStatus: "exhausted",
+      nextRetryAt: null,
+    });
+    log.info(
+      `♻️ Superseded duplicate pending schedule row ${row.id} (${row.status}) in favor of ${keepRow.id} (${keepRow.status})`
+    );
+  }
+}
+
 // Every call currently sitting in "Callback Scheduled", "No Answer", or
 // "Answering Machine" for this org, still pending an automatic redial —
 // not just the ones due right now (getCallsDueForRetry above), the whole
@@ -1094,7 +1130,7 @@ async function getScheduledCallbacks(orgId) {
     .eq("retry_status", "pending")
     .order("next_retry_at", { ascending: true });
   if (error) throw new Error(`[db.getScheduledCallbacks] ${error.message}`);
-  const rows = (data || []).map((row) => fromDbRow("calllogs", row));
+  const rows = dedupePendingScheduleRows((data || []).map((row) => fromDbRow("calllogs", row)));
 
   const taskIds = [...new Set(rows.map((r) => r.retryContext?.taskId).filter(Boolean))];
   let tasksById = {};
@@ -1923,6 +1959,7 @@ module.exports = {
   claimCallForRetry,
   recoverStaleRetryClaims,
   getScheduledCallbacks,
+  supersedeConflictingPendingCallLogs,
   getPendingRetriesForScheduler,
   getRetryStatusForOrg,
   hasNewerCallForPhone,

@@ -25,7 +25,7 @@ const { getLogger } = require("../../observability/logger");
 const log = getLogger("ai.postCallAgents");
 
 const MODEL = "gemini-2.5-flash-lite";
-const POST_CALL_PIPELINE_VERSION = "2026-09-25.13";
+const POST_CALL_PIPELINE_VERSION = "2026-09-25.14";
 
 // Both LangChain client classes throw in their CONSTRUCTOR when no
 // credentials are configured (unlike @google/genai's client, which only

@@ -99,6 +99,12 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
         if (finalized) return; // finalizeCall() already handled this call for real
         if (!hangupOrgId) return; // not one of ours, or its cache entry expired
 
+        const existingLog = await db.findCallLogByProviderCallSid(hangupOrgId, CallUUID);
+        if (existingLog) {
+          log.info(`⏭️ Vobiz Hangup fallback skipped — call log already exists for CallUUID ${CallUUID}`);
+          return;
+        }
+
         const orgId = hangupOrgId;
         const calleeNumber = vobizCallCallee.get(CallUUID) || To;
         const attemptNumber = vobizCallAttemptNumber.get(CallUUID) || 1;

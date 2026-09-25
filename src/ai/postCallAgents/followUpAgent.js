@@ -186,13 +186,19 @@ async function extractFollowUp(
 
   const callbackRequested = !!callbackTime && callbackIntent && callerSpoke;
 
+  let enquiryRequested = !!result.enquiryRequested && !!result.enquirySummary;
+  if (callbackRequested || !callerSpoke) {
+    enquiryRequested = false;
+    result.enquirySummary = null;
+  }
+
   return {
     callbackRequested,
     callbackTimeMentioned,
     callbackTime,
     callbackUsedPolicyFallback,
-    enquiryRequested: !!result.enquiryRequested,
-    enquirySummary: result.enquirySummary || null,
+    enquiryRequested,
+    enquirySummary: enquiryRequested ? result.enquirySummary || null : null,
     callerName: result.callerName || null,
   };
 }

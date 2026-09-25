@@ -28,6 +28,8 @@ const geminiUsageTracker = require("../ai/geminiUsageTracker");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("telephony.callFinalizer");
 
+const PENDING_SCHEDULE_STATUSES = ["Callback Scheduled", "No Answer", "Answering Machine"];
+
 // Uploads a call's recording and returns its public URL (or null on failure/
 // not configured). Deliberately NOT part of finalizeCallRecord below: the
 // post-call pipeline now runs through a retryable job queue (see
@@ -73,10 +75,14 @@ function resolvePostCallOutcome({
   const callbackExhausted = requestedCallback && attemptNumber >= maxAttempts;
   const callbackRequested = requestedCallback && !callbackExhausted;
 
-  // Enquiries are independent from callbacks. A caller can legitimately be
-  // busy AND ask an unresolved question during the same call, so callback
-  // must no longer suppress a genuine enquiry.
-  const enquiryRequested = !isMachineDetected && !!decision.enquiryRequested && !!decision.enquirySummary;
+  // Enquiries and retry-queue outcomes are mutually exclusive: a call waiting
+  // for callback or no-answer redial must not also create an enquiry row.
+  const enquiryRequested =
+    !isMachineDetected &&
+    callAnswered &&
+    !callbackRequested &&
+    !!decision.enquiryRequested &&
+    !!decision.enquirySummary;
 
   let finalStatus = "Completed";
   let retryFieldsToSave = {};
@@ -595,9 +601,15 @@ async function finalizeCallRecord({
   // This is intentionally evaluated only after the post-call Scheduling &
   // Enquiry Agent has finished: a busy callback or unresolved enquiry is not
   // treated as a fully-qualified lead yet.
+  const retryQueued =
+    finalStatus === "Callback Scheduled" ||
+    finalStatus === "No Answer" ||
+    finalStatus === "Answering Machine";
+
   const positiveLeadCandidate =
     sentiment === "Positive" &&
     callAnswered &&
+    !retryQueued &&
     !enquiryRequested &&
     !callbackTimeToStore &&
     workflowValidation.complete;
@@ -710,6 +722,9 @@ async function finalizeCallRecord({
       `[${provider}] calllogs insert for call ${callId}`
     );
     log.info(`📼 [${provider}] Call logged: ${callerNumber} (${durationSeconds}s, ${sentiment})`);
+    if (savedLog && PENDING_SCHEDULE_STATUSES.includes(finalStatus)) {
+      await db.supersedeConflictingPendingCallLogs(orgId, savedLog);
+    }
   } catch (err) {
     const duplicate = /duplicate entry|duplicate key|unique constraint|already exists/i.test(err.message || "");
     if (duplicate) {
