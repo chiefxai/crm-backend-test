@@ -99,14 +99,27 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
         if (finalized) return; // finalizeCall() already handled this call for real
         if (!hangupOrgId) return; // not one of ours, or its cache entry expired
 
-        const existingLog = await db.findCallLogByProviderCallSid(hangupOrgId, CallUUID);
-        if (existingLog) {
-          log.info(`⏭️ Vobiz Hangup fallback skipped — call log already exists for CallUUID ${CallUUID}`);
-          return;
+        const orgId = hangupOrgId;
+        const internalCallId = vobizCallUuidToInternalId.get(CallUUID);
+        const calleeForCheck = vobizCallCallee.get(CallUUID) || To;
+
+        // Post-call finalizeCall() enqueues async work — the call_logs row may
+        // not exist yet when Hangup arrives. Poll before writing a synthetic
+        // No Answer row that would duplicate a Callback Scheduled entry.
+        const waitUntil = Date.now() + Number(process.env.VOBIZ_HANGUP_FALLBACK_WAIT_MS || 15000);
+        while (Date.now() < waitUntil) {
+          if (await db.findCallLogByProviderCallSid(orgId, CallUUID)) {
+            log.info(`⏭️ Vobiz Hangup fallback skipped — call log exists for CallUUID ${CallUUID}`);
+            return;
+          }
+          if (internalCallId && await db.getCallLogById(orgId, internalCallId)) {
+            log.info(`⏭️ Vobiz Hangup fallback skipped — call log exists for internal id ${internalCallId}`);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
         }
 
-        const orgId = hangupOrgId;
-        const calleeNumber = vobizCallCallee.get(CallUUID) || To;
+        const calleeNumber = calleeForCheck;
         const attemptNumber = vobizCallAttemptNumber.get(CallUUID) || 1;
         const retryContext = vobizCallRetryContext.get(CallUUID) || null;
         const isMachineDetected = vobizMachineDetectedCalls.has(CallUUID);

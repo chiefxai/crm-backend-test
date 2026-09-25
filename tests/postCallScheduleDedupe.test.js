@@ -22,4 +22,27 @@ describe("postCallScheduleDedupe", () => {
     expect(rows[0].id).toBe("b");
     expect(rows[0].status).toBe("Callback Scheduled");
   });
+
+  test("collapses callback and no-answer duplicates that only share the same phone", () => {
+    const rows = dedupePendingScheduleRows([
+      {
+        id: "fallback",
+        status: "No Answer",
+        providerCallSid: "vobiz-uuid",
+        callerNumber: "+919876543210",
+        retryContext: {},
+        createdAt: "2026-09-25T10:00:00.000Z",
+      },
+      {
+        id: "real",
+        status: "Callback Scheduled",
+        providerCallSid: "call_vobiz_internal_1",
+        callerNumber: "+919876543210",
+        retryContext: { taskId: "T-1", leadId: "L-1" },
+        createdAt: "2026-09-25T10:00:02.000Z",
+      },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe("real");
+  });
 });

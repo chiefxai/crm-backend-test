@@ -13,11 +13,12 @@ function phoneDedupeKey(callerNumber) {
 }
 
 function scheduleDedupeKey(row) {
-  if (row?.providerCallSid) return `sid:${row.providerCallSid}`;
+  // One pending redial per dialed number — duplicate rows from the hangup
+  // fallback race (No Answer) vs post-call finalize (Callback Scheduled)
+  // often share a phone but differ in providerCallSid / retryContext.
   const phone = phoneDedupeKey(row?.callerNumber);
-  const leadId = row?.retryContext?.leadId || "";
-  const taskId = row?.retryContext?.taskId || "";
-  if (phone) return `phone:${phone}:${taskId}:${leadId}`;
+  if (phone) return `phone:${phone}`;
+  if (row?.providerCallSid) return `sid:${row.providerCallSid}`;
   return `id:${row?.id}`;
 }
 
@@ -26,10 +27,8 @@ function pendingScheduleRowsConflict(a, b) {
   if (a.providerCallSid && b.providerCallSid && a.providerCallSid === b.providerCallSid) return true;
   const pa = phoneDedupeKey(a.callerNumber);
   const pb = phoneDedupeKey(b.callerNumber);
-  if (!pa || pa !== pb) return false;
-  const sameLead = String(a.retryContext?.leadId || "") === String(b.retryContext?.leadId || "");
-  const sameTask = String(a.retryContext?.taskId || "") === String(b.retryContext?.taskId || "");
-  return sameLead && sameTask;
+  if (pa && pb && pa === pb) return true;
+  return false;
 }
 
 function dedupePendingScheduleRows(rows) {
@@ -49,23 +48,7 @@ function dedupePendingScheduleRows(rows) {
       byKey.set(key, row);
     }
   }
-  const merged = Array.from(byKey.values());
-  const winners = [];
-  for (const row of merged) {
-    const conflictIdx = winners.findIndex((w) => pendingScheduleRowsConflict(w, row));
-    if (conflictIdx === -1) {
-      winners.push(row);
-      continue;
-    }
-    const existing = winners[conflictIdx];
-    const rankNew = SCHEDULE_STATUS_RANK[row.status] || 0;
-    const rankOld = SCHEDULE_STATUS_RANK[existing.status] || 0;
-    if (rankNew > rankOld) winners[conflictIdx] = row;
-    else if (rankNew === rankOld && String(row.createdAt || "") > String(existing.createdAt || "")) {
-      winners[conflictIdx] = row;
-    }
-  }
-  return winners;
+  return Array.from(byKey.values());
 }
 
 module.exports = {

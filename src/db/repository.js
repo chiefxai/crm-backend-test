@@ -1141,7 +1141,9 @@ async function getScheduledCallbacks(orgId) {
     .eq("retry_status", "pending")
     .order("next_retry_at", { ascending: true });
   if (error) throw new Error(`[db.getScheduledCallbacks] ${error.message}`);
-  const rows = dedupePendingScheduleRows((data || []).map((row) => fromDbRow("calllogs", row)));
+  const allRows = (data || []).map((row) => fromDbRow("calllogs", row));
+  const rows = dedupePendingScheduleRows(allRows);
+  await reconcilePendingScheduleDuplicates(orgId, allRows, rows);
 
   const taskIds = [...new Set(rows.map((r) => r.retryContext?.taskId).filter(Boolean))];
   let tasksById = {};
@@ -1265,6 +1267,32 @@ async function findCallLogByProviderCallSid(orgId, providerCallSid) {
     .limit(1);
   if (error) throw new Error(`[db.findCallLogByProviderCallSid] ${error.message}`);
   return (data && data[0]) ? fromDbRow("calllogs", data[0]) : null;
+}
+
+async function getCallLogById(orgId, callId) {
+  if (!orgId || !callId) return null;
+  const { data, error } = await supabase
+    .from("call_logs")
+    .select("*")
+    .eq("org_id", orgId)
+    .eq("id", callId)
+    .limit(1);
+  if (error) throw new Error(`[db.getCallLogById] ${error.message}`);
+  return (data && data[0]) ? fromDbRow("calllogs", data[0]) : null;
+}
+
+async function reconcilePendingScheduleDuplicates(orgId, allRows, winners) {
+  if (!orgId || !Array.isArray(allRows) || !Array.isArray(winners)) return;
+  const winnerIds = new Set(winners.map((row) => row.id));
+  for (const row of allRows) {
+    if (winnerIds.has(row.id)) continue;
+    if (!winners.some((winner) => pendingScheduleRowsConflict(winner, row))) continue;
+    await patch("calllogs", orgId, row.id, {
+      retryStatus: "exhausted",
+      nextRetryAt: null,
+    });
+    log.info(`♻️ Retired duplicate pending schedule row ${row.id} (${row.status}) during scheduled-callbacks read`);
+  }
 }
 
 // Resolve which org owns a virtual number, so inbound call webhooks (which
@@ -1978,6 +2006,7 @@ module.exports = {
   getLeadById,
   getTeamMemberById,
   findCallLogByProviderCallSid,
+  getCallLogById,
   getAiSessionUsage,
   getAiUsageSummary,
   getAiUsageByAdmin,
