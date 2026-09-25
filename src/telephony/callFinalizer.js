@@ -21,6 +21,7 @@
 const db = require("../db/repository");
 const objectsEngine = require("../crm/objectsEngine");
 const postCallAgents = require("../ai/postCallAgents");
+const { isMeaningfulCallerUtterance } = require("../ai/postCallAgents/decisionEngine");
 const { validateWorkflowAnswers } = require("../ai/postCallAgents/workflowAnswersAgent");
 const storage = require("../storage");
 const geminiUsageTracker = require("../ai/geminiUsageTracker");
@@ -63,6 +64,7 @@ function resolvePostCallOutcome({
   callAnswered = true,
   direction = "unknown",
   callerNumber = null,
+  transcript = "",
 }) {
   const decision = scheduling || {};
   const maxAttempts = db.MAX_RETRY_ATTEMPTS || 3;
@@ -111,7 +113,7 @@ function resolvePostCallOutcome({
     callAnswered,
     enquiryRequested,
     callbackRequested,
-    transcript: ""
+    transcript,
   });
   return {
     finalStatus,
@@ -122,9 +124,11 @@ function resolvePostCallOutcome({
     enquiryStatus: enquiryRequested ? "open" : "none",
     callbackTimeToStore: callbackRequested ? usableCallbackTime(decision.callbackTime) : null,
     callbackReasonToStore: callbackRequested
-      ? (decision.callbackTimeMentioned
-        ? "Caller requested a callback at a specific time."
-        : "Caller requested a callback; scheduled using the configured callback policy.")
+      ? (decision.callbackUsedPolicyFallback
+        ? "Caller requested a callback; scheduled using the configured callback policy."
+        : decision.callbackTimeMentioned
+          ? "Caller requested a callback at a specific time."
+          : "Callback scheduled from the call transcript.")
       : null,
     enquirySummary: enquiryRequested ? decision.enquirySummary : null,
     callerName: decision.callerName || null,
@@ -365,7 +369,7 @@ async function finalizeCallRecord({
   // kept out of the conversational callback/enquiry pipeline so no-answer
   // and machine outcomes remain separate.
   const callerWordCount = mergedTranscriptLines
-    .filter(l => l.role === "user")
+    .filter((l) => l.role === "user" && isMeaningfulCallerUtterance(l.text))
     .reduce((sum, l) => sum + l.text.trim().split(/\s+/).filter(Boolean).length, 0);
   const callAnswered = !isMachineDetected && callerWordCount > 0;
 
@@ -484,6 +488,8 @@ async function finalizeCallRecord({
               sentiment,
               summary: "(Independent transcript-first decision; do not infer actions from summary.)",
               callAnswered,
+              retryPolicy: retryContext?.retryPolicy,
+              attemptNumber,
             }
           );
           log.info(`📅 [${provider}] Scheduling agent completed in ${Date.now() - startedAt}ms`);
@@ -536,6 +542,7 @@ async function finalizeCallRecord({
     callbackRequested: false,
     callbackTimeMentioned: false,
     callbackTime: null,
+    callbackUsedPolicyFallback: false,
     enquiryRequested: false,
     enquirySummary: null,
     callerName: null,
@@ -553,6 +560,7 @@ async function finalizeCallRecord({
     callAnswered,
     direction,
     callerNumber,
+    transcript: fullTranscript,
   });
 
   const conversationOutcome = resolveConversationOutcome({

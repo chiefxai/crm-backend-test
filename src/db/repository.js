@@ -1103,6 +1103,9 @@ async function getScheduledCallbacks(orgId) {
     tasksById = Object.fromEntries(tasks.filter((t) => taskIds.includes(t.id)).map((t) => [t.id, t]));
   }
 
+  const { getCallerTimezone } = require("../lib/callerTimezone");
+  const { formatInstantInTimezone } = require("../lib/timezoneConvert");
+
   return rows.map((row) => {
     const task = row.retryContext?.taskId ? tasksById[row.retryContext.taskId] : null;
     const kind = row.status === "Callback Scheduled" ? "callback" : "not_answered";
@@ -1111,10 +1114,16 @@ async function getScheduledCallbacks(orgId) {
       : row.status === "Answering Machine"
         ? "Reached voicemail / an answering machine — no live conversation."
         : "Call went unanswered.";
+    const callerTimezone = getCallerTimezone(row.callerNumber);
+    const scheduleIso = row.callbackTime || row.nextRetryAt;
     return {
       ...row,
       kind,
       reason,
+      callerTimezone,
+      callbackTimeLocalLabel: formatInstantInTimezone(row.callbackTime || row.nextRetryAt, callerTimezone),
+      nextRetryAtLocalLabel: formatInstantInTimezone(row.nextRetryAt, callerTimezone),
+      scheduleLocalLabel: formatInstantInTimezone(scheduleIso, callerTimezone),
       // `task.workflowName` doesn't exist — dialer_tasks only has `name`
       // (this campaign/task's own name) and `workflow_id` (a reference
       // into question_flows, not a denormalized name column). Was always

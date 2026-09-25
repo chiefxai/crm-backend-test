@@ -62,4 +62,19 @@ function zonedTimeToUtc(localDateTimeStr, timeZone) {
   return new Date(asIfUtc.getTime() + offsetMs);
 }
 
-module.exports = { nowInTimezone, zonedTimeToUtc };
+function formatInstantInTimezone(iso, timeZone) {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    return new Intl.DateTimeFormat("en-IN", {
+      timeZone,
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(date);
+  } catch (_) {
+    return date.toISOString();
+  }
+}
+
+module.exports = { nowInTimezone, zonedTimeToUtc, formatInstantInTimezone };

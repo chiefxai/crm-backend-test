@@ -95,6 +95,7 @@ function appendCallLog(callId, entry) {
 // ── Clients ───────────────────────────────────────────────────
 const genai = require("../ai/googleAiClient");
 const postCallAgents = require("../ai/postCallAgents");
+const { isMeaningfulCallerUtterance } = require("../ai/postCallAgents/decisionEngine");
 const questionnaire = require("./questionnaire");
 const callFinalizer = require("./callFinalizer");
 
@@ -1978,7 +1979,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
 
         // Transcripts
         if (response.serverContent?.inputTranscription?.text) {
-          const text = response.serverContent.inputTranscription.text;
+          const text = response.serverContent.inputTranscription.text.trim();
+          if (!isMeaningfulCallerUtterance(text)) {
+            log.debug(`Skipping non-speech caller transcription [${callId}]: "${text}"`);
+          } else {
           lastCallerSpeechAt = Date.now();
           awaitingFirstAgentChunk = true;
 
@@ -2030,6 +2034,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               if (result.shouldSendWhatsApp) { contactState.whatsAppPending = true; }
             })
             .catch(err => log.warn("⚠️ Contact extractor error:", err.message));
+          }
         }
         if (response.serverContent?.outputTranscription?.text) {
           const text = response.serverContent.outputTranscription.text;
@@ -2231,7 +2236,7 @@ async function processPostCallData({
   // Busy/no-real-conversation calls intentionally remain null.
   const mergedForSentiment = callFinalizer.mergeTranscriptLines(transcriptLines);
   const callerWordCount = mergedForSentiment
-    .filter((line) => line.role === "user")
+    .filter((line) => line.role === "user" && isMeaningfulCallerUtterance(line.text))
     .reduce((sum, line) => sum + line.text.trim().split(/\s+/).filter(Boolean).length, 0);
   const callAnswered = !isMachineDetected && callerWordCount > 0;
 
