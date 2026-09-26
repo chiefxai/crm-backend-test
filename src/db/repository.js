@@ -1127,7 +1127,7 @@ async function supersedeConflictingPendingCallLogs(orgId, keepRow) {
 // queue so it's visible ahead of time. Enriched with the originating
 // dialer task's workflow name/questions where one exists
 // (retryContext.taskId; absent for inbound calls, which have no dialer
-// task/workflow at all). Powers the Scheduled Callbacks tab: a caller who
+// task/campaign at all). Powers the Scheduled Callbacks tab: a caller who
 // explicitly asked for a callback is shown with a reason (why); a call
 // nobody picked up for is shown too — "kind" distinguishes the two so the
 // frontend can chip them "Callback" vs "Not Answered" instead of lumping
@@ -1173,13 +1173,14 @@ async function getScheduledCallbacks(orgId) {
       callbackTimeLocalLabel: formatInstantInTimezone(row.callbackTime || row.nextRetryAt, callerTimezone),
       nextRetryAtLocalLabel: formatInstantInTimezone(row.nextRetryAt, callerTimezone),
       scheduleLocalLabel: formatInstantInTimezone(scheduleIso, callerTimezone),
-      // `task.workflowName` doesn't exist — dialer_tasks only has `name`
-      // (this campaign/task's own name) and `workflow_id` (a reference
-      // into question_flows, not a denormalized name column). Was always
-      // reading undefined here, so this column silently showed nothing
-      // for every scheduled callback regardless of whether the original
-      // call actually belonged to a real task/workflow.
+      // Link retries to the dialer task (campaign) that placed the original
+      // call — not question_flows/workflow_id alone, since the same workflow
+      // can be reused across multiple campaigns created at different times.
+      campaignId: task?.id || row.retryContext?.taskId || null,
+      campaignName: task?.name || null,
+      // Back-compat for older clients that still read workflowName.
       workflowName: task?.name || null,
+      campaignQuestions: task?.questions || row.retryContext?.questions || [],
       workflowQuestions: task?.questions || row.retryContext?.questions || [],
     };
   });
