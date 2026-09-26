@@ -236,6 +236,8 @@ const vobizCallAgentId = new Map();
 // still-correct behavior) when nothing was pre-warmed — e.g. inbound calls,
 // which can't be pre-warmed since the org isn't known until the call rings.
 const vobizPrewarmedSetup = new Map();
+// Resolves as soon as opening greeting PCM is ready (before full prompt/KB prewarm finishes).
+const vobizPrewarmedOpening = new Map();
 // Outbound calls know the organization before the callee answers. Warm the
 // tenant-scoped GoogleGenAI client during ringing so answer-time startup does
 // not spend the first part of the caller's conversation resolving project
@@ -299,6 +301,7 @@ function aliasVobizCallState(ids) {
   copyMapAcrossIds(vobizCallCallee, all);
   copyMapAcrossIds(vobizCallUuidToInternalId, all);
   copyMapAcrossIds(vobizPrewarmedSetup, all);
+  copyMapAcrossIds(vobizPrewarmedOpening, all);
   copyMapAcrossIds(vobizPrewarmedClients, all);
   copySetAcrossIds(vobizMachineDetectedCalls, all);
   return all;
@@ -343,7 +346,10 @@ setInterval(() => {
   // Belt-and-suspenders cleanup in case a call's own TTL cleanup (set where
   // each entry is created) never runs — mirrors the 30-minute horizon used
   // by every other vobizCall* cache in this file.
-  if (vobizPrewarmedSetup.size > 500) vobizPrewarmedSetup.clear();
+  if (vobizPrewarmedSetup.size > 500) {
+    vobizPrewarmedSetup.clear();
+    vobizPrewarmedOpening.clear();
+  }
 }, 1800000).unref();
 
 // Extracted from the "start" handler's inline lookups so the exact same
@@ -351,7 +357,8 @@ setInterval(() => {
 // pre-answer during ringing (outbound pre-warm) — see vobizPrewarmedSetup.
 // Behavior is unchanged from the original inline version; only the call
 // site moved.
-async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone, direction, explicitAgentId, genericFallbackQuestions) {
+async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone, direction, explicitAgentId, genericFallbackQuestions, options = {}) {
+  const skipInlineKnowledge = options.skipInlineKnowledge === true;
   let customObjects = [];
   let orgHasKnowledgeBase = false;
   let kbMode = "all";
@@ -436,13 +443,23 @@ async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone,
   kbMode = effectiveConfig.knowledgeBaseMode ?? "all";
   kbDocumentIds = kbMode === "specific" ? (effectiveConfig.knowledgeBaseDocumentIds || []) : null;
   let inlineKnowledge = null;
-  try {
-    orgHasKnowledgeBase = kbMode !== "none" && await knowledgeBase.hasContent(resolvedOrgId, kbDocumentIds);
-    if (orgHasKnowledgeBase && knowledgeBaseSearchEnabled) {
-      inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds).catch(() => null);
+  if (!skipInlineKnowledge) {
+    try {
+      orgHasKnowledgeBase = kbMode !== "none" && await knowledgeBase.hasContent(resolvedOrgId, kbDocumentIds);
+      if (orgHasKnowledgeBase && knowledgeBaseSearchEnabled) {
+        inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds).catch(() => null);
+      }
+    } catch (err) {
+      log.error("❌ Failed to check knowledge base for Vobiz call org:", err.message);
     }
-  } catch (err) {
-    log.error("❌ Failed to check knowledge base for Vobiz call org:", err.message);
+  } else {
+    // Defer getAllContent to buildVobizSessionPrompt so opening TTS can start during ring.
+    inlineKnowledge = undefined;
+    try {
+      orgHasKnowledgeBase = kbMode !== "none" && await knowledgeBase.hasContent(resolvedOrgId, kbDocumentIds);
+    } catch (err) {
+      log.error("❌ Failed to check knowledge base for Vobiz call org:", err.message);
+    }
   }
 
   return { customObjects, orgHasKnowledgeBase, kbMode, kbDocumentIds, companyInfoPrompt, knowledgeBaseSearchEnabled, questionsList, orgName: resolvedOrgName, callerContactName: knownContactName, activeConfig: resolvedConfig, voiceName: resolvedVoiceName, inlineKnowledge };
@@ -614,7 +631,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   });
   for (const id of callSids) rememberMap(vobizPrewarmedClients, id, prewarmedClientPromise);
 
-  const prewarmPromise = runOutboundPrewarm({
+  const { openingPromise, prewarmPromise } = runOutboundPrewarm({
     orgId,
     phoneNumber,
     agentId: agentId || null,
@@ -623,12 +640,20 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     taskId,
     resolveVobizCallSetup,
     genericFallbackQuestions: undefined,
-  }).catch((err) => {
+  });
+  const settledOpening = openingPromise.catch((err) => {
+    log.error("❌ Vobiz opening pre-warm failed:", err.message);
+    return null;
+  });
+  const settledPrewarm = prewarmPromise.catch((err) => {
     log.error("❌ Vobiz pre-warm failed, will retry post-answer:", err.message);
     vobizPrewarmedSetup.delete(callSid);
     return null;
   });
-  for (const id of callSids) rememberMap(vobizPrewarmedSetup, id, prewarmPromise);
+  for (const id of callSids) {
+    rememberMap(vobizPrewarmedOpening, id, settledOpening);
+    rememberMap(vobizPrewarmedSetup, id, settledPrewarm);
+  }
 
   return { success: true, callSid, callSids };
 }
@@ -879,19 +904,58 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
           if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
 
-          // Outbound calls have their org/agent/questionnaire/KB lookups
-          // already kicked off (and often already finished) back when the
-          // call was placed — see vobizPrewarmedSetup / triggerVobizOutboundCall.
-          // Reuse that instead of repeating the same lookups from scratch now
-          // that the callee has already answered. Inbound calls (org unknown
-          // until the call rings) and any outbound call whose pre-warm never
-          // registered/expired/failed fall through to the original on-demand
-          // lookup, unchanged.
+          const outboundDirection = (vobizCallDirection.get(callId) || "unknown") === "outbound";
           const hadPrewarmMapEntry = vobizPrewarmedSetup.has(callId);
-          const prewarmPayload = hadPrewarmMapEntry ? await vobizPrewarmedSetup.get(callId) : null;
+          const hadOpeningMapEntry = vobizPrewarmedOpening.has(callId);
+          const prewarmInflight = hadPrewarmMapEntry ? vobizPrewarmedSetup.get(callId) : null;
+          const openingInflight = hadOpeningMapEntry ? vobizPrewarmedOpening.get(callId) : null;
           vobizPrewarmedSetup.delete(callId);
-          if (!prewarmPayload) {
+          vobizPrewarmedOpening.delete(callId);
+
+          // Start the outbound audio pacer immediately — do not block first speech on
+          // full KB/prompt prewarm (that path can take several seconds).
+          answerAtMs = Date.now();
+          outboundAudioPlayer = createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
+          callLatencyMetrics = {
+            callId,
+            providerCallId: callId,
+            answerAt: answerAtMs,
+            prewarmHit: false,
+            geminiConnectStart: null,
+            geminiConnectComplete: null,
+            setupComplete: null,
+          };
+
+          const playPreparedOpeningPcm = (audio, text, { prewarmHit = false } = {}) => {
+            if (!audio?.length || preparedOpeningPlayed) return;
+            preparedOpeningPlayed = true;
+            preparedOpeningText = text || "";
+            outboundAudioPlayer.enqueuePcm(audio, { fastStart: true });
+            writeRecording(audio);
+            if (preparedOpeningText) transcriptLines.push({ role: "ai", text: preparedOpeningText });
+            callLatencyMetrics.greetingPlaybackStart = Date.now();
+            callLatencyMetrics.answer_to_greeting_play_ms = callLatencyMetrics.greetingPlaybackStart - answerAtMs;
+            log.info(`👋 Playing prepared opening greeting (${audio.length}B PCM, prewarmHit=${prewarmHit})`);
+            logGreetingLatency(callId, callLatencyMetrics);
+          };
+
+          if (outboundDirection && openingInflight) {
+            openingInflight
+              .then((opening) => {
+                if (!isActive || !opening?.openingGreetingAudio?.length) return;
+                playPreparedOpeningPcm(opening.openingGreetingAudio, opening.openingGreetingText, { prewarmHit: true });
+              })
+              .catch(() => {});
+          }
+
+          void (async () => {
+          const prewarmPayload = prewarmInflight ? await prewarmInflight : null;
+          if (hadPrewarmMapEntry && !prewarmPayload) {
             log.info(`PREWARM_MISS callId=${callId}`);
+          }
+          if (prewarmPayload?.metrics) {
+            Object.assign(callLatencyMetrics, prewarmPayload.metrics);
+            callLatencyMetrics.prewarmHit = Boolean(prewarmPayload.finalPrompt);
           }
 
           const setup = prewarmPayload?.setup || prewarmPayload || (resolvedOrgId
@@ -906,19 +970,6 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             voiceName = setup.voiceName || voiceName;
           }
           kbDocumentIds = setup.kbDocumentIds;
-
-          answerAtMs = Date.now();
-          outboundAudioPlayer = createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
-          callLatencyMetrics = {
-            callId,
-            providerCallId: callId,
-            answerAt: answerAtMs,
-            prewarmHit: Boolean(prewarmPayload?.finalPrompt),
-            geminiConnectStart: null,
-            geminiConnectComplete: null,
-            setupComplete: null,
-            ...(prewarmPayload?.metrics || {}),
-          };
 
           if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
             log.info(`ℹ️ Using dynamic campaign questions for Vobiz call:`, customQuestions);
@@ -951,20 +1002,6 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             log.info(`⏱️ Vobiz prompt built on answer — ${finalPrompt.length} chars (KB inline ${promptBundle.kbInlineLength || 0})`);
           }
 
-          const playPreparedOpeningPcm = (audio, text) => {
-            if (!audio?.length || preparedOpeningPlayed) return;
-            preparedOpeningPlayed = true;
-            preparedOpeningText = text || "";
-            outboundAudioPlayer.enqueuePcm(audio, { fastStart: true });
-            writeRecording(audio);
-            if (preparedOpeningText) transcriptLines.push({ role: "ai", text: preparedOpeningText });
-            callLatencyMetrics.greetingPlaybackStart = Date.now();
-            callLatencyMetrics.answer_to_greeting_play_ms = callLatencyMetrics.greetingPlaybackStart - answerAtMs;
-            log.info(`👋 Playing prepared opening greeting (${audio.length}B PCM, prewarmHit=${Boolean(prewarmPayload?.finalPrompt)})`);
-            logGreetingLatency(callId, callLatencyMetrics);
-          };
-
-          const outboundDirection = (vobizCallDirection.get(callId) || "unknown") === "outbound";
           const openingGreetingTextAtAnswer = prewarmPayload?.openingGreetingText
             || (outboundDirection
               ? buildOpeningGreetingText({
@@ -977,9 +1014,9 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               })
               : null);
 
-          if (prewarmPayload?.openingGreetingAudio?.length) {
-            playPreparedOpeningPcm(prewarmPayload.openingGreetingAudio, openingGreetingTextAtAnswer);
-          } else if (outboundDirection && openingGreetingTextAtAnswer && voiceName && resolvedOrgId) {
+          if (!preparedOpeningPlayed && prewarmPayload?.openingGreetingAudio?.length) {
+            playPreparedOpeningPcm(prewarmPayload.openingGreetingAudio, openingGreetingTextAtAnswer, { prewarmHit: Boolean(prewarmPayload.finalPrompt) });
+          } else if (outboundDirection && !preparedOpeningPlayed && openingGreetingTextAtAnswer && voiceName && resolvedOrgId) {
             const ttsMissReason = prewarmPayload?.metrics?.greetingError || (prewarmPayload ? "no_audio" : "prewarm_miss");
             log.info(`⏱️ Generating opening greeting TTS at answer (reason=${ttsMissReason})`);
             generateOpeningAudio({
@@ -995,12 +1032,14 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             })
               .then((audio) => {
                 if (!isActive || !audio?.length) return;
-                playPreparedOpeningPcm(audio, openingGreetingTextAtAnswer);
+                playPreparedOpeningPcm(audio, openingGreetingTextAtAnswer, { prewarmHit: Boolean(prewarmPayload?.finalPrompt) });
               })
               .catch((err) => {
                 log.warn(`⚠️ Answer-time opening TTS failed, will use Live greeting: ${err.message}`);
               });
           }
+
+          if (!isActive) return;
 
           // Connect to Gemini asynchronously in the background. Wrapped in a
           // named function (instead of one inline call) so an abnormal
@@ -1097,6 +1136,9 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           });
           };
           connectGemini(null);
+          })().catch((err) => {
+            log.error(`❌ Vobiz post-start setup failed for ${generatedCallId}:`, err.message);
+          });
 
           break;
 

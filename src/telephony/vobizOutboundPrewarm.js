@@ -72,10 +72,11 @@ async function generateOpeningAudio({
 }
 
 /**
- * Full outbound prewarm during ringing: setup, full prompt, opening greeting TTS.
- * resolveVobizCallSetup must be passed in to avoid circular imports with vobizProxy.
+ * Full outbound prewarm during ringing. Returns two promises:
+ * - openingPromise: resolves when opening PCM is ready (fast path — no KB load)
+ * - prewarmPromise: resolves when full prompt + setup are ready for Gemini Live
  */
-async function runOutboundPrewarm({
+function runOutboundPrewarm({
   orgId,
   phoneNumber,
   agentId,
@@ -99,38 +100,35 @@ async function runOutboundPrewarm({
     greetingError: null,
   };
 
-  const [setup, campaignLabel] = await Promise.all([
-    resolveVobizCallSetup(orgId, phoneNumber, null, "outbound", agentId || null, genericFallbackQuestions),
-    loadCampaignLabel(orgId, taskId),
-  ]);
-
-  const callerContactName = setup.callerContactName || null;
-  const orgName = setup.orgName || "our team";
-  const activeConfig = setup.activeConfig;
-  const voiceName = setup.voiceName;
-
-  const openingGreetingText = buildOpeningGreetingText({
-    direction: "outbound",
-    orgName,
-    agentName: (activeConfig && activeConfig.name) || "",
-    campaignLabel,
-    callerContactName,
-    language: taskConfig?.language,
+  let openingResolve;
+  let openingReject;
+  const openingPromise = new Promise((resolve, reject) => {
+    openingResolve = resolve;
+    openingReject = reject;
   });
-  metrics.greetingPrepared = Date.now();
 
-  const promptT0 = Date.now();
-  const [promptBundle, openingGreetingAudio] = await Promise.all([
-    buildVobizSessionPrompt({
-      resolvedOrgId: orgId,
-      setup,
-      customQuestions: questions,
-      taskConfig,
-      genericFallbackQuestions,
-      callerContactName,
+  const prewarmPromise = (async () => {
+    const [setup, campaignLabel] = await Promise.all([
+      resolveVobizCallSetup(orgId, phoneNumber, null, "outbound", agentId || null, genericFallbackQuestions, { skipInlineKnowledge: true }),
+      loadCampaignLabel(orgId, taskId),
+    ]);
+
+    const callerContactName = setup.callerContactName || null;
+    const orgName = setup.orgName || "our team";
+    const activeConfig = setup.activeConfig;
+    const voiceName = setup.voiceName;
+
+    const openingGreetingText = buildOpeningGreetingText({
+      direction: "outbound",
       orgName,
-    }),
-    generateOpeningAudio({
+      agentName: (activeConfig && activeConfig.name) || "",
+      campaignLabel,
+      callerContactName,
+      language: taskConfig?.language,
+    });
+    metrics.greetingPrepared = Date.now();
+
+    const openingAudioPromise = generateOpeningAudio({
       orgId,
       agentId,
       activeConfig,
@@ -140,27 +138,61 @@ async function runOutboundPrewarm({
       callerContactName,
       language: taskConfig?.language,
       metrics,
-    }),
-  ]);
-  metrics.promptBuildMs = Date.now() - promptT0;
-  metrics.finalPromptLength = promptBundle.finalPromptLength;
-  metrics.kbInlineLength = promptBundle.kbInlineLength;
+    });
 
-  metrics.prewarmCompleted = Date.now();
-  metrics.prewarm_duration_ms = metrics.prewarmCompleted - prewarmStarted;
+    openingAudioPromise
+      .then((openingGreetingAudio) => {
+        openingResolve({
+          openingGreetingText,
+          openingGreetingAudio,
+          setup,
+          campaignLabel,
+          voiceName,
+          metrics: { ...metrics },
+        });
+        if (openingGreetingAudio?.length) {
+          log.info(`⏱️ Vobiz opening PCM ready during ring in ${Date.now() - prewarmStarted}ms (${openingGreetingAudio.length}B)`);
+        }
+      })
+      .catch((err) => {
+        openingReject(err);
+      });
 
-  return {
-    setup,
-    ...promptBundle,
-    openingGreetingText,
-    openingGreetingAudio,
-    voiceName,
-    activeConfig,
-    orgName,
-    callerContactName,
-    campaignLabel,
-    metrics,
-  };
+    const promptT0 = Date.now();
+    const [promptBundle, openingGreetingAudio] = await Promise.all([
+      buildVobizSessionPrompt({
+        resolvedOrgId: orgId,
+        setup,
+        customQuestions: questions,
+        taskConfig,
+        genericFallbackQuestions,
+        callerContactName,
+        orgName,
+      }),
+      openingAudioPromise,
+    ]);
+    metrics.promptBuildMs = Date.now() - promptT0;
+    metrics.finalPromptLength = promptBundle.finalPromptLength;
+    metrics.kbInlineLength = promptBundle.kbInlineLength;
+
+    metrics.prewarmCompleted = Date.now();
+    metrics.prewarm_duration_ms = metrics.prewarmCompleted - prewarmStarted;
+
+    return {
+      setup,
+      ...promptBundle,
+      openingGreetingText,
+      openingGreetingAudio,
+      voiceName,
+      activeConfig,
+      orgName,
+      callerContactName,
+      campaignLabel,
+      metrics,
+    };
+  })();
+
+  return { openingPromise, prewarmPromise };
 }
 
 module.exports = {
