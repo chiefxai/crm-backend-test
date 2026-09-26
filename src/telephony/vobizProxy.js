@@ -3,7 +3,6 @@
 // Vobiz WebSocket Proxy & Telephony Handler for Gemini Live API
 // ============================================================
 
-const { getTimeOfDay } = require("../lib/timeOfDay");
 const fs = require("fs");
 const path = require("path");
 const ws = require("ws");
@@ -39,38 +38,10 @@ const postCallQueue = getQueue();
 const POSTCALL_CONCURRENCY = parseInt(process.env.POSTCALL_QUEUE_CONCURRENCY || "5", 10);
 postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: POSTCALL_CONCURRENCY });
 
-// Only pushed into a call's tools when that task/call has Star Health
-// quoting enabled (see vobizCallTaskConfig's starhealthEnabled field) —
-// specific to this one insurance product, nonsensical on any other call.
-const GET_STARHEALTH_QUOTE_TOOL = {
-  name: "get_starhealth_quote",
-  description: "Fetch a live Star Health insurance quote once you have collected ALL of the caller's quote details (pincode, product preference, family composition and ages, pre-existing disease). Call this only once, after every required answer has been given — calling it early with missing info will fail.",
-  parameters: {
-    type: "OBJECT",
-    properties: {
-      pincode: { type: "STRING", description: "Caller's 6-digit pincode" },
-      category: { type: "STRING", description: "Product category: 'Health' or 'Speciality'. Default 'Health'." },
-      product: { type: "STRING", description: "Star Health product name if the caller expressed a preference (e.g. 'Super Star', 'Women's Care'), otherwise omit to let Star Health recommend one." },
-      policyPlan: { type: "STRING", description: "'Fresh' (new policy) or 'Portability' (switching from another insurer). Default 'Fresh'." },
-      policyType: { type: "STRING", description: "'Floater' (shared cover) or 'Individual'. Default 'Floater'." },
-      members: {
-        type: "ARRAY",
-        description: "One entry per family member to be covered.",
-        items: {
-          type: "OBJECT",
-          properties: {
-            type: { type: "STRING", description: "'Parent', 'Adult', or 'Child'" },
-            index: { type: "NUMBER", description: "1-based position among members of this type (Parent 1, Parent 2, Adult 1, ...)" },
-            age: { type: "STRING", description: "The member's age, exactly as the caller stated it" }
-          },
-          required: ["type", "index", "age"]
-        }
-      },
-      ped: { type: "STRING", description: "Whether the caller or any family member has a Pre-Existing Disease: 'Yes' or 'No'." }
-    },
-    required: ["pincode", "members", "ped"]
-  }
-};
+const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
+const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
+const { runOutboundPrewarm } = require("./vobizOutboundPrewarm");
+const { logGreetingLatency } = require("./vobizOpeningGreeting");
 
 // ── Per-call raw Gemini event log ───────────────────────────────
 // Google doesn't expose Live API (WebSocket) usage in AI Studio's log
@@ -442,6 +413,7 @@ async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone,
 
   customObjects = loadedObjects;
   questionsList = loadedQuestions;
+  knowledgeBaseSearchEnabled = kbFeatureEnabled;
   if (org) {
     companyInfoPrompt = buildCompanyInfoPrompt(org);
     if (org.name) resolvedOrgName = org.name;
@@ -642,12 +614,20 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   });
   for (const id of callSids) rememberMap(vobizPrewarmedClients, id, prewarmedClientPromise);
 
-  const prewarmPromise = resolveVobizCallSetup(orgId, phoneNumber, null, "outbound", agentId || null, undefined)
-    .catch((err) => {
-      log.error("❌ Vobiz pre-warm lookup failed, will retry post-answer:", err.message);
-      vobizPrewarmedSetup.delete(callSid);
-      return null;
-    });
+  const prewarmPromise = runOutboundPrewarm({
+    orgId,
+    phoneNumber,
+    agentId: agentId || null,
+    questions,
+    taskConfig: { language, assignedContact, starhealthEnabled },
+    taskId,
+    resolveVobizCallSetup,
+    genericFallbackQuestions: undefined,
+  }).catch((err) => {
+    log.error("❌ Vobiz pre-warm failed, will retry post-answer:", err.message);
+    vobizPrewarmedSetup.delete(callSid);
+    return null;
+  });
   for (const id of callSids) rememberMap(vobizPrewarmedSetup, id, prewarmPromise);
 
   return { success: true, callSid, callSids };
@@ -763,35 +743,35 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   log.info(`📞 New Vobiz voice connection. Voice: ${activeConfig.activeVoice} (${voiceName})`);
 
   let geminiSetupFinished = false;
+  let preparedOpeningPlayed = false;
+  let preparedOpeningText = null;
+  let outboundAudioPlayer = null;
+  let answerAtMs = null;
+  let callLatencyMetrics = {};
 
   const triggerGreetingIfReady = async () => {
-    if (geminiSetupFinished && streamId) {
-      const geminiSession = geminiSessionPromise ? await geminiSessionPromise : null;
-      if (geminiSession) {
-        try {
-          log.info("👋 Triggering custom warm greeting...");
-          const timeOfDay = getTimeOfDay(new Date(), "Asia/Kolkata");
-          
-          // Inbound: caller dialed us, so it's natural to ask how we can
-          // help. Outbound: WE dialed THEM — asking "how can I help you"
-          // has it backwards, since they didn't ask for anything. State
-          // who's calling and why instead, and ask if now's a good time.
-          const callDirection = vobizCallDirection.get(callId) || "inbound";
-          const greetingAddressee = callerContactName ? `${callerContactName} sir/mam` : "sir/mam";
-          // Keep the first turn intentionally short. Long opening prompts add
-          // noticeable TTFB because Gemini has to generate the whole greeting
-          // before the first audio chunk. The caller can answer the question
-          // and the normal conversation prompt takes over immediately.
-          const greetingText = callDirection === "outbound"
-            ? `Vanakkam ${greetingAddressee}! Naanga ${orgName}-la irundhu call panrom. Ippo pesalama?`
-            : `Vanakkam ${greetingAddressee}! Sollunga, epdi help pannalam?`;
-          const greetingStartedAt = Date.now();
-          await geminiSession.sendText(greetingText);
-          log.info(`⏱️ Initial greeting request sent in ${Date.now() - greetingStartedAt}ms [call=${callId}]`);
-        } catch (e) {
-          log.error("Failed to trigger initial greeting:", e.message);
-        }
+    if (!geminiSetupFinished || !streamId) return;
+    const geminiSession = geminiSessionPromise ? await geminiSessionPromise : null;
+    if (!geminiSession) return;
+    try {
+      if (preparedOpeningPlayed && preparedOpeningText && geminiSession.sendPreparedOpeningHandoff) {
+        log.info("👋 Gemini handoff after prepared opening greeting...");
+        await geminiSession.sendPreparedOpeningHandoff(preparedOpeningText);
+        callLatencyMetrics.fullGreetingComplete = Date.now();
+        logGreetingLatency(callId, callLatencyMetrics);
+        return;
       }
+      log.info("👋 Triggering custom warm greeting (Live fallback)...");
+      const callDirection = vobizCallDirection.get(callId) || "inbound";
+      const greetingAddressee = callerContactName ? `${callerContactName} sir/mam` : "sir/mam";
+      const greetingText = callDirection === "outbound"
+        ? `Vanakkam ${greetingAddressee}! Naanga ${orgName}-la irundhu call panrom. Ippo pesalama?`
+        : `Vanakkam ${greetingAddressee}! Sollunga, epdi help pannalam?`;
+      const greetingStartedAt = Date.now();
+      await geminiSession.sendText(greetingText);
+      log.info(`⏱️ Initial greeting request sent in ${Date.now() - greetingStartedAt}ms [call=${callId}]`);
+    } catch (e) {
+      log.error("Failed to trigger initial greeting:", e.message);
     }
   };
 
@@ -869,12 +849,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           // insurance-questionnaire prompt, unchanged from before this change.
           const resolvedOrgId = vobizCallOrgs.get(callId) || null;
           let customObjects = [];
-          let orgHasKnowledgeBase = false;
-          let kbMode = "all";
           let kbDocumentIds = null;
-          let companyInfoPrompt = "";
-          let knowledgeBaseSearchEnabled = false;
-          let preloadedQuestions = genericFallbackQuestions;
 
           // Reuse the Gemini client that was already resolved during ringing
           // (see triggerVobizOutboundCall → vobizPrewarmedClients). For
@@ -912,172 +887,80 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           // until the call rings) and any outbound call whose pre-warm never
           // registered/expired/failed fall through to the original on-demand
           // lookup, unchanged.
-          const prewarmed = vobizPrewarmedSetup.has(callId) ? await vobizPrewarmedSetup.get(callId) : null;
+          const hadPrewarmMapEntry = vobizPrewarmedSetup.has(callId);
+          const prewarmPayload = hadPrewarmMapEntry ? await vobizPrewarmedSetup.get(callId) : null;
           vobizPrewarmedSetup.delete(callId);
+          if (!prewarmPayload) {
+            log.info(`PREWARM_MISS callId=${callId}`);
+          }
 
-          const setup = prewarmed || (resolvedOrgId
+          const setup = prewarmPayload?.setup || prewarmPayload || (resolvedOrgId
             ? await resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone, vobizCallDirection.get(callId) || "inbound", explicitAgentId, genericFallbackQuestions)
             : await resolveVobizCallSetup(null, calleeNumber, resolvedPhone, "inbound", null, genericFallbackQuestions));
 
-          customObjects = setup.customObjects;
-          preloadedQuestions = setup.questionsList || genericFallbackQuestions;
-          orgHasKnowledgeBase = setup.orgHasKnowledgeBase;
-          kbMode = setup.kbMode;
-          kbDocumentIds = setup.kbDocumentIds;
-          companyInfoPrompt = setup.companyInfoPrompt;
-          knowledgeBaseSearchEnabled = setup.knowledgeBaseSearchEnabled;
+          customObjects = setup.customObjects || [];
           if (setup.orgName) orgName = setup.orgName;
           if (setup.callerContactName) callerContactName = setup.callerContactName;
           if (setup.activeConfig) {
             activeConfig = setup.activeConfig;
             voiceName = setup.voiceName || voiceName;
           }
-          const { functionDeclarations: customToolDeclarations, promptSection: customObjectsPrompt } = buildCustomObjectTools(customObjects);
-          let knowledgeBasePrompt = "";
-          if (orgHasKnowledgeBase && knowledgeBaseSearchEnabled) {
-            // Small enough to inline whole -> instant answers, no tool-call
-            // round trip. Only registers the live search tool as a fallback
-            // when the content is too large to safely inline (see
-            // getAllContent's MAX_INLINE_CHARS cap).
-            let inlineKnowledge = setup.inlineKnowledge;
-            if (inlineKnowledge === undefined) {
-              try {
-                inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds);
-              } catch (err) {
-                log.error("❌ Failed to inline knowledge base for Vobiz call, falling back to live search:", err.message);
-              }
-            }
-            if (inlineKnowledge) {
-              knowledgeBasePrompt = `
-──────────
-KNOWLEDGE BASE
-──────────
-Here is everything you know about this business — its products, services, pricing, and policies. Answer directly from this, instantly, with no tool call and no pause to "look it up" — you already have the facts:
+          kbDocumentIds = setup.kbDocumentIds;
 
-${inlineKnowledge}
+          answerAtMs = Date.now();
+          outboundAudioPlayer = createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
+          callLatencyMetrics = {
+            callId,
+            providerCallId: callId,
+            answerAt: answerAtMs,
+            prewarmHit: Boolean(prewarmPayload?.finalPrompt),
+            geminiConnectStart: null,
+            geminiConnectComplete: null,
+            setupComplete: null,
+            ...(prewarmPayload?.metrics || {}),
+          };
 
-Keep the spoken answer short — one or two sentences, the direct answer only, not a full lecture. If the caller asks something not covered here, say you don't have that detail rather than guessing.
-`;
-            } else {
-              customToolDeclarations.push({
-                name: "search_knowledge_base",
-                description: "Search this business's knowledge base for facts, policies, or answers to the caller's question. Use this whenever the caller asks something you're not certain about rather than guessing.",
-                parameters: { type: "OBJECT", properties: { query: { type: "STRING", description: "Search terms describing what to look up" } }, required: ["query"] }
-              });
-              knowledgeBasePrompt = `
-──────────
-KNOWLEDGE BASE
-──────────
-If the caller asks anything about this business, its products, services, pricing, or policies, call the 'search_knowledge_base' tool with their question to get the exact facts before answering. Do not make up or guess details — use the retrieved text to explain. Keep the spoken answer short — one or two sentences, the direct answer only, not a full lecture. Long explanations add real delay before you start speaking; the caller can always ask a follow-up if they want more.
-`;
-            }
-          }
-
-          // For org calls this was already loaded in parallel with the other
-          // startup lookups above. Keep the fallback for calls without an org.
-          const questionsList = preloadedQuestions;
-
-          let activeQuestions = questionsList;
-          let hasCustomTaskQuestions = false;
           if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
             log.info(`ℹ️ Using dynamic campaign questions for Vobiz call:`, customQuestions);
-            activeQuestions = customQuestions;
-            hasCustomTaskQuestions = true;
-            // Clean up from memory
             vobizCallQuestions.delete(sanitizedCallee);
           }
 
-          // Normalize once — accepts legacy plain strings or the newer
-          // { label, question } shape, so a short label (set in the
-          // workflow builder) survives into save_question_response/
-          // extraction while the AI still only ever sees/speaks `.question`.
-          const normalizedQuestions = postCallAgents.normalizeQuestions(activeQuestions);
+          let finalPrompt;
+          let customToolDeclarations;
+          let normalizedQuestions;
 
-          const dynamicQuestionnairePrompt = `
-──────────
-MANDATORY QUESTIONNAIRE PROTOCOL
-──────────
-You MUST ask the caller the following questions ONE BY ONE, to understand what they need — do not describe yourself as being in any particular industry beyond what's already been established above. Do NOT ask them all at once. Wait for their response for each question:
-${questionnaire.formatQuestionnaireList(normalizedQuestions)}
-
-When the user answers a question, you must immediately call the tool 'save_question_response' with the exact question you asked and the answer they gave, and then move to the next question.
-
-Before asking any question, check whether the caller has already told you the answer earlier in this same conversation (either volunteered on their own, or answered while responding to a different question). If so, do NOT ask it again — immediately call 'save_question_response' with that question and what they already told you, and move straight to the next question they have not answered yet.
-
-If the caller's reply is not a plain answer to what you asked — for example they ask "how does that work", "explain", "tell me more", or respond with a question of their own instead of answering — do NOT log it as a Yes/No answer and do NOT move to the next question yet. First use the 'search_policy_knowledge_base' tool to find the real answer and explain it to them in your own words, in the same language they're using — keep it to one or two short sentences, not a full lecture, since long explanations add real delay before you start speaking. Only call 'save_question_response' and move to the next question once they have actually answered what you asked.
-
-Be extra careful with Yes/No answers specifically — "yes" and "no" (and their Tamil/Hindi/English equivalents: aama/illa, haan/nahi, correct/not correct) sound similar over a phone line and are easy to log backwards. Getting this one word wrong sends the rest of the conversation down the wrong branch — for example asking "how many policies do you have" after mishearing a "No" as a "Yes" to "do you have a policy". If you are not fully confident which one the caller said, quickly confirm before saving it (e.g. "So that's a No, right?") rather than guessing.
-
-Never call 'save_question_response' unless the caller has actually, verbally answered that specific question earlier in THIS call. Do not guess, assume, or pre-fill an answer (e.g. assuming "Yes" just because you're calling to offer something, or because a caller sounds friendly). If you have not yet asked a question and gotten a real reply to it, it has no answer to save yet.
-`;
-
-          // Used when an org WITH custom objects still has task-specific
-          // questions configured for this outbound call — those two used to
-          // be mutually exclusive (customObjects.length > 0 completely
-          // skipped the questionnaire block above), which silently dropped
-          // every outbound campaign's configured questions for any org
-          // running a custom industry object instead of the plain lending
-          // path. Confirmed live: an outbound call never asked the
-          // campaign's questions at all, the AI improvised its own instead.
-          const genericQuestionnairePrompt = `
-──────────
-MANDATORY QUESTIONNAIRE PROTOCOL
-──────────
-This is an outbound call — you called them, ask question 1 first, right after your opening greeting, before anything else. Do not skip ahead to a later question or start general small talk first.
-${questionnaire.formatQuestionnaireList(normalizedQuestions)}
-
-Ask these ONE BY ONE, in this exact order. Wait for the caller's actual answer to the current question before moving to the next one.
-
-Do NOT call the 'save_question_response' tool at all unless the caller has actually given a real, on-topic answer to that specific question. This means: if their reply is unclear, off-topic, silent, or just a greeting/acknowledgment ("hello", "yes?", "who is this") — do not call the tool AT ALL. Do not call it with a placeholder value like "[No response]", "unclear", "N/A", or anything similar either — that is still calling the tool without a real answer, which is exactly what this rule forbids. Simply re-ask the same question again instead, out loud, and wait.
-
-If you re-ask a question 2-3 times with no real answer, move on and mention at the end of the call that this question couldn't be answered — do not keep looping on it forever, and do not fabricate an answer to escape the loop.
-
-Only when the caller gives an actual real answer, call 'save_question_response' with the exact question you asked and the real answer they gave, then move to the next question.
-`;
-
-          const endCallPrompt = `
-──────────
-ENDING THE CALL
-──────────
-Once the conversation has naturally wrapped up — the caller's questions are answered, they say goodbye, or they have nothing further to add — say a brief warm goodbye, then call the 'end_call' tool. Do not call it mid-conversation or before saying goodbye.`;
-
-          // Tells the AI the caller is already a known contact, so it
-          // addresses them by name and doesn't waste a turn re-asking.
-          const callerIdentityPrompt = callerContactName
-            ? `\n━━━ CALLER IDENTITY ━━━\nThis caller is already a saved contact named "${callerContactName}". Address them by this name naturally during the call. Do NOT ask "what is your name?" — you already know it.\n`
-            : "";
-
-          // Star Health quoting — only when this task/call had it enabled
-          // (see triggerVobizOutboundCall -> vobizCallTaskConfig above).
-          let starhealthPrompt = "";
-          if (taskConfig?.starhealthEnabled && (await featureFlags.isEnabled("starhealth_quote"))) {
-            customToolDeclarations.push(GET_STARHEALTH_QUOTE_TOOL);
-            starhealthPrompt = `
-──────────
-STAR HEALTH QUOTE PROTOCOL
-──────────
-This is a Star Health insurance outbound call. After your opening greeting, collect the following, ONE AT A TIME, waiting for the caller's real answer each time:
-1. Their 6-digit pincode.
-2. Who needs to be covered — parents, adults (self/spouse), and/or children — and each person's age.
-3. Whether they or anyone being covered has a Pre-Existing Disease (PED) — Yes/No.
-4. Any specific Star Health product they already have in mind (optional — if they don't know, proceed without one).
-
-Once you have the pincode, every member's age, and the PED answer, call the 'get_starhealth_quote' tool with everything collected so far. Do not call it before those are known.
-
-If the tool result includes 'plans', read out up to 3 plan names and prices naturally, as options — do not read raw JSON.
-If the tool result has 'deferred: true', tell the caller their personalized quote will be sent to them shortly (e.g. via WhatsApp) instead of reading a quote now — do not say you already sent it.
-`;
+          if (prewarmPayload?.finalPrompt) {
+            finalPrompt = prewarmPayload.finalPrompt;
+            customToolDeclarations = prewarmPayload.customToolDeclarations;
+            normalizedQuestions = prewarmPayload.normalizedQuestions;
+            log.info(`⏱️ Vobiz prewarm hit — prompt ${finalPrompt.length} chars, KB inline ${prewarmPayload.kbInlineLength || 0} chars`);
+          } else {
+            const promptBundle = await buildVobizSessionPrompt({
+              resolvedOrgId,
+              setup,
+              customQuestions,
+              taskConfig,
+              genericFallbackQuestions,
+              callerContactName,
+              orgName,
+            });
+            finalPrompt = promptBundle.finalPrompt;
+            customToolDeclarations = promptBundle.customToolDeclarations;
+            normalizedQuestions = promptBundle.normalizedQuestions;
+            kbDocumentIds = promptBundle.kbDocumentIds;
+            log.info(`⏱️ Vobiz prompt built on answer — ${finalPrompt.length} chars (KB inline ${promptBundle.kbInlineLength || 0})`);
           }
 
-          // Orgs with custom objects (any industry other than lending) get the
-          // generic data-capture prompt instead of the hardcoded insurance
-          // framing above, which would otherwise misdescribe their business —
-          // plus the task's own questions layered on top if this call came
-          // from an outbound campaign with specific questions configured.
-          let finalPrompt = customObjects.length > 0
-            ? buildRuntimePrompt(activeConfig) + "\n" + customObjectsPrompt + companyInfoPrompt + callerIdentityPrompt + (hasCustomTaskQuestions ? "\n" + genericQuestionnairePrompt : "") + knowledgeBasePrompt + endCallPrompt
-            : buildRuntimePrompt(activeConfig) + "\n" + dynamicQuestionnairePrompt + companyInfoPrompt + callerIdentityPrompt + knowledgeBasePrompt + endCallPrompt;
-          if (starhealthPrompt) finalPrompt += "\n" + starhealthPrompt;
+          if (prewarmPayload?.openingGreetingAudio?.length) {
+            preparedOpeningPlayed = true;
+            preparedOpeningText = prewarmPayload.openingGreetingText;
+            outboundAudioPlayer.enqueuePcm(prewarmPayload.openingGreetingAudio, { fastStart: true });
+            writeRecording(prewarmPayload.openingGreetingAudio);
+            transcriptLines.push({ role: "ai", text: preparedOpeningText });
+            callLatencyMetrics.greetingPlaybackStart = Date.now();
+            callLatencyMetrics.answer_to_greeting_play_ms = callLatencyMetrics.greetingPlaybackStart - answerAtMs;
+            logGreetingLatency(callId, callLatencyMetrics);
+          }
 
           // Connect to Gemini asynchronously in the background. Wrapped in a
           // named function (instead of one inline call) so an abnormal
@@ -1085,6 +968,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
           // close) can call this again with the last resumption handle and
           // keep the caller's call alive instead of dropping them.
           const connectGemini = (resumeHandle) => {
+          callLatencyMetrics.geminiConnectStart = Date.now();
           geminiSessionPromise = openGeminiSession(
             vobizWs,
             voiceName,
@@ -1102,9 +986,17 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
             },
             (outBytes) => {
               totalOutboundAudioBytes += outBytes;
+              if (answerAtMs && !callLatencyMetrics.firstGeminiAudioChunk) {
+                callLatencyMetrics.firstGeminiAudioChunk = Date.now();
+                callLatencyMetrics.answer_to_first_gemini_audio_ms = callLatencyMetrics.firstGeminiAudioChunk - answerAtMs;
+              }
             },
             () => {
               geminiSetupFinished = true;
+              callLatencyMetrics.setupComplete = Date.now();
+              if (callLatencyMetrics.geminiConnectStart) {
+                callLatencyMetrics.setup_complete_ms = callLatencyMetrics.setupComplete - callLatencyMetrics.geminiConnectStart;
+              }
               // Only greet on the call's first-ever connection. On a
               // reconnect (after e.g. the Gemini-side 1011 crash) the
               // session resumption handle already restores the
@@ -1140,13 +1032,18 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
             },
             kbDocumentIds,
             normalizedQuestions,
+            outboundAudioPlayer,
             {
               prewarmedGeminiClientPromise,
               prewarmedFeatureFlagsPromise,
             },
             { writeRecording }
           ).then(session => {
-            log.info(`✅ Gemini Live session open for Vobiz | Call ID: ${generatedCallId}`);
+            callLatencyMetrics.geminiConnectComplete = Date.now();
+            if (callLatencyMetrics.geminiConnectStart) {
+              callLatencyMetrics.gemini_connect_ms = callLatencyMetrics.geminiConnectComplete - callLatencyMetrics.geminiConnectStart;
+            }
+            log.info(`✅ Gemini Live session open for Vobiz | Call ID: ${generatedCallId} (connect ${callLatencyMetrics.gemini_connect_ms || "?"}ms)`);
             if (global.broadcastLog) {
               global.broadcastLog(`📞 Voice Session Open | Call ID: ${generatedCallId}`, { type: "system", callId: generatedCallId });
             }
@@ -1362,7 +1259,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
 
 // GEMINI LIVE SESSION
 // ──────────═════════════════════
-async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], prewarmedDeps = null, recordingHooks = null) {
+async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null) {
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
   let lastRawBroadcastAt = 0;
 
@@ -1382,7 +1279,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   let lastCallerSpeechAt = null;
   let awaitingFirstAgentChunk = false;
   let fillerTimer = null;
-  let fillerPlaying = false;
+  if (!outboundAudioPlayer) {
+    outboundAudioPlayer = createVobizOutboundAudioPlayer(vobizWs, getStreamId, { callId });
+  }
+  const audioOut = outboundAudioPlayer;
   // Guards against the model calling the end_call tool more than once for
   // the same call (observed in production: it can re-invoke end_call on
   // its very next turn before the 3.5s grace-period hangup below has even
@@ -1411,67 +1311,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   // same job as native memcpy/views instead of per-byte JS overhead.
   let currentWs = vobizWs;
   let currentRecordStream = recordStream;
-  let outboundQueue = Buffer.alloc(0);
-  let intervalId = null;
-  // Throttled visibility into the buffering layer (chunk sizes in/out,
-  // queue depth, send cadence) without logging call content — one
-  // summary line per second at most, not one per 20ms send or per
-  // Gemini chunk, which would flood the logs.
-  const audioStats = { chunksIn: 0, bytesIn: 0, framesSent: 0, lastLogAt: 0, lastSendAt: 0, maxGapMs: 0 };
-  // Playback used to start the instant any audio arrived, with zero
-  // pre-buffer. Gemini's audio generation isn't perfectly steady — any
-  // small gap between chunks let the queue run dry mid-sentence, and this
-  // pacer silently skipped that tick instead of waiting, which is exactly
-  // what a caller hears as stuttering/broken-up speech. A small one-time
-  // pre-buffer per utterance absorbs that jitter; ~40ms keeps startup responsive while
-  // human perception for added delay.
-  const PREBUFFER_BYTES = 1280; // 40ms of 16kHz PCM16 (640 bytes = 20ms)
-  let hasPrebuffered = false;
-
-  const startPacing = () => {
-    if (intervalId) return;
-    intervalId = setInterval(() => {
-      if (!hasPrebuffered) {
-        if (outboundQueue.length < PREBUFFER_BYTES) return;
-        hasPrebuffered = true;
-      }
-      // 640 bytes of PCM16 represents 20ms of audio at 16kHz (320 samples * 2 bytes)
-      if (outboundQueue.length >= 640) {
-        if (!currentWs || currentWs.readyState !== 1) return;
-        const chunk = outboundQueue.subarray(0, 640);
-        outboundQueue = outboundQueue.subarray(640);
-        sendJson(currentWs, {
-          event: "playAudio",
-          media: {
-            contentType: "audio/x-l16",
-            sampleRate: 16000,
-            payload: chunk.toString("base64")
-          }
-        });
-        const now = Date.now();
-        if (audioStats.lastSendAt) audioStats.maxGapMs = Math.max(audioStats.maxGapMs, now - audioStats.lastSendAt);
-        audioStats.lastSendAt = now;
-        audioStats.framesSent++;
-        if (now - audioStats.lastLogAt >= 1000) {
-          log.debug(`🔊 Vobiz audio pacer [${callId}]: ${audioStats.chunksIn} Gemini chunks in (${audioStats.bytesIn}B) -> ${audioStats.framesSent} x20ms frames sent, queue depth ${outboundQueue.length}B, max inter-send gap ${audioStats.maxGapMs}ms`);
-          audioStats.chunksIn = 0;
-          audioStats.bytesIn = 0;
-          audioStats.framesSent = 0;
-          audioStats.maxGapMs = 0;
-          audioStats.lastLogAt = now;
-        }
-      }
-    }, 20);
-  };
-
-  const stopPacing = () => {
-    if (intervalId) {
-      clearInterval(intervalId);
-      intervalId = null;
-    }
-    outboundQueue = Buffer.alloc(0);
-    hasPrebuffered = false;
-  };
+  const startPacing = () => audioOut.startPacing();
+  const stopPacing = () => audioOut.stopPacing();
 
   // Inject custom VAD config safely over WS intercept
   const originalSend = ws.prototype.send;
@@ -1927,8 +1768,6 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               if (onAudioOut) {
                 onAudioOut(raw24kPCM.length);
               }
-              audioStats.chunksIn++;
-              audioStats.bytesIn += raw24kPCM.length;
 
               // 1. Resample: 24kHz PCM -> 16kHz PCM for Vobiz playback.
               // Stateful per-call instance (see createResampler24To16) —
@@ -1951,23 +1790,12 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 clearTimeout(fillerTimer);
                 fillerTimer = null;
               }
-              if (fillerPlaying) {
-                outboundQueue = Buffer.alloc(0);
-                fillerPlaying = false;
+              if (audioOut.isFillerPlaying()) {
+                audioOut.clearQueue();
+                audioOut.setFillerPlaying(false);
               }
 
-              // 2. Push to pacing queue and start playing at a constant rate.
-              // Allow plenty of headroom (~20s of audio) so natural AI turns
-              // are never truncated or chopped mid-sentence. Caller speech and
-              // barge-in events already clear outboundQueue immediately.
-              const MAX_OUTBOUND_QUEUE_BYTES = 640_000;
-              outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, pcm16k]) : pcm16k;
-              if (outboundQueue.length > MAX_OUTBOUND_QUEUE_BYTES) {
-                outboundQueue = outboundQueue.subarray(outboundQueue.length - MAX_OUTBOUND_QUEUE_BYTES);
-                hasPrebuffered = true;
-                log.warn(`⚠️ Vobiz audio queue capped [${callId}] at ${MAX_OUTBOUND_QUEUE_BYTES}B to prevent stale AI audio`);
-              }
-              startPacing();
+              audioOut.enqueuePcm(pcm16k);
 
               // Save to recording file without allowing a late Gemini frame
               // to crash the Node process after the call has already ended.
@@ -1992,10 +1820,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
           // queued AI speech from being played back over the caller and also
           // prevents old audio from surfacing seconds later after a queue
           // stall.
-          if (outboundQueue.length > 0 || fillerPlaying) {
+          if (audioOut.getQueueLength() > 0 || audioOut.isFillerPlaying()) {
             if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
-            fillerPlaying = false;
-            stopPacing();
+            audioOut.setFillerPlaying(false);
+            audioOut.stopPacing();
             sendJson(vobizWs, { event: "clearAudio", streamId: getStreamId() });
             log.debug(`🛑 Vobiz audio cleared on caller speech [${callId}]`);
           }
@@ -2013,9 +1841,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             if (!awaitingFirstAgentChunk) return;
             const filler = FILLER_CLIPS[voiceName];
             if (!filler || !vobizWs || vobizWs.readyState !== 1) return;
-            fillerPlaying = true;
-            outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, filler]) : filler;
-            startPacing();
+            audioOut.setFillerPlaying(true);
+            audioOut.enqueuePcm(filler);
             log.info(`🫧 Filler played while awaiting real reply (voice: ${voiceName})`);
           }, FILLER_DEBOUNCE_MS);
           transcriptLines.push({ role: "user", text });
@@ -2052,7 +1879,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         // Barge-in: caller interrupted AI
         if (response.serverContent?.interrupted) {
           if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
-          fillerPlaying = false;
+          audioOut.setFillerPlaying(false);
           stopPacing();
           sendJson(vobizWs, {
             event: "clearAudio",
@@ -2204,6 +2031,22 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             ],
             turn_complete: true
           }
+        }));
+      }
+    },
+    sendPreparedOpeningHandoff: async (spokenGreeting) => {
+      if (session.conn && session.conn.ws && session.conn.ws.readyState === 1) {
+        const directive = `[System directive — NOT something the caller said. The call just connected and you have ALREADY spoken this exact opening greeting aloud to the caller (do NOT repeat it): "${spokenGreeting}". Wait silently for their response. When they answer, continue the conversation naturally from the full instructions — proceed to question 1 or their request without re-introducing yourself or saying the opening again.]`;
+        session.conn.ws.send(JSON.stringify({
+          client_content: {
+            turns: [
+              {
+                role: "user",
+                parts: [{ text: directive }],
+              },
+            ],
+            turn_complete: true,
+          },
         }));
       }
     },
