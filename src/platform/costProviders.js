@@ -60,11 +60,11 @@ const KNOWN_PROVIDERS = [
   },
   {
     key: "gemini", kind: "ai", label: "Gemini (Live Voice)",
-    defaults: { pricingMode: "token", ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, timeRateAmount: 0, timeUnit: "minute", taxPercent: 0 },
+    defaults: { pricingMode: "time", ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, timeRateAmount: 5, timeUnit: "minute", taxPercent: 0 },
   },
   {
     key: "gemini-postcall", kind: "ai", label: "Gemini (Post-Call Agents)",
-    defaults: { pricingMode: "token", ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, timeRateAmount: 0, timeUnit: "minute", taxPercent: 0 },
+    defaults: { pricingMode: "time", ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, timeRateAmount: 1, timeUnit: "minute", taxPercent: 0 },
   },
 ];
 
@@ -97,12 +97,14 @@ async function listProviders() {
     if (kind === "call") {
       provider.rateUnit = o?.rateUnit ?? defaults.rateUnit;
       provider.rateAmount = o?.rateAmount ?? defaults.rateAmount;
+      provider.pricingVersion = o?.pricingVersion ?? null;
     } else {
-      provider.pricingMode = o?.pricingMode ?? defaults.pricingMode ?? "token";
+      provider.pricingMode = o?.pricingMode ?? defaults.pricingMode ?? "time";
       provider.ratePer1kTokens = o?.ratePer1kTokens ?? defaults.ratePer1kTokens;
       provider.tokenUnit = o?.tokenUnit ?? defaults.tokenUnit;
       provider.timeRateAmount = o?.timeRateAmount ?? defaults.timeRateAmount ?? 0;
       provider.timeUnit = o?.timeUnit ?? defaults.timeUnit ?? "minute";
+      provider.pricingVersion = o?.pricingVersion ?? null;
     }
     return provider;
   });
@@ -172,6 +174,10 @@ async function upsertProvider(actor, input) {
   const list = Array.isArray(stored) ? stored : [];
   const idx = list.findIndex((p) => p.key === key);
   const updatedOverride = sanitizeProviderInput(known, input, idx >= 0 ? list[idx] : null);
+  const prevVersion = idx >= 0 ? list[idx]?.pricingVersion : null;
+  const versionDay = new Date().toISOString().slice(0, 10);
+  const prevSeq = prevVersion && String(prevVersion).startsWith(versionDay) ? Number(String(prevVersion).split("-v")[1]) || 0 : 0;
+  updatedOverride.pricingVersion = `${versionDay}-v${prevSeq + 1}`;
   const next = idx >= 0 ? list.map((p, i) => (i === idx ? updatedOverride : p)) : [...list, updatedOverride];
   await saveOverrides(next);
   await auditLog.record(null, actor, "platform.cost_provider.update", "cost_provider", key, { kind: known.kind });
@@ -189,8 +195,35 @@ function applyTax(baseCost, taxPercent) {
 /** Call-minute cost for a given provider (defaults to "vobiz", the only
  *  telephony provider today). Returns null if the provider isn't
  *  configured/active so callers can fall back to legacy flat pricing. */
-async function computeCallCost({ providerKey = "vobiz", seconds }) {
-  const provider = await getProviderByKey(providerKey, "call");
+function computeAiCostFromProvider(provider, { totalTokens = 0, durationSeconds = 0 } = {}) {
+  if (!provider || !provider.active) return null;
+  if ((provider.pricingMode ?? "token") === "time") {
+    if (!provider.timeRateAmount) return null;
+    const timeUnit = provider.timeUnit || "minute";
+    const units = timeUnit === "second" ? (Number(durationSeconds) || 0) : ((Number(durationSeconds) || 0) / 60);
+    const base = units * provider.timeRateAmount;
+    const { baseCost, taxAmount, totalCost } = applyTax(base, provider.taxPercent);
+    return {
+      providerKey: provider.key, providerLabel: provider.label,
+      pricingMode: "time", timeRateAmount: provider.timeRateAmount, timeUnit,
+      pricingVersion: provider.pricingVersion || null,
+      taxPercent: provider.taxPercent || 0, baseCost, taxAmount, totalCost,
+    };
+  }
+  if (!provider.ratePer1kTokens) return null;
+  const tokenUnit = provider.tokenUnit || DEFAULT_AI_TOKEN_UNIT;
+  const base = ((Number(totalTokens) || 0) / tokenUnit) * provider.ratePer1kTokens;
+  const { baseCost, taxAmount, totalCost } = applyTax(base, provider.taxPercent);
+  return {
+    providerKey: provider.key, providerLabel: provider.label,
+    pricingMode: "token", ratePer1kTokens: provider.ratePer1kTokens, tokenUnit,
+    pricingVersion: provider.pricingVersion || null,
+    taxPercent: provider.taxPercent || 0, baseCost, taxAmount, totalCost,
+  };
+}
+
+async function computeCallCost({ providerKey = "vobiz", seconds, providerSnapshot = null }) {
+  const provider = providerSnapshot || await getProviderByKey(providerKey, "call");
   if (!provider || !provider.active || !provider.rateAmount) return null;
   const units = provider.rateUnit === "hour" ? (seconds || 0) / 3600 : (seconds || 0) / 60;
   const base = units * provider.rateAmount;
@@ -198,6 +231,7 @@ async function computeCallCost({ providerKey = "vobiz", seconds }) {
   return {
     providerKey: provider.key, providerLabel: provider.label,
     rateUnit: provider.rateUnit, rateAmount: provider.rateAmount, taxPercent: provider.taxPercent || 0,
+    pricingVersion: provider.pricingVersion || null,
     baseCost, taxAmount, totalCost,
   };
 }
@@ -210,32 +244,25 @@ async function computeCallCost({ providerKey = "vobiz", seconds }) {
  *  tokenUnit tokens" (field name kept for backward compatibility with
  *  already-stored providers/sessions, not literally "per 1,000" anymore
  *  unless tokenUnit is 1000). */
-async function computeAiCost({ providerKey = "gemini", totalTokens = 0, durationSeconds = 0 }) {
-  const provider = await getProviderByKey(providerKey, "ai");
-  if (!provider || !provider.active) return null;
-
-  if ((provider.pricingMode ?? "token") === "time") {
-    if (!provider.timeRateAmount) return null;
-    const timeUnit = provider.timeUnit || "minute";
-    const units = timeUnit === "second" ? (Number(durationSeconds) || 0) : ((Number(durationSeconds) || 0) / 60);
-    const base = units * provider.timeRateAmount;
-    const { baseCost, taxAmount, totalCost } = applyTax(base, provider.taxPercent);
-    return {
-      providerKey: provider.key, providerLabel: provider.label,
-      pricingMode: "time", timeRateAmount: provider.timeRateAmount, timeUnit,
-      taxPercent: provider.taxPercent || 0, baseCost, taxAmount, totalCost,
-    };
+async function computeAiCost({ providerKey = "gemini", totalTokens = 0, durationSeconds = 0, orgId = null, providerSnapshot = null }) {
+  let provider = providerSnapshot;
+  if (!provider) {
+    if (orgId) {
+      try {
+        const db = require("../db/repository");
+        const { resolveAiProviderForBilling } = require("../billing/pricingResolver");
+        const org = await db.getOrg(orgId);
+        const role = providerKey === "gemini-postcall" ? "postCall" : "voice";
+        const resolved = await resolveAiProviderForBilling(org, role);
+        provider = resolved.provider;
+      } catch {
+        provider = await getProviderByKey(providerKey, "ai");
+      }
+    } else {
+      provider = await getProviderByKey(providerKey, "ai");
+    }
   }
-
-  if (!provider.ratePer1kTokens) return null;
-  const tokenUnit = provider.tokenUnit || DEFAULT_AI_TOKEN_UNIT;
-  const base = ((Number(totalTokens) || 0) / tokenUnit) * provider.ratePer1kTokens;
-  const { baseCost, taxAmount, totalCost } = applyTax(base, provider.taxPercent);
-  return {
-    providerKey: provider.key, providerLabel: provider.label,
-    pricingMode: "token", ratePer1kTokens: provider.ratePer1kTokens, tokenUnit, taxPercent: provider.taxPercent || 0,
-    baseCost, taxAmount, totalCost,
-  };
+  return computeAiCostFromProvider(provider, { totalTokens, durationSeconds });
 }
 
 /** The per-minute INR figure (tax included) that drives every org-facing
@@ -263,5 +290,6 @@ module.exports = {
   getProviderByKey,
   computeCallCost,
   computeAiCost,
+  computeAiCostFromProvider,
   getPrimaryCallProviderRate,
 };

@@ -25,6 +25,15 @@ router.get("/billing", requireAuth, requireRole(ADMIN_ROLES), async (req, res) =
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
+router.get("/billing/console", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+  try {
+    const billingConsole = require("../billing/billingConsole");
+    const data = await billingConsole.getOrganizationBillingConsole(req.orgId);
+    if (!data) return res.status(404).json({ error: "Organization not found" });
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+});
+
 // Legacy metrics from flat-file store — used by the demo kirana dashboard.
 router.get("/metrics", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
   // Legacy/demo metrics are global flat-file data, not tenant-scoped CRM data.

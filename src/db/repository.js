@@ -251,7 +251,29 @@ const ENTITIES = {
       platformTaxAmountInr: "platform_tax_amount_inr", platformTotalCostInr: "platform_total_cost_inr",
       createdAt: "created_at", updatedAt: "updated_at"
     }
-  }
+  },
+  callbillingrecords: {
+    table: "call_billing_records",
+    fields: {
+      id: "id", callId: "call_id", durationSeconds: "duration_seconds",
+      billingMethod: "billing_method", pricingMode: "pricing_mode",
+      voiceAgentCostInr: "voice_agent_cost_inr", postCallAgentCostInr: "post_call_agent_cost_inr",
+      aiCostInr: "ai_cost_inr", telephonyProvider: "telephony_provider",
+      providerPricingVersion: "provider_pricing_version", providerRateAmount: "provider_rate_amount",
+      providerRateUnit: "provider_rate_unit", providerCostInr: "provider_cost_inr",
+      phoneNumberCostInr: "phone_number_cost_inr", totalCostInr: "total_cost_inr",
+      snapshot: "snapshot", createdAt: "created_at",
+    },
+  },
+  billingledgerentries: {
+    table: "billing_ledger_entries",
+    fields: {
+      id: "id", type: "type", amountInr: "amount_inr", balanceAfterInr: "balance_after_inr",
+      referenceType: "reference_type", referenceId: "reference_id", description: "description",
+      metadata: "metadata", actorUserId: "actor_user_id", actorEmail: "actor_email",
+      createdAt: "created_at",
+    },
+  },
 };
 
 function toDbRow(entity, apiObj) {

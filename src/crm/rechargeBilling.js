@@ -16,7 +16,7 @@ const db = require("../db/repository");
 const costProviders = require("../platform/costProviders");
 const channelsEngine = require("../channels/engine");
 
-const RESERVATION_MINUTES = Math.max(1, Number(process.env.RECHARGE_CALL_RESERVATION_MINUTES || 1));
+const ENV_RESERVATION_MINUTES = Math.max(1, Number(process.env.RECHARGE_CALL_RESERVATION_MINUTES || 1));
 
 function money(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
@@ -40,6 +40,16 @@ async function isSelfManagedProvider(orgId, providerKey) {
   }
 }
 
+async function getReservationMinutes(org) {
+  try {
+    const { getEffectiveMinimumBalance } = require("../billing/minimumBalance");
+    const effective = await getEffectiveMinimumBalance(org);
+    return Math.max(1, Number(effective.effectiveReservationMinutes) || ENV_RESERVATION_MINUTES);
+  } catch {
+    return ENV_RESERVATION_MINUTES;
+  }
+}
+
 async function estimateReservation(orgId, providerKey) {
   const org = await db.getOrg(orgId);
   if (!org) {
@@ -52,9 +62,10 @@ async function estimateReservation(orgId, providerKey) {
   const scope = normalizeChargeScope(org.chargeScope);
   if (method !== "recharge_based") return { allowed: true, org, billingMethod: method, chargeScope: scope, amount: 0 };
 
+  const reservationMinutes = await getReservationMinutes(org);
   const [ai, call, selfManaged] = await Promise.all([
-    costProviders.computeAiCost({ providerKey: "gemini", totalTokens: 0, durationSeconds: RESERVATION_MINUTES * 60 }).catch(() => null),
-    scope === "ai_and_call_provider" ? costProviders.computeCallCost({ providerKey, seconds: RESERVATION_MINUTES * 60 }).catch(() => null) : null,
+    costProviders.computeAiCost({ providerKey: "gemini", orgId, totalTokens: 0, durationSeconds: reservationMinutes * 60 }).catch(() => null),
+    scope === "ai_and_call_provider" ? costProviders.computeCallCost({ providerKey, seconds: reservationMinutes * 60 }).catch(() => null) : null,
     scope === "ai_and_call_provider" ? isSelfManagedProvider(orgId, providerKey) : false,
   ]);
 
@@ -94,10 +105,14 @@ async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
     const reserved = money(row.recharge_reserved_inr);
     const available = money(balance - reserved);
 
-    if (available < amount) {
+    const { getEffectiveMinimumBalance } = require("../billing/minimumBalance");
+    const minimum = await getEffectiveMinimumBalance(org);
+    const requiredAvailable = money(Math.max(amount, minimum.effectiveMinimumBalanceInr || 0));
+
+    if (available < requiredAvailable) {
       const err = new Error(
-        amount > 0
-          ? `Insufficient recharge balance. Available ₹${available.toFixed(2)}, estimated call reservation ₹${amount.toFixed(2)}.`
+        requiredAvailable > 0
+          ? `Insufficient recharge balance. Available ₹${available.toFixed(2)}, need at least ₹${requiredAvailable.toFixed(2)} (reservation + minimum call balance).`
           : "Recharge balance is empty. Please recharge the organization before placing outbound calls."
       );
       // Keep a stable machine-readable reason all the way through the
@@ -199,7 +214,7 @@ async function settleReservation({ reservationId, durationSeconds = 0, aiCostInr
     const selfManaged = scope === "ai_and_call_provider" && await isSelfManagedProvider(reservation.org_id, providerKey);
 
     const [aiCost, callCost] = await Promise.all([
-      costProviders.computeAiCost({ providerKey: "gemini", totalTokens: 0, durationSeconds: Number(durationSeconds) || 0 }).catch(() => null),
+      costProviders.computeAiCost({ providerKey: "gemini", orgId: reservation.org_id, totalTokens: 0, durationSeconds: Number(durationSeconds) || 0 }).catch(() => null),
       scope === "ai_and_call_provider" && !selfManaged
         ? costProviders.computeCallCost({ providerKey, seconds: Number(durationSeconds) || 0 }).catch(() => null)
         : null,
@@ -225,7 +240,29 @@ async function settleReservation({ reservationId, durationSeconds = 0, aiCostInr
       [actual, Number(durationSeconds) || 0, new Date().toISOString(), reservationId]
     );
     await client.query("COMMIT");
-
+    try {
+      const ledgerService = require("../billing/ledgerService");
+      const releaseDelta = money(reserved - actual);
+      if (releaseDelta > 0) {
+        await ledgerService.appendLedgerEntry(reservation.org_id, {
+          type: "reservation_release",
+          amountInr: releaseDelta,
+          balanceAfterInr: newBalance,
+          referenceType: "reservation",
+          referenceId: reservationId,
+          description: "Unused reservation released after call settlement",
+        });
+      }
+      await ledgerService.appendLedgerEntry(reservation.org_id, {
+        type: "actual_spend",
+        amountInr: -actual,
+        balanceAfterInr: newBalance,
+        referenceType: "reservation",
+        referenceId: reservationId,
+        description: "Call spend settled from reservation",
+        metadata: { durationSeconds: Number(durationSeconds) || 0 },
+      });
+    } catch {}
     return { reservationId, actualAmountInr: actual, balanceInr: newBalance };
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch {}
@@ -255,6 +292,19 @@ async function rechargeOrganization(orgId, amount, actor = {}) {
       [crypto.randomUUID(), orgId, money(value), next, JSON.stringify({ actorUserId: actor.userId || null, actorEmail: actor.userEmail || null }), new Date().toISOString()]
     );
     await client.query("COMMIT");
+    try {
+      const ledgerService = require("../billing/ledgerService");
+      await ledgerService.appendLedgerEntry(orgId, {
+        type: "recharge",
+        amountInr: money(value),
+        balanceAfterInr: next,
+        referenceType: "organization",
+        referenceId: orgId,
+        description: "Wallet recharge",
+        actorUserId: actor.userId || null,
+        actorEmail: actor.userEmail || null,
+      });
+    } catch {}
     return { balanceInr: next };
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch {}
