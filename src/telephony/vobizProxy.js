@@ -1718,6 +1718,14 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         if (allFunctionCalls.length > 0) {
           const functionResponses = [];
           for (const call of allFunctionCalls) {
+            if (call.name === "end_call" && endCallRequested) {
+              functionResponses.push({
+                id: call.id,
+                name: call.name,
+                response: { output: { success: true, note: "Call is already ending." } },
+              });
+              continue;
+            }
             log.info(`🛠️ Vobiz Tool Call: Executing ${call.name}`, JSON.stringify(call.args || {}));
             const __toolStart = Date.now();
             let result = {};
