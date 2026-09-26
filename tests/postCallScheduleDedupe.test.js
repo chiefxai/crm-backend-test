@@ -45,4 +45,25 @@ describe("postCallScheduleDedupe", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe("real");
   });
+
+  test("keeps separate pending callbacks for the same phone in different campaigns", () => {
+    const rows = dedupePendingScheduleRows([
+      {
+        id: "cb-a",
+        status: "Callback Scheduled",
+        callerNumber: "+919876543210",
+        retryContext: { taskId: "campaign-a", leadId: "L-1" },
+        createdAt: "2026-09-25T10:00:00.000Z",
+      },
+      {
+        id: "cb-b",
+        status: "Callback Scheduled",
+        callerNumber: "+919876543210",
+        retryContext: { taskId: "campaign-b", leadId: "L-1" },
+        createdAt: "2026-09-25T10:05:00.000Z",
+      },
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.id).sort()).toEqual(["cb-a", "cb-b"]);
+  });
 });

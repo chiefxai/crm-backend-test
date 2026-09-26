@@ -12,11 +12,15 @@ function phoneDedupeKey(callerNumber) {
   return digits.length >= 10 ? digits.slice(-10) : digits;
 }
 
+function campaignTaskId(row) {
+  const id = row?.retryContext?.taskId;
+  return id ? String(id) : null;
+}
+
 function scheduleDedupeKey(row) {
-  // One pending redial per dialed number — duplicate rows from the hangup
-  // fallback race (No Answer) vs post-call finalize (Callback Scheduled)
-  // often share a phone but differ in providerCallSid / retryContext.
   const phone = phoneDedupeKey(row?.callerNumber);
+  const taskId = campaignTaskId(row);
+  if (phone && taskId) return `phone:${phone}:task:${taskId}`;
   if (phone) return `phone:${phone}`;
   if (row?.providerCallSid) return `sid:${row.providerCallSid}`;
   return `id:${row?.id}`;
@@ -27,32 +31,39 @@ function pendingScheduleRowsConflict(a, b) {
   if (a.providerCallSid && b.providerCallSid && a.providerCallSid === b.providerCallSid) return true;
   const pa = phoneDedupeKey(a.callerNumber);
   const pb = phoneDedupeKey(b.callerNumber);
-  if (pa && pb && pa === pb) return true;
-  return false;
+  if (!pa || !pb || pa !== pb) return false;
+  const ta = campaignTaskId(a);
+  const tb = campaignTaskId(b);
+  // Same number in two different campaigns → separate pending callbacks.
+  if (ta && tb && ta !== tb) return false;
+  // Same campaign, or hangup-race row missing taskId vs outbound row that has it.
+  return true;
+}
+
+function pickPreferredScheduleRow(existing, row) {
+  const rankNew = SCHEDULE_STATUS_RANK[row.status] || 0;
+  const rankOld = SCHEDULE_STATUS_RANK[existing.status] || 0;
+  if (rankNew > rankOld) return row;
+  if (rankNew < rankOld) return existing;
+  return String(row.createdAt || "") > String(existing.createdAt || "") ? row : existing;
 }
 
 function dedupePendingScheduleRows(rows) {
-  const byKey = new Map();
+  const winners = [];
   for (const row of rows) {
-    const key = scheduleDedupeKey(row);
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, row);
+    const conflictIdx = winners.findIndex((w) => pendingScheduleRowsConflict(w, row));
+    if (conflictIdx === -1) {
+      winners.push(row);
       continue;
     }
-    const rankNew = SCHEDULE_STATUS_RANK[row.status] || 0;
-    const rankOld = SCHEDULE_STATUS_RANK[existing.status] || 0;
-    if (rankNew > rankOld) {
-      byKey.set(key, row);
-    } else if (rankNew === rankOld && String(row.createdAt || "") > String(existing.createdAt || "")) {
-      byKey.set(key, row);
-    }
+    winners[conflictIdx] = pickPreferredScheduleRow(winners[conflictIdx], row);
   }
-  return Array.from(byKey.values());
+  return winners;
 }
 
 module.exports = {
   SCHEDULE_STATUS_RANK,
+  campaignTaskId,
   scheduleDedupeKey,
   pendingScheduleRowsConflict,
   dedupePendingScheduleRows,

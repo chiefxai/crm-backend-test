@@ -987,7 +987,7 @@ async function getRetryStatusForOrg(orgId) {
 // multiple independent retry chains for the same number can run in
 // parallel forever, and a stale "pending" row keeps firing even after the
 // lead was already successfully reached.
-async function hasNewerCallForPhone(orgId, phone, sinceIso, excludeId) {
+async function hasNewerCallForPhone(orgId, phone, sinceIso, excludeId, campaignTaskId = null) {
   const digits = String(phone || "").replace(/[^\d]/g, "");
   if (!digits) return false;
   // The query-builder shim (services/mysqlClient.js) doesn't implement
@@ -995,14 +995,21 @@ async function hasNewerCallForPhone(orgId, phone, sinceIso, excludeId) {
   // by id client-side instead of relying on a strict "greater than".
   const { data, error } = await supabase
     .from("call_logs")
-    .select("id, lead_name, caller_number, created_at")
+    .select("id, lead_name, caller_number, created_at, retry_context")
     .eq("org_id", orgId)
     .gte("created_at", sinceIso);
   if (error) throw new Error(`[db.hasNewerCallForPhone] ${error.message}`);
   const last10 = digits.slice(-10);
-  return (data || []).some((row) =>
-    row.id !== excludeId && String(row.caller_number || row.lead_name || "").replace(/[^\d]/g, "").endsWith(last10)
-  );
+  const scopedTaskId = campaignTaskId ? String(campaignTaskId) : null;
+  return (data || []).some((row) => {
+    if (row.id === excludeId) return false;
+    if (!String(row.caller_number || row.lead_name || "").replace(/[^\d]/g, "").endsWith(last10)) return false;
+    if (scopedTaskId) {
+      const rowTaskId = row.retry_context?.taskId ? String(row.retry_context.taskId) : null;
+      if (rowTaskId && rowTaskId !== scopedTaskId) return false;
+    }
+    return true;
+  });
 }
 
 // Cross-org scan for outbound calls whose auto-redial delay has elapsed —
@@ -1068,6 +1075,14 @@ async function claimCallForRetry(orgId, rowId) {
             AND newer.created_at > c.created_at
             AND REGEXP_REPLACE(COALESCE(newer.caller_number, newer.lead_name, ''), '[^0-9]', '')
               = REGEXP_REPLACE(COALESCE(c.caller_number, c.lead_name, ''), '[^0-9]', '')
+            AND (
+              JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId')) IS NULL
+              OR JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId')) = ''
+              OR JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.taskId')) IS NULL
+              OR JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.taskId')) = ''
+              OR JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.taskId'))
+                = JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId'))
+            )
         ) AS newer_call_for_same_number
       )`, [orgId, rowId, nowIso, nowIso]);
     // Compare-and-set semantics: exactly one worker can transition pending -> retrying.

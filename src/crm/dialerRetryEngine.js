@@ -84,7 +84,14 @@ async function processDueRetries() {
       // retries before this fix (same underlying row shape), not just the
       // "Callback Scheduled" case this variable was renamed for.
       const dialTarget = row.callerNumber || row.leadName;
-      const alreadyHandled = await db.hasNewerCallForPhone(row.orgId, dialTarget, row.createdAt, row.id);
+      const campaignTaskId = row.retryContext?.taskId || null;
+      const alreadyHandled = await db.hasNewerCallForPhone(
+        row.orgId,
+        dialTarget,
+        row.createdAt,
+        row.id,
+        campaignTaskId
+      );
       if (alreadyHandled) {
         log.info(`🔁 [dialerRetryEngine] Skipping redial for ${row.leadName} (org ${row.orgId}) — a newer call to this number already exists.`);
         await db.patch("calllogs", row.orgId, row.id, { retryStatus: "superseded" });
