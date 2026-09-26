@@ -168,6 +168,7 @@ function runOutboundPrewarm({
         genericFallbackQuestions,
         callerContactName,
         orgName,
+        callerPhone: phoneNumber,
       }),
       openingAudioPromise,
     ]);

@@ -994,6 +994,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               genericFallbackQuestions,
               callerContactName,
               orgName,
+              callerPhone: sanitizedCallee || calleeNumber,
             });
             finalPrompt = promptBundle.finalPrompt;
             customToolDeclarations = promptBundle.customToolDeclarations;

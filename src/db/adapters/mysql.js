@@ -148,6 +148,10 @@ const TABLES = {
       // — the default starting stage — so no backfill was needed for rows
       // that existed before this column did.
       pipeline_stage: "text",
+      // Preferred time for a human advisor/team member to speak with this
+      // contact — captured from the live questionnaire, not the AI redial
+      // queue (see call_logs.callback_time / Scheduled Callbacks).
+      callback_time: "text",
       created_at: "text", updated_at: "text"
     }
   },

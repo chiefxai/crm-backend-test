@@ -47,6 +47,7 @@ const ENTITIES = {
       status: "status", tags: "tags", notes: "notes",
       financialInfo: "financial_info", groupIds: "group_ids",
       pipelineStage: "pipeline_stage",
+      callbackTime: "callback_time",
       createdAt: "created_at", updatedAt: "updated_at"
     }
   },
