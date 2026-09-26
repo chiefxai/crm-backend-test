@@ -2294,20 +2294,6 @@ async function processPostCallData({
   // anywhere in the app itself. Everything from contact matching through
   // the call_logs write and broadcast is shared across every provider —
   // see callFinalizer.js.
-  if (billingReservationId) {
-    try {
-      const aiSummary = await db.getAiUsageSummary(orgId, {}).catch(() => null);
-      const aiCostInr = aiSummary?.platformTotalCostInr ?? null;
-      await rechargeBilling.settleReservation({
-        reservationId: billingReservationId,
-        durationSeconds,
-        aiCostInr,
-      });
-    } catch (err) {
-      log.error(`❌ Failed to settle recharge reservation ${billingReservationId}:`, err.message);
-    }
-  }
-
   await callFinalizer.finalizeCallRecord({
     provider: "vobiz",
     orgId,
@@ -2329,6 +2315,20 @@ async function processPostCallData({
     sentimentInputTokens,
     sentimentOutputTokens,
   });
+
+  if (billingReservationId) {
+    try {
+      const callBillingService = require("../billing/callBillingService");
+      const aiCosts = await callBillingService.sumAiSessionCostsForCall(orgId, callId);
+      await rechargeBilling.settleReservation({
+        reservationId: billingReservationId,
+        durationSeconds,
+        aiCostInr: aiCosts.totalAiCostInr,
+      });
+    } catch (err) {
+      log.error(`❌ Failed to settle recharge reservation ${billingReservationId}:`, err.message);
+    }
+  }
 }
 
 // Node 18+ has fetch built-in; no node-fetch needed.

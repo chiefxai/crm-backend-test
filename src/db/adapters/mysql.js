@@ -518,6 +518,26 @@ const TABLES = {
       platform_base_cost_inr: "real", platform_tax_amount_inr: "real", platform_total_cost_inr: "real",
       created_at: "text", updated_at: "text"
     }
+  },
+  call_billing_records: {
+    pk: "id",
+    columns: {
+      id: "text", org_id: "text", call_id: "text", duration_seconds: "real",
+      billing_method: "text", pricing_mode: "text",
+      voice_agent_cost_inr: "real", post_call_agent_cost_inr: "real", ai_cost_inr: "real",
+      telephony_provider: "text", provider_pricing_version: "text",
+      provider_rate_amount: "real", provider_rate_unit: "text", provider_cost_inr: "real",
+      phone_number_cost_inr: "real", total_cost_inr: "real",
+      snapshot: "json", created_at: "text"
+    }
+  },
+  billing_ledger_entries: {
+    pk: "id",
+    columns: {
+      id: "text", org_id: "text", type: "text", amount_inr: "real", balance_after_inr: "real",
+      reference_type: "text", reference_id: "text", description: "text", metadata: "json",
+      actor_user_id: "text", actor_email: "text", created_at: "text"
+    }
   }
 };
 

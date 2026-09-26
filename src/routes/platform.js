@@ -543,6 +543,97 @@ router.post("/organizations/:id/recharge", async (req, res) => {
   } catch (err) { handleError(err, res); }
 });
 
+router.get("/organizations/:id/billing-console", async (req, res) => {
+  try {
+    const billingConsole = require("../billing/billingConsole");
+    const data = await billingConsole.getOrganizationBillingConsole(req.params.id);
+    if (!data) return res.status(404).json({ error: "Organization not found" });
+    res.json(data);
+  } catch (err) { handleError(err, res); }
+});
+
+router.patch("/organizations/:id/billing-pricing", async (req, res) => {
+  try {
+    const org = await db.getOrg(req.params.id);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const settings = { ...(org.settings || {}), billing: { ...(org.settings?.billing || {}) } };
+    if (req.body?.resetToGlobal) {
+      delete settings.billing.aiPricing;
+    } else if (req.body?.aiPricing) {
+      settings.billing.aiPricing = req.body.aiPricing;
+    }
+    const updated = await db.updateOrg(org.id, { settings });
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.billing.ai_pricing", "organization", org.id, {
+      aiPricing: settings.billing.aiPricing || null,
+    });
+    res.json(updated);
+  } catch (err) { handleError(err, res); }
+});
+
+router.patch("/organizations/:id/minimum-balance", async (req, res) => {
+  try {
+    const org = await db.getOrg(req.params.id);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const settings = { ...(org.settings || {}), billing: { ...(org.settings?.billing || {}) } };
+    if (req.body?.useIndustryDefault) {
+      delete settings.billing.minimumBalance;
+    } else if (req.body?.minimumBalance) {
+      settings.billing.minimumBalance = req.body.minimumBalance;
+    }
+    const updated = await db.updateOrg(org.id, { settings });
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.billing.minimum_balance", "organization", org.id, {
+      minimumBalance: settings.billing.minimumBalance || null,
+    });
+    res.json(updated);
+  } catch (err) { handleError(err, res); }
+});
+
+router.get("/billing/global-ai", async (req, res) => {
+  try {
+    const billingSettings = require("../platform/billingSettings");
+    res.json(await billingSettings.getGlobalAiDefaults());
+  } catch (err) { handleError(err, res); }
+});
+
+router.put("/billing/global-ai", async (req, res) => {
+  try {
+    const billingSettings = require("../platform/billingSettings");
+    const next = await billingSettings.setGlobalAiDefaults({ userId: req.userId, userEmail: req.userEmail }, req.body || {});
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.billing.global_ai", "billing", "global_ai", next);
+    res.json(next);
+  } catch (err) { handleError(err, res); }
+});
+
+router.get("/billing/industry-minimums", async (req, res) => {
+  try {
+    const billingSettings = require("../platform/billingSettings");
+    res.json(await billingSettings.getIndustryMinimumBalanceMap());
+  } catch (err) { handleError(err, res); }
+});
+
+router.put("/billing/industry-minimums", async (req, res) => {
+  try {
+    const billingSettings = require("../platform/billingSettings");
+    const next = await billingSettings.setIndustryMinimumBalanceMap({ userId: req.userId, userEmail: req.userEmail }, req.body || {});
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.billing.industry_minimums", "billing", "industry_minimums", next);
+    res.json(next);
+  } catch (err) { handleError(err, res); }
+});
+
+router.post("/billing/pricing-preview", async (req, res) => {
+  try {
+    const org = await db.getOrg(req.body?.orgId);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const pricingPreview = require("../billing/pricingPreview");
+    res.json(await pricingPreview.previewExampleCall({
+      org,
+      providerKey: req.body?.providerKey || "vobiz",
+      durationSeconds: Number(req.body?.durationSeconds) || 600,
+      callId: req.body?.callId || null,
+    }));
+  } catch (err) { handleError(err, res); }
+});
+
 // GET /api/platform/organizations/:id/gcp-project
 router.get("/organizations/:id/gcp-project", async (req, res) => {
   try {

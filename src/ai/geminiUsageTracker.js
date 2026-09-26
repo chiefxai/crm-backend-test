@@ -179,7 +179,12 @@ async function finalizeUsageSession(handle, { status = "completed", errorCode = 
     // block a session from finalizing.
     let platformCost = null;
     try {
-      platformCost = await costProviders.computeAiCost({ providerKey: handle.costProviderKey || "gemini", totalTokens, durationSeconds });
+      platformCost = await costProviders.computeAiCost({
+        providerKey: handle.costProviderKey || "gemini",
+        totalTokens,
+        durationSeconds,
+        orgId: handle.orgId,
+      });
     } catch (err) {
       log.warn(`⚠️ [geminiUsageTracker] platform cost lookup failed for session ${handle.id}:`, err.message);
     }

@@ -888,8 +888,17 @@ async function finalizeCallRecord({
         outputTokens: postCallUsage.outputTokens,
       });
       await geminiUsageTracker.finalizeUsageSession(handle);
+      const callBillingService = require("../billing/callBillingService");
+      await callBillingService.recordCallBilling({
+        orgId, callId, providerKey: provider, durationSeconds,
+      }).catch((err) => log.error(`❌ [${provider}] call billing record error:`, err.message));
     }).catch(err => log.error(`❌ [${provider}] post-call-agents usage tracking error:`, err.message));
   }
+
+  const callBillingService = require("../billing/callBillingService");
+  callBillingService.recordCallBilling({
+    orgId, callId, providerKey: provider, durationSeconds,
+  }).catch((err) => log.error(`❌ [${provider}] call billing record error:`, err.message));
 
   return { fullTranscript, mergedTranscriptLines };
 }
