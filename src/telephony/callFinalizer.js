@@ -22,6 +22,11 @@ const db = require("../db/repository");
 const objectsEngine = require("../crm/objectsEngine");
 const postCallAgents = require("../ai/postCallAgents");
 const { isMeaningfulCallerUtterance } = require("../ai/postCallAgents/decisionEngine");
+const {
+  findAdvisorCallbackResponse,
+  resolveAdvisorCallbackIso,
+  shouldSuppressDialerCallbackForAdvisorPreference,
+} = require("../lib/advisorCallbackTime");
 const { validateWorkflowAnswers } = require("../ai/postCallAgents/workflowAnswersAgent");
 const storage = require("../storage");
 const geminiUsageTracker = require("../ai/geminiUsageTracker");
@@ -553,6 +558,43 @@ async function finalizeCallRecord({
     enquirySummary: null,
     callerName: null,
   };
+
+  const advisorCallbackRow = findAdvisorCallbackResponse(callAnswers);
+  let leadAdvisorCallbackTime = null;
+  if (advisorCallbackRow && callAnswered) {
+    try {
+      leadAdvisorCallbackTime = await resolveAdvisorCallbackIso({
+        answer: advisorCallbackRow.answer,
+        question: advisorCallbackRow.question,
+        callerPhone: callerNumber,
+        orgId,
+        onUsage: accumulateUsage,
+      });
+      if (leadAdvisorCallbackTime) {
+        const targetLeadId = leadId || (callerNumber ? (await db.findLeadByPhone(orgId, callerNumber).catch(() => null))?.id : null);
+        if (targetLeadId) {
+          await db.patch("leads", orgId, targetLeadId, {
+            callbackTime: leadAdvisorCallbackTime,
+            updatedAt: new Date().toISOString(),
+          });
+          if (!leadId) leadId = targetLeadId;
+          log.info(`📅 [${provider}] Saved human advisor callback preference on lead ${targetLeadId}: ${leadAdvisorCallbackTime}`);
+        }
+      }
+    } catch (err) {
+      log.error(`❌ [${provider}] Failed to save advisor callback time on lead:`, err.message);
+    }
+  }
+
+  if (shouldSuppressDialerCallbackForAdvisorPreference(fullTranscript, !!advisorCallbackRow)) {
+    scheduling = {
+      ...scheduling,
+      callbackRequested: false,
+      callbackTime: null,
+      callbackUsedPolicyFallback: false,
+      callbackTimeMentioned: false,
+    };
+  }
 
   const {
     finalStatus, callbackRequested, enquiryRequested, callbackTimeToStore, callbackReasonToStore,

@@ -5,6 +5,8 @@ const featureFlags = require("../platform/featureFlags");
 const postCallAgents = require("../ai/postCallAgents");
 const questionnaire = require("./questionnaire");
 const { GET_STARHEALTH_QUOTE_TOOL } = require("./vobizStarhealthTool");
+const { getCallerTimezone } = require("../lib/callerTimezone");
+const { nowInTimezone } = require("../lib/timezoneConvert");
 
 /**
  * Build the full Gemini Live system prompt and tool declarations for a Vobiz call.
@@ -18,6 +20,7 @@ async function buildVobizSessionPrompt({
   genericFallbackQuestions,
   callerContactName,
   orgName,
+  callerPhone = null,
 }) {
   const customObjects = setup.customObjects || [];
   let orgHasKnowledgeBase = setup.orgHasKnowledgeBase;
@@ -119,6 +122,24 @@ Once the conversation has naturally wrapped up — the caller's questions are an
     ? `\n━━━ CALLER IDENTITY ━━━\nThis caller is already a saved contact named "${callerContactName}". Address them by this name naturally during the call. Do NOT ask "what is your name?" — you already know it.\n`
     : "";
 
+  let callerClockPrompt = "";
+  if (callerPhone) {
+    const callerTimezone = getCallerTimezone(callerPhone);
+    const callerNow = nowInTimezone(callerTimezone);
+    callerClockPrompt = `
+──────────
+CALLER LOCAL DATE & TIME
+──────────
+The caller's IANA timezone is ${callerTimezone}. On their clock right now it is ${callerNow} (format YYYY-MM-DDTHH:mm:ss, 24-hour).
+
+Interpret "today", "tomorrow", "this evening", and times like "10 AM" relative to THIS clock — not server UTC.
+
+If a questionnaire question asks when a human advisor, specialist, or team member should call or speak with them, capture their answer with save_question_response. That is a human follow-up preference on their contact record — it does NOT schedule another AI outbound call.
+
+If the caller is busy and wants YOU (this AI) to call them back later, that is different — follow your callback / ending-call instructions for an AI redial.
+`;
+  }
+
   let starhealthPrompt = "";
   if (taskConfig?.starhealthEnabled && (await featureFlags.isEnabled("starhealth_quote"))) {
     customToolDeclarations.push(GET_STARHEALTH_QUOTE_TOOL);
@@ -140,8 +161,8 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
   }
 
   let finalPrompt = customObjects.length > 0
-    ? buildRuntimePrompt(activeConfig) + "\n" + customObjectsPrompt + companyInfoPrompt + callerIdentityPrompt + (hasCustomTaskQuestions ? "\n" + genericQuestionnairePrompt : "") + knowledgeBasePrompt + endCallPrompt
-    : buildRuntimePrompt(activeConfig) + "\n" + dynamicQuestionnairePrompt + companyInfoPrompt + callerIdentityPrompt + knowledgeBasePrompt + endCallPrompt;
+    ? buildRuntimePrompt(activeConfig) + "\n" + customObjectsPrompt + companyInfoPrompt + callerIdentityPrompt + callerClockPrompt + (hasCustomTaskQuestions ? "\n" + genericQuestionnairePrompt : "") + knowledgeBasePrompt + endCallPrompt
+    : buildRuntimePrompt(activeConfig) + "\n" + dynamicQuestionnairePrompt + companyInfoPrompt + callerIdentityPrompt + callerClockPrompt + knowledgeBasePrompt + endCallPrompt;
   if (starhealthPrompt) finalPrompt += "\n" + starhealthPrompt;
 
   const kbInlineLength = (setup.inlineKnowledge && typeof setup.inlineKnowledge === "string")

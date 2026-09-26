@@ -68,6 +68,7 @@ async function runOutboundPrewarm({
     genericFallbackQuestions,
     callerContactName,
     orgName,
+    callerPhone: phoneNumber,
   });
   metrics.promptBuildMs = Date.now() - promptT0;
   metrics.finalPromptLength = promptBundle.finalPromptLength;
