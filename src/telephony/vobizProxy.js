@@ -40,8 +40,8 @@ postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: 
 
 const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
 const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
-const { runOutboundPrewarm } = require("./vobizOutboundPrewarm");
-const { logGreetingLatency } = require("./vobizOpeningGreeting");
+const { runOutboundPrewarm, generateOpeningAudio } = require("./vobizOutboundPrewarm");
+const { buildOpeningGreetingText, logGreetingLatency } = require("./vobizOpeningGreeting");
 
 // ── Per-call raw Gemini event log ───────────────────────────────
 // Google doesn't expose Live API (WebSocket) usage in AI Studio's log
@@ -951,15 +951,55 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             log.info(`⏱️ Vobiz prompt built on answer — ${finalPrompt.length} chars (KB inline ${promptBundle.kbInlineLength || 0})`);
           }
 
-          if (prewarmPayload?.openingGreetingAudio?.length) {
+          const playPreparedOpeningPcm = (audio, text) => {
+            if (!audio?.length || preparedOpeningPlayed) return;
             preparedOpeningPlayed = true;
-            preparedOpeningText = prewarmPayload.openingGreetingText;
-            outboundAudioPlayer.enqueuePcm(prewarmPayload.openingGreetingAudio, { fastStart: true });
-            writeRecording(prewarmPayload.openingGreetingAudio);
-            transcriptLines.push({ role: "ai", text: preparedOpeningText });
+            preparedOpeningText = text || "";
+            outboundAudioPlayer.enqueuePcm(audio, { fastStart: true });
+            writeRecording(audio);
+            if (preparedOpeningText) transcriptLines.push({ role: "ai", text: preparedOpeningText });
             callLatencyMetrics.greetingPlaybackStart = Date.now();
             callLatencyMetrics.answer_to_greeting_play_ms = callLatencyMetrics.greetingPlaybackStart - answerAtMs;
+            log.info(`👋 Playing prepared opening greeting (${audio.length}B PCM, prewarmHit=${Boolean(prewarmPayload?.finalPrompt)})`);
             logGreetingLatency(callId, callLatencyMetrics);
+          };
+
+          const outboundDirection = (vobizCallDirection.get(callId) || "unknown") === "outbound";
+          const openingGreetingTextAtAnswer = prewarmPayload?.openingGreetingText
+            || (outboundDirection
+              ? buildOpeningGreetingText({
+                direction: "outbound",
+                orgName,
+                agentName: (activeConfig && activeConfig.name) || "",
+                campaignLabel: prewarmPayload?.campaignLabel || null,
+                callerContactName,
+                language: taskConfig?.language,
+              })
+              : null);
+
+          if (prewarmPayload?.openingGreetingAudio?.length) {
+            playPreparedOpeningPcm(prewarmPayload.openingGreetingAudio, openingGreetingTextAtAnswer);
+          } else if (outboundDirection && openingGreetingTextAtAnswer && voiceName && resolvedOrgId) {
+            const ttsMissReason = prewarmPayload?.metrics?.greetingError || (prewarmPayload ? "no_audio" : "prewarm_miss");
+            log.info(`⏱️ Generating opening greeting TTS at answer (reason=${ttsMissReason})`);
+            generateOpeningAudio({
+              orgId: resolvedOrgId,
+              agentId: explicitAgentId || setup.activeConfig?.id || null,
+              activeConfig,
+              campaignLabel: prewarmPayload?.campaignLabel || null,
+              voiceName,
+              openingGreetingText: openingGreetingTextAtAnswer,
+              callerContactName,
+              language: taskConfig?.language,
+              metrics: callLatencyMetrics,
+            })
+              .then((audio) => {
+                if (!isActive || !audio?.length) return;
+                playPreparedOpeningPcm(audio, openingGreetingTextAtAnswer);
+              })
+              .catch((err) => {
+                log.warn(`⚠️ Answer-time opening TTS failed, will use Live greeting: ${err.message}`);
+              });
           }
 
           // Connect to Gemini asynchronously in the background. Wrapped in a

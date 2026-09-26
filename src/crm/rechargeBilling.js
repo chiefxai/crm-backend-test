@@ -106,7 +106,13 @@ async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
     const available = money(balance - reserved);
 
     const { getEffectiveMinimumBalance } = require("../billing/minimumBalance");
-    const minimum = await getEffectiveMinimumBalance(org);
+    const orgForMinimum = estimate.org || (await db.getOrg(orgId));
+    if (!orgForMinimum) {
+      const err = new Error("Organization not found");
+      err.statusCode = 404;
+      throw err;
+    }
+    const minimum = await getEffectiveMinimumBalance(orgForMinimum);
     const requiredAvailable = money(Math.max(amount, minimum.effectiveMinimumBalanceInr || 0));
 
     if (available < requiredAvailable) {
