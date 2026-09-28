@@ -1066,7 +1066,7 @@ class QueryBuilder {
       await ready;
       return await this._execAsync(mode);
     } catch (err) {
-      return { data: null, error: { message: err.message }, count: null };
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
     }
   }
 

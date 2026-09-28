@@ -864,6 +864,19 @@ async function updateOrgMemberUserId(orgId, memberId, userId) {
   return fromDbRow("team", data);
 }
 
+async function findOrgMemberByEmail(email) {
+  const normalizedEmail = email ? String(email).trim().toLowerCase() : "";
+  if (!normalizedEmail) return null;
+  const { data, error } = await supabase
+    .from("org_members")
+    .select("id, org_id, email, user_id")
+    .eq("email", normalizedEmail)
+    .maybeSingle();
+  if (error) throw new Error(`[db.findOrgMemberByEmail] ${error.message}`);
+  if (!data) return null;
+  return { id: data.id, orgId: data.org_id, email: data.email, userId: data.user_id };
+}
+
 async function addOrgMember(orgId, userId, { name, email, phone, role, feature_flags } = {}) {
   const normalizedEmail = email ? email.toLowerCase() : email;
   const { data, error } = await supabase
@@ -875,11 +888,19 @@ async function addOrgMember(orgId, userId, { name, email, phone, role, feature_f
       email: normalizedEmail,
       phone: phone || null,
       role: role || "Organization Admin",
+      status: "Active",
+      performance_score: 0,
+      assigned_leads_count: 0,
       feature_flags: feature_flags || [],
     })
     .select()
     .single();
-  if (error) throw new Error(`[db.addOrgMember] ${error.message}`);
+  if (error) {
+    const wrapped = new Error(`[db.addOrgMember] ${error.message}`);
+    if (error.code) wrapped.code = error.code;
+    if (error.errno) wrapped.errno = error.errno;
+    throw wrapped;
+  }
   return fromDbRow("team", data);
 }
 
@@ -2092,6 +2113,7 @@ module.exports = {
   DEFAULT_RETRY_POLICY,
   MAX_RETRY_ATTEMPTS,
   addOrgMember,
+  findOrgMemberByEmail,
   updateOrgMemberUserId,
   findOrgIdForUser,
   findMembershipForUser,

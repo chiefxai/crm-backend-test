@@ -13,6 +13,7 @@ const emailTemplates = require("../email/templates");
 const authProvider = require("../auth");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.settings");
+const { isDuplicateKeyError } = require("../lib/dbErrors");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
@@ -145,6 +146,16 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
 
     const crmRole = role && String(role).trim() ? String(role).trim() : "Team Member";
 
+    const existingMember = await db.findOrgMemberByEmail(memberFields.email);
+    if (existingMember) {
+      const sameOrg = existingMember.orgId === req.orgId;
+      return res.status(409).json({
+        error: sameOrg
+          ? "A team member with this email is already in your organization."
+          : "This email is already registered to another organization.",
+      });
+    }
+
     const m = await db.addOrgMember(req.orgId, null, {
       ...memberFields,
       role: crmRole,
@@ -210,6 +221,10 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
     auditLog.record(req.orgId, req, "team.add", "team_member", m.id, { name: m.name, role: crmRole, authUserId });
     res.status(201).json({ ...m, userId: authUserId, role: crmRole, credsSent: false });
   } catch (err) {
+    log.error("POST /api/settings/team failed:", err.message);
+    if (isDuplicateKeyError(err)) {
+      return res.status(409).json({ error: "A team member with this email already exists." });
+    }
     const status = err?.code === "ER_DUP_ENTRY" || err?.code === "23505" ? 409 : 500;
     res.status(status).json({ error: safeErrorMessage(err) });
   }
