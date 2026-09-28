@@ -5,7 +5,9 @@
 //
 // Optional:
 //   SMTP_SECURE — "true" for port 465 TLS (default false)
-//   APP_URL     — public frontend URL included in emails
+//   APP_URL     — public frontend URL in emails (see src/email/appUrl.js)
+//   FRONTEND_URL / PUBLIC_APP_URL — optional aliases
+//   ALLOWED_ORIGINS — first origin used if APP_URL is unset
 
 const nodemailer = require("nodemailer");
 const { getLogger } = require("../observability/logger");
