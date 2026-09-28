@@ -11,6 +11,18 @@ describe('Cognito provider configuration', () => {
 });
 
 
+describe('Cognito temporary passwords', () => {
+  test('generateCompliantTemporaryPassword includes symbol and mixed character classes', () => {
+    const { generateCompliantTemporaryPassword } = require('../src/auth/providers/cognito');
+    const password = generateCompliantTemporaryPassword();
+    expect(password.length).toBeGreaterThanOrEqual(16);
+    expect(/[A-Z]/.test(password)).toBe(true);
+    expect(/[a-z]/.test(password)).toBe(true);
+    expect(/[0-9]/.test(password)).toBe(true);
+    expect(/[!@#$%^&*_\-+=]/.test(password)).toBe(true);
+  });
+});
+
 describe('Cognito CRM role provisioning', () => {
   test('uses Cognito groups for supported CRM roles', () => {
     const fs = require('fs');

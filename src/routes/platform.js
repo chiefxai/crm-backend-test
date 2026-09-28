@@ -441,7 +441,9 @@ router.post("/organizations", async (req, res) => {
     if (adminEmail) {
       const normalizedEmail = adminEmail.toLowerCase();
       try {
-        const generatedPassword = process.env.AUTH_PROVIDER === "identity_platform" ? null : (() => { const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"; const lower = "abcdefghijklmnopqrstuvwxyz"; const digits = "0123456789"; const symbols = "!@#$%^&*_-+="; const all = upper + lower + digits + symbols; const pick = (chars) => chars[crypto.randomInt(chars.length)]; const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)]; for (let i = chars.length; i < 16; i++) chars.push(pick(all)); for (let i = chars.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [chars[i], chars[j]] = [chars[j], chars[i]]; } return chars.join(""); })();
+        const generatedPassword = process.env.AUTH_PROVIDER === "identity_platform"
+          ? null
+          : require("../auth/providers/cognito").generateCompliantTemporaryPassword();
         const authUserId = await authProvider.provisionUser(normalizedEmail, generatedPassword, adminName || "", "OrganizationAdmin");
         if (!authUserId) {
           if ((process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {

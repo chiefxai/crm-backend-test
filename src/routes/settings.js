@@ -24,13 +24,33 @@ function isAuthPrivilegedRole(role) {
   return role && AUTH_PRIVILEGED_ROLES.has(String(role).trim());
 }
 
-function cognitoTeamMemberGroup() {
+function cognitoAuthHelpers() {
   try {
-    const { COGNITO_ROLES } = require("../auth/providers/cognito");
-    return COGNITO_ROLES?.TEAM_MEMBER || "TeamMember";
+    return require("../auth/providers/cognito");
   } catch {
-    return "TeamMember";
+    return null;
   }
+}
+
+function cognitoTeamMemberGroup() {
+  const cognito = cognitoAuthHelpers();
+  return cognito?.COGNITO_ROLES?.TEAM_MEMBER || "TeamMember";
+}
+
+function cognitoTemporaryPassword() {
+  const cognito = cognitoAuthHelpers();
+  if (cognito?.generateCompliantTemporaryPassword) {
+    return cognito.generateCompliantTemporaryPassword();
+  }
+  const crypto = require("crypto");
+  const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const lower = "abcdefghijklmnopqrstuvwxyz";
+  const digits = "0123456789";
+  const symbols = "!@#$%^&*_-+=";
+  const all = upper + lower + digits + symbols;
+  const pick = (chars) => chars[crypto.randomInt(chars.length)];
+  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols), pick(all), pick(all)];
+  return chars.join("");
 }
 
 // ── Virtual numbers ──
@@ -169,7 +189,7 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
 
     if ((process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {
       try {
-        const tempPassword = crypto.randomBytes(8).toString("base64url");
+        const tempPassword = cognitoTemporaryPassword();
         const authUserId = await authProvider.provisionUser(
           m.email,
           tempPassword,

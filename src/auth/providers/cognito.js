@@ -27,6 +27,7 @@ const {
   UsernameExistsException,
   GroupExistsException,
 } = require('@aws-sdk/client-cognito-identity-provider');
+const crypto = require('crypto');
 const { getLogger } = require('../../observability/logger');
 const log = getLogger('auth.providers.cognito');
 
@@ -88,6 +89,23 @@ function normalizeRole(role) {
   const value = String(role || COGNITO_ROLES.TEAM_MEMBER).trim();
   if (!ROLE_SET.has(value)) throw new Error(`Invalid Cognito role "${value}"`);
   return value;
+}
+
+/** Temporary password that satisfies typical Cognito pool policies (symbol, cases, digit). */
+function generateCompliantTemporaryPassword(length = 16) {
+  const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const lower = 'abcdefghijklmnopqrstuvwxyz';
+  const digits = '0123456789';
+  const symbols = '!@#$%^&*_-+=';
+  const all = upper + lower + digits + symbols;
+  const pick = (chars) => chars[crypto.randomInt(chars.length)];
+  const chars = [pick(upper), pick(lower), pick(digits), pick(symbols)];
+  for (let i = chars.length; i < length; i++) chars.push(pick(all));
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
 }
 
 async function ensureRoleGroups() {
@@ -241,5 +259,6 @@ module.exports = {
   syncUserRole,
   deleteUser,
   ensureRoleGroups,
+  generateCompliantTemporaryPassword,
   COGNITO_ROLES,
 };
