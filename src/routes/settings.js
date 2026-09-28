@@ -14,6 +14,24 @@ const authProvider = require("../auth");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.settings");
 
+// CRM stores human-readable job titles (Loan Agent, etc.). Only these
+// auth-level roles are blocked from org-admin team creation — Cognito
+// always provisions TeamMember regardless of the CRM title.
+const AUTH_PRIVILEGED_ROLES = new Set(["Super Admin", "Organization Admin"]);
+
+function isAuthPrivilegedRole(role) {
+  return role && AUTH_PRIVILEGED_ROLES.has(String(role).trim());
+}
+
+function cognitoTeamMemberGroup() {
+  try {
+    const { COGNITO_ROLES } = require("../auth/providers/cognito");
+    return COGNITO_ROLES?.TEAM_MEMBER || "TeamMember";
+  } catch {
+    return "TeamMember";
+  }
+}
+
 // ── Virtual numbers ──
 router.get("/numbers", requireAuth, async (req, res) => {
   try { res.json(await db.list("numbers", req.orgId)); }
@@ -118,18 +136,18 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
     const { featureFlags, role, ...memberFields } = req.body || {};
     const availableFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
 
-    // Customer organization admins can create team members only. Platform-level
-    // roles are never assignable from an organization-scoped endpoint.
-    if (role && role !== "Team Member") {
-      return res.status(400).json({ error: "Organization admins can only add Team Member accounts." });
+    if (isAuthPrivilegedRole(role)) {
+      return res.status(400).json({ error: "Organization admins cannot assign platform or organization-admin roles." });
     }
     if (!memberFields.email) {
       return res.status(400).json({ error: "email is required" });
     }
 
+    const crmRole = role && String(role).trim() ? String(role).trim() : "Team Member";
+
     const m = await db.addOrgMember(req.orgId, null, {
       ...memberFields,
-      role: "Team Member",
+      role: crmRole,
       feature_flags: availableFeatureFlags,
     });
 
@@ -140,7 +158,7 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
           m.email,
           tempPassword,
           m.name || "",
-          "Team Member"
+          cognitoTeamMemberGroup()
         );
 
         if (!authUserId) throw new Error("Cognito did not return a user id");
@@ -151,7 +169,7 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
           orgName: org?.name || "your organization",
           adminEmail: m.email,
           tempPassword,
-          role: "Team Member",
+          role: crmRole,
         });
         mailer.sendMail({ to: m.email, ...tpl })
           .catch((err) => log.error("⚠️  Welcome email failed:", err.message));
@@ -159,10 +177,10 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
         global.broadcastLog(`👤 Registered team member: ${m.name}`, { type: "settings" });
         auditLog.record(req.orgId, req, "team.add", "team_member", m.id, {
           name: m.name,
-          role: "Team Member",
+          role: crmRole,
           authUserId,
         });
-        return res.status(201).json({ ...m, userId: authUserId, role: "Team Member", credsSent: true });
+        return res.status(201).json({ ...m, userId: authUserId, role: crmRole, credsSent: true });
       } catch (authErr) {
         // Do not leave an org member record that cannot authenticate.
         await db.remove("team", req.orgId, m.id).catch((cleanupErr) =>
@@ -181,7 +199,7 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
       m.email,
       null,
       m.name || "",
-      "Team Member"
+      cognitoTeamMemberGroup()
     ).catch((authErr) => {
       log.warn(`⚠️  Authentication provider provisioning deferred for ${m.email}: ${authErr.message}`);
       return null;
@@ -189,8 +207,8 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
     if (authUserId) await db.updateOrgMemberUserId(req.orgId, m.id, authUserId);
 
     global.broadcastLog(`👤 Registered team member: ${m.name}`, { type: "settings" });
-    auditLog.record(req.orgId, req, "team.add", "team_member", m.id, { name: m.name, role: "Team Member", authUserId });
-    res.status(201).json({ ...m, userId: authUserId, role: "Team Member", credsSent: false });
+    auditLog.record(req.orgId, req, "team.add", "team_member", m.id, { name: m.name, role: crmRole, authUserId });
+    res.status(201).json({ ...m, userId: authUserId, role: crmRole, credsSent: false });
   } catch (err) {
     const status = err?.code === "ER_DUP_ENTRY" || err?.code === "23505" ? 409 : 500;
     res.status(status).json({ error: safeErrorMessage(err) });
@@ -212,7 +230,7 @@ router.patch("/team/:id/flags", requireAuth, requireRole(["Organization Admin"])
 router.patch("/team/:id", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try {
     const patch = { ...(req.body || {}) };
-    if (patch.role && patch.role !== "Team Member") {
+    if (isAuthPrivilegedRole(patch.role)) {
       return res.status(400).json({ error: "Organization admins cannot assign platform or organization-admin roles." });
     }
     if (patch.userId) delete patch.userId;
@@ -221,9 +239,6 @@ router.patch("/team/:id", requireAuth, requireRole(["Organization Admin"]), asyn
     if (!existing) return res.status(404).json({ error: "Team member not found" });
 
     const updated = await db.patch("team", req.orgId, req.params.id, patch);
-    if (patch.role && existing.userId && (process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {
-      await authProvider.syncUserRole(existing.userId, "Team Member");
-    }
     auditLog.record(req.orgId, req, "team.update", "team_member", req.params.id, patch);
     res.json(updated);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }

@@ -1354,13 +1354,48 @@ async function findOrgIdForNumber(number) {
     // stop this at write time, but flag loudly if it ever happens anyway.
     log.error(`❌ [db.findOrgIdForNumber] Number "${number}" matches ${matches.length} orgs (${matches.map((m) => m.org_id).join(", ")}) — routing to the first match, but this indicates a duplicate virtual_numbers row that should be fixed.`);
   }
-  return matches.length ? matches[0].org_id : null;
+  if (matches.length) return matches[0].org_id;
+
+  const last10 = digitsOnly.slice(-10);
+  const { data: channels, error: chErr } = await supabase
+    .from("channels")
+    .select("org_id, external_id")
+    .eq("type", "vobiz");
+  if (chErr) throw new Error(`[db.findOrgIdForNumber] channels: ${chErr.message}`);
+  const channelMatch = (channels || []).find((row) =>
+    String(row.external_id || "").replace(/[^\d]/g, "").endsWith(last10)
+  );
+  return channelMatch?.org_id || null;
 }
 
 // Whether `number` is free to assign to `orgId` — false if another org
 // already owns a number whose last 10 digits match (same normalization
 // findOrgIdForNumber uses for inbound routing, so "available" here really
 // means "won't collide with call routing").
+/** Ensure a virtual_numbers row exists for a connected telephony DID. */
+async function ensureVirtualNumberForPhone(orgId, phoneNumber, { provider = "Vobiz.ai", friendlyName } = {}) {
+  if (!orgId || !phoneNumber) return null;
+  const digitsOnly = String(phoneNumber).replace(/[^\d]/g, "");
+  if (!digitsOnly) return null;
+  const last10 = digitsOnly.slice(-10);
+  const numbers = await list("numbers", orgId);
+  const match = (numbers || []).find((row) =>
+    String(row.number || "").replace(/[^\d]/g, "").endsWith(last10)
+  );
+  if (match) return match;
+  const routingBase = (process.env.PUBLIC_API_BASE_URL || process.env.API_BASE_URL || "").replace(/\/$/, "");
+  const routingUrl = routingBase ? `${routingBase}/api/vobiz/incoming` : "";
+  return create("numbers", orgId, {
+    number: phoneNumber,
+    provider,
+    status: "Active",
+    friendlyName: friendlyName || `${provider} Line`,
+    routingUrl,
+    incomingCallCount: 0,
+    outgoingCallCount: 0,
+  });
+}
+
 async function isNumberAvailable(number, orgId) {
   const existingOrgId = await findOrgIdForNumber(number);
   if (existingOrgId && existingOrgId !== orgId) return false;
@@ -1371,7 +1406,7 @@ async function isNumberAvailable(number, orgId) {
   // too so we never pass the availability check and then hit a DB duplicate
   // key during channelsEngine.upsertChannel().
   if (number) {
-    const digitsOnly = String(number).replace(/[^\\d]/g, "");
+    const digitsOnly = String(number).replace(/[^\d]/g, "");
     if (digitsOnly) {
       const { data: channels, error } = await supabase
         .from("channels")
@@ -1380,7 +1415,7 @@ async function isNumberAvailable(number, orgId) {
       if (error) throw new Error("[db.isNumberAvailable] " + error.message);
       const last10 = digitsOnly.slice(-10);
       const channelMatch = (channels || []).find(
-        (row) => String(row.external_id || "").replace(/[^\\d]/g, "").endsWith(last10)
+        (row) => String(row.external_id || "").replace(/[^\d]/g, "").endsWith(last10)
       );
       if (channelMatch && channelMatch.org_id !== orgId) return false;
     }
@@ -2061,6 +2096,7 @@ module.exports = {
   findOrgIdForUser,
   findMembershipForUser,
   findOrgIdForNumber,
+  ensureVirtualNumberForPhone,
   findLeadByPhone,
   findCapturedNameForCall,
   getResponsesByCallId,

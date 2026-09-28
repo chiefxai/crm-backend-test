@@ -87,6 +87,10 @@ channelsRouter.post("/vobiz", requireAuth, requireRole(ADMIN_ROLES), async (req,
       return res.status(409).json({ error: "This number is already assigned to another organization." });
     }
     const channel = await channelsEngine.upsertChannel(req.orgId, "vobiz", phoneNumber, { authId, authToken, phoneNumber });
+    await db.ensureVirtualNumberForPhone(req.orgId, phoneNumber, {
+      provider: "Vobiz.ai",
+      friendlyName: `${phoneNumber} (Vobiz)`,
+    }).catch((err) => log.warn(`⚠️ Could not ensure virtual_numbers row for ${phoneNumber}: ${err.message}`));
     auditLog.record(req.orgId, req, "channel.connect", "channel", channel.id, { type: "vobiz", phoneNumber });
     res.status(201).json(channel);
   } catch (err) {

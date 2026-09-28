@@ -189,17 +189,15 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
       } else {
         const agent = await db.getAgentForNumber(To);
         if (!agent) {
-          rejectCall = true;
-          log.warn(`⚠️ [vobiz] Rejecting inbound call to ${To} — no active agent assigned to this number.`);
-        } else {
-          vobizCallOrgs.set(CallUUID, orgId);
-          setTimeout(() => vobizCallOrgs.delete(CallUUID), 1800000);
-          vobizCallDirection.set(CallUUID, "inbound");
-          setTimeout(() => vobizCallDirection.delete(CallUUID), 1800000);
-          global.broadcastLog(`📞 Incoming call from ${From || "unknown number"}`, {
-            type: "call_started", orgId, callerNumber: From || null, direction: "inbound", provider: "vobiz"
-          });
+          log.warn(`⚠️ [vobiz] Inbound call to ${To} has no dedicated agent — using org-level voice config. Assign an inbound agent in Agent Studio for per-line personas.`);
         }
+        vobizCallOrgs.set(CallUUID, orgId);
+        setTimeout(() => vobizCallOrgs.delete(CallUUID), 1800000);
+        vobizCallDirection.set(CallUUID, "inbound");
+        setTimeout(() => vobizCallDirection.delete(CallUUID), 1800000);
+        global.broadcastLog(`📞 Incoming call from ${From || "unknown number"}`, {
+          type: "call_started", orgId, callerNumber: From || null, direction: "inbound", provider: "vobiz"
+        });
       }
     } catch (err) {
       log.error("❌ Vobiz inbound org lookup failed:", err.message);
