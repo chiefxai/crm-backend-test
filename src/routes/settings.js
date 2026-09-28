@@ -135,7 +135,12 @@ router.get("/team", requireAuth, async (req, res) => {
 router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try {
     const { featureFlags, role, ...memberFields } = req.body || {};
-    const availableFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
+    let availableFeatureFlags = [];
+    try {
+      availableFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
+    } catch (flagErr) {
+      log.warn("sanitizeFeatureKeys failed for team create, using no flags:", flagErr.message);
+    }
 
     if (isAuthPrivilegedRole(role)) {
       return res.status(400).json({ error: "Organization admins cannot assign platform or organization-admin roles." });
