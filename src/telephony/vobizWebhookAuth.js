@@ -1,5 +1,7 @@
 const crypto = require("crypto");
 const { getLogger } = require("../observability/logger");
+const { verifyVobizWebhookSignature } = require("./vobizSignature");
+
 const log = getLogger("telephony.vobizWebhookAuth");
 
 function getExpectedVobizWebhookSecret() {
@@ -35,7 +37,39 @@ function secretsMatch(expected, supplied) {
   return crypto.timingSafeEqual(a, b);
 }
 
-function requireVobizWebhook(req, res, next) {
+function webhookSharedSecretOk(req) {
+  const expected = getExpectedVobizWebhookSecret();
+  if (!expected) return false;
+  return secretsMatch(expected, extractSuppliedVobizWebhookSecret(req));
+}
+
+async function vobizSignatureOk(req) {
+  const channelsEngine = require("../channels/engine");
+  const to = req.body?.To || req.query?.To;
+  const from = req.body?.From || req.query?.From;
+  const tokens = new Set();
+
+  const primary = await channelsEngine.findVobizChannelByPhone(to)
+    || await channelsEngine.findVobizChannelByPhone(from);
+  if (primary?.config?.authToken) tokens.add(String(primary.config.authToken));
+
+  if (!tokens.size) {
+    for (const token of await channelsEngine.listVobizAuthTokens()) tokens.add(token);
+  }
+
+  for (const authToken of tokens) {
+    if (verifyVobizWebhookSignature(req, authToken)) return true;
+  }
+  return false;
+}
+
+async function isVobizWebhookAuthorized(req) {
+  if (webhookSharedSecretOk(req)) return true;
+  if (await vobizSignatureOk(req)) return true;
+  return false;
+}
+
+async function requireVobizWebhook(req, res, next) {
   const expected = getExpectedVobizWebhookSecret();
   if (!expected) {
     if (process.env.NODE_ENV === "production") {
@@ -44,17 +78,27 @@ function requireVobizWebhook(req, res, next) {
     return next();
   }
 
-  const supplied = extractSuppliedVobizWebhookSecret(req);
-  if (!secretsMatch(expected, supplied)) {
-    log.warn("Vobiz webhook rejected — missing or invalid webhook secret. Configure the Vobiz Answer URL with ?webhook_secret=... (see GET /api/settings/vobiz-inbound-webhook).", {
-      path: req.path,
-      hasHeader: Boolean(req.get("X-Vobiz-Webhook-Secret")),
-      hasQuerySecret: Boolean(req.query?.webhook_secret),
-      hasBodySecret: Boolean(req.body?.webhook_secret || req.body?.webhookSecret),
-    });
-    return res.status(401).json({ error: "Invalid Vobiz webhook credentials" });
+  try {
+    if (await isVobizWebhookAuthorized(req)) return next();
+  } catch (err) {
+    log.error("Vobiz webhook auth error:", err.message);
+    return res.status(500).json({ error: "Vobiz webhook authentication failed" });
   }
-  return next();
+
+  const hasSig = Boolean(
+    req.get("X-Vobiz-Signature-V3")
+    || req.get("X-Vobiz-Signature-V2")
+    || req.get("x-vobiz-signature-v3")
+    || req.get("x-vobiz-signature-v2")
+  );
+  log.warn("Vobiz webhook rejected — invalid shared secret and signature verification failed. Sync inbound routing (POST /api/settings/vobiz-inbound-webhook/sync) or set Answer URL with ?webhook_secret=...", {
+    path: req.path,
+    hasHeaderSecret: Boolean(req.get("X-Vobiz-Webhook-Secret")),
+    hasQueryParam: Boolean(req.query?.webhook_secret),
+    hasBodyParam: Boolean(req.body?.webhook_secret || req.body?.webhookSecret),
+    hasVobizSignature: hasSig,
+  });
+  return res.status(401).json({ error: "Invalid Vobiz webhook credentials" });
 }
 
 module.exports = {
@@ -62,4 +106,5 @@ module.exports = {
   requireVobizWebhook,
   extractSuppliedVobizWebhookSecret,
   getExpectedVobizWebhookSecret,
+  isVobizWebhookAuthorized,
 };

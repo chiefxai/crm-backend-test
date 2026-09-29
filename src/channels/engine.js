@@ -173,6 +173,42 @@ async function getChannel(orgId, type) {
   return hydrateChannel(data || null);
 }
 
+function phoneExternalIdVariants(phoneNumber) {
+  const raw = String(phoneNumber || "").trim();
+  const digits = raw.replace(/\D/g, "");
+  const variants = new Set();
+  if (raw) variants.add(raw);
+  if (digits) {
+    variants.add(digits);
+    variants.add(`+${digits}`);
+    if (digits.length === 10) variants.add(`+91${digits}`);
+  }
+  return [...variants];
+}
+
+/** Resolve a Vobiz channel row from a webhook To/From value. */
+async function findVobizChannelByPhone(phoneNumber) {
+  for (const externalId of phoneExternalIdVariants(phoneNumber)) {
+    const channel = await getChannelByExternalId(externalId, "vobiz");
+    if (channel?.config?.authToken) return channel;
+  }
+  return null;
+}
+
+/** Unique auth tokens for signature verification (webhook auth fallback). */
+async function listVobizAuthTokens() {
+  requireDb();
+  const { data, error } = await db.supabase.from("channels").select("*").eq("type", "vobiz");
+  if (error) throw new Error(`[channelsEngine.listVobizAuthTokens] ${error.message}`);
+  const tokens = new Set();
+  for (const row of data || []) {
+    const hydrated = hydrateChannel(row);
+    const token = hydrated?.config?.authToken;
+    if (token) tokens.add(String(token));
+  }
+  return [...tokens];
+}
+
 async function removeChannel(orgId, type) {
   requireDb();
   const { error } = await db.supabase.from("channels").delete().eq("org_id", orgId).eq("type", type);
@@ -295,6 +331,8 @@ module.exports = {
   upsertChannel,
   getChannelByExternalId,
   getChannel,
+  findVobizChannelByPhone,
+  listVobizAuthTokens,
   removeChannel,
   listConversations,
   listMessages,
