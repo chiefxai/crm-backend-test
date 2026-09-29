@@ -23,6 +23,7 @@ const {
   dedupePendingScheduleRows,
 } = require("../crm/postCallScheduleDedupe");
 const { getLogger } = require("../observability/logger");
+const { buildVobizIncomingWebhookUrl } = require("../telephony/vobizWebhookAuth");
 const organizationRepository = require("./repositories/organizationRepository");
 const aiUsageRepository = require("./repositories/aiUsageRepository");
 const log = getLogger("db.repository");
@@ -1405,7 +1406,7 @@ async function ensureVirtualNumberForPhone(orgId, phoneNumber, { provider = "Vob
   );
   if (match) return match;
   const routingBase = (process.env.PUBLIC_API_BASE_URL || process.env.API_BASE_URL || "").replace(/\/$/, "");
-  const routingUrl = routingBase ? `${routingBase}/api/vobiz/incoming` : "";
+  const routingUrl = routingBase ? (buildVobizIncomingWebhookUrl(routingBase) || `${routingBase}/api/vobiz/incoming`) : "";
   return create("numbers", orgId, {
     number: phoneNumber,
     provider,
