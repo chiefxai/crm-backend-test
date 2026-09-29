@@ -6,14 +6,7 @@ const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
 const db = require("../db/repository");
 const { requireAuth } = require("../middleware/auth");
-const crypto = require("crypto");
-function requireVobizWebhook(req, res, next) {
-  const expected = process.env.VOBIZ_WEBHOOK_SECRET;
-  if (!expected) return process.env.NODE_ENV === "production" ? res.status(503).json({ error: "Vobiz webhook authentication is not configured" }) : next();
-  const supplied = req.get("X-Vobiz-Webhook-Secret") || req.query.webhook_secret || "";
-  if (!supplied || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return res.status(401).json({ error: "Invalid Vobiz webhook credentials" });
-  next();
-}
+const { requireVobizWebhook } = require("../telephony/vobizWebhookAuth");
 const channelsEngine = require("../channels/engine");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.vobiz");

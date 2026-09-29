@@ -531,8 +531,8 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     throw err;
   }
 
-  const webhookSecret = process.env.VOBIZ_WEBHOOK_SECRET;
-  const callbackUrl = `${baseUrl}/api/vobiz/incoming${webhookSecret ? `?webhook_secret=${encodeURIComponent(webhookSecret)}` : ""}`;
+  const { buildVobizIncomingWebhookUrl } = require("./vobizWebhookAuth");
+  const callbackUrl = buildVobizIncomingWebhookUrl(baseUrl) || `${baseUrl}/api/vobiz/incoming`;
   const machineDetectionUrl = `${baseUrl}/api/vobiz/machine-detection`;
 
   // Numbers stored via Settings > Numbers can carry spaces/dashes exactly

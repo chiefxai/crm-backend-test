@@ -14,6 +14,7 @@ const authProvider = require("../auth");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.settings");
 const { isDuplicateKeyError } = require("../lib/dbErrors");
+const { buildVobizIncomingWebhookUrl } = require("../telephony/vobizWebhookAuth");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
@@ -52,6 +53,31 @@ function cognitoTemporaryPassword() {
   const chars = [pick(upper), pick(lower), pick(digits), pick(symbols), pick(all), pick(all)];
   return chars.join("");
 }
+
+// Paste this URL into the Vobiz portal as the number's Answer URL (must include webhook_secret).
+router.get("/vobiz-inbound-webhook", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+  try {
+    const baseUrl = (process.env.PUBLIC_API_BASE_URL || process.env.PUBLIC_URL || process.env.API_BASE_URL || "")
+      .trim()
+      .replace(/\/$/, "");
+    const incomingUrl = buildVobizIncomingWebhookUrl(baseUrl);
+    if (!incomingUrl) {
+      return res.status(503).json({
+        error: "Public API base URL is not configured (set PUBLIC_API_BASE_URL).",
+      });
+    }
+    const hasSecret = Boolean(process.env.VOBIZ_WEBHOOK_SECRET);
+    res.json({
+      incomingUrl,
+      hasWebhookSecret: hasSecret,
+      instructions: hasSecret
+        ? "Set this exact URL as the Answer URL for each inbound DID in the Vobiz dashboard."
+        : "VOBIZ_WEBHOOK_SECRET is not set; webhooks will be rejected in production until it is configured.",
+    });
+  } catch (err) {
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
 
 // ── Virtual numbers ──
 router.get("/numbers", requireAuth, async (req, res) => {
