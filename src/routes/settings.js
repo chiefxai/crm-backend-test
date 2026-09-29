@@ -15,6 +15,8 @@ const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.settings");
 const { isDuplicateKeyError } = require("../lib/dbErrors");
 const { buildVobizIncomingWebhookUrl } = require("../telephony/vobizWebhookAuth");
+const { ensureVobizInboundApplication } = require("../telephony/vobizInboundProvision");
+const channelsEngine = require("../channels/engine");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
@@ -71,10 +73,32 @@ router.get("/vobiz-inbound-webhook", requireAuth, requireRole(ADMIN_ROLES), asyn
       incomingUrl,
       hasWebhookSecret: hasSecret,
       instructions: hasSecret
-        ? "Set this exact URL as the Answer URL for each inbound DID in the Vobiz dashboard."
+        ? "Use POST /api/settings/vobiz-inbound-webhook/sync to attach your Vobiz number automatically, or paste incomingUrl into the Vobiz Answer URL."
         : "VOBIZ_WEBHOOK_SECRET is not set; webhooks will be rejected in production until it is configured.",
     });
   } catch (err) {
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+router.post("/vobiz-inbound-webhook/sync", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+  try {
+    const channel = await channelsEngine.getChannel(req.orgId, "vobiz");
+    const authId = channel?.config?.authId;
+    const authToken = channel?.config?.authToken;
+    const phoneNumber = channel?.config?.phoneNumber || channel?.externalId;
+    if (!authId || !authToken || !phoneNumber) {
+      return res.status(400).json({ error: "Connect Vobiz in Channels settings (authId, authToken, phone number) before syncing inbound routing." });
+    }
+    const result = await ensureVobizInboundApplication(authId, authToken, phoneNumber);
+    res.json({
+      success: true,
+      appId: result.appId,
+      incomingUrl: result.answerUrl,
+      message: "Vobiz number is now attached to the ChiefVoice Answer URL. Place a test inbound call.",
+    });
+  } catch (err) {
+    log.error("POST /api/settings/vobiz-inbound-webhook/sync failed:", err.message);
     res.status(500).json({ error: safeErrorMessage(err) });
   }
 });

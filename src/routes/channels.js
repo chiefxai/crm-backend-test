@@ -18,6 +18,7 @@ const auditLog = require("../platform/auditLog");
 const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.channels");
+const { ensureVobizInboundApplication } = require("../telephony/vobizInboundProvision");
 
 const channelsRouter = express.Router();
 const conversationsRouter = express.Router();
@@ -91,6 +92,11 @@ channelsRouter.post("/vobiz", requireAuth, requireRole(ADMIN_ROLES), async (req,
       provider: "Vobiz.ai",
       friendlyName: `${phoneNumber} (Vobiz)`,
     }).catch((err) => log.warn(`⚠️ Could not ensure virtual_numbers row for ${phoneNumber}: ${err.message}`));
+    try {
+      await ensureVobizInboundApplication(authId, authToken, phoneNumber);
+    } catch (err) {
+      log.warn(`⚠️ Vobiz inbound Answer URL sync failed (configure manually if needed): ${err.message}`);
+    }
     auditLog.record(req.orgId, req, "channel.connect", "channel", channel.id, { type: "vobiz", phoneNumber });
     res.status(201).json(channel);
   } catch (err) {
