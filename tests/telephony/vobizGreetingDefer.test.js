@@ -8,7 +8,11 @@ describe("vobiz outbound greeting coordination", () => {
     const source = fs.readFileSync(require.resolve("../../src/telephony/vobizProxy.js"), "utf8");
     expect(source).toContain("deferLiveGreetingForPreparedOpening");
     expect(source).toContain("sendPreparedOpeningHandoff");
-    expect(source).toContain("Deferring Live greeting — prepared opening TTS still pending");
+    expect(source).toContain("Deferring Live greeting — prepared opening TTS still playing or pending");
     expect(source).toContain("releasePreparedOpeningDeferral");
+    expect(source).toContain("livePlaybackGate");
+    expect(source).toContain("suppressUntilCallerSpeaks");
+    expect(source).toContain("startInboundPreparedOpening");
+    expect(source).toMatch(/sendPreparedOpeningHandoff[\s\S]*turn_complete:\s*false/);
   });
 });

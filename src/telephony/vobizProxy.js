@@ -770,24 +770,33 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   let geminiSetupFinished = false;
   let preparedOpeningPlayed = false;
   let preparedOpeningText = null;
-  /** Outbound: true until prepared TTS plays or we give up — blocks Live duplicate greeting. */
+  let preparedOpeningPlaybackDone = false;
+  /** Outbound/inbound: true until prepared TTS finishes or we give up — blocks Live duplicate greeting. */
   let deferLiveGreetingForPreparedOpening = false;
   let greetingHandoffSent = false;
+  /** Drops Gemini Live audio until handoff (or fallback greeting) and until caller speaks after a prepared opening. */
+  const livePlaybackGate = {
+    suppressUntilHandoff: false,
+    suppressUntilCallerSpeaks: false,
+  };
   let outboundAudioPlayer = null;
   let answerAtMs = null;
   let callLatencyMetrics = {};
 
   const releasePreparedOpeningDeferral = (reason) => {
-    if (!deferLiveGreetingForPreparedOpening) return;
+    if (!deferLiveGreetingForPreparedOpening && preparedOpeningPlaybackDone) return;
     deferLiveGreetingForPreparedOpening = false;
+    preparedOpeningPlaybackDone = true;
+    livePlaybackGate.suppressUntilHandoff = false;
+    livePlaybackGate.suppressUntilCallerSpeaks = false;
     log.info(`👋 Prepared-opening deferral released (${reason})`);
     if (geminiSetupFinished) void triggerGreetingIfReady();
   };
 
   const triggerGreetingIfReady = async () => {
     if (!geminiSetupFinished || !streamId) return;
-    if (deferLiveGreetingForPreparedOpening && !preparedOpeningPlayed) {
-      log.info("👋 Deferring Live greeting — prepared opening TTS still pending");
+    if (deferLiveGreetingForPreparedOpening && !preparedOpeningPlaybackDone) {
+      log.info("👋 Deferring Live greeting — prepared opening TTS still playing or pending");
       return;
     }
     const geminiSession = geminiSessionPromise ? await geminiSessionPromise : null;
@@ -796,7 +805,9 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     try {
       if (preparedOpeningPlayed && preparedOpeningText && geminiSession.sendPreparedOpeningHandoff) {
         greetingHandoffSent = true;
-        log.info("👋 Gemini handoff after prepared opening greeting...");
+        livePlaybackGate.suppressUntilHandoff = false;
+        livePlaybackGate.suppressUntilCallerSpeaks = true;
+        log.info("👋 Gemini handoff after prepared opening greeting (silent — wait for caller)...");
         await geminiSession.sendPreparedOpeningHandoff(preparedOpeningText);
         callLatencyMetrics.fullGreetingComplete = Date.now();
         logGreetingLatency(callId, callLatencyMetrics);
@@ -809,6 +820,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
         ? `Vanakkam ${greetingAddressee}! Naanga ${orgName}-la irundhu call panrom. Ippo pesalama?`
         : `Vanakkam ${greetingAddressee}! Sollunga, epdi help pannalam?`;
       greetingHandoffSent = true;
+      livePlaybackGate.suppressUntilHandoff = false;
+      livePlaybackGate.suppressUntilCallerSpeaks = false;
       const greetingStartedAt = Date.now();
       await geminiSession.sendText(greetingText);
       log.info(`⏱️ Initial greeting request sent in ${Date.now() - greetingStartedAt}ms [call=${callId}]`);
@@ -932,7 +945,10 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           // Start the outbound audio pacer immediately — do not block first speech on
           // full KB/prompt prewarm (that path can take several seconds).
           answerAtMs = Date.now();
-          if (outboundDirection) deferLiveGreetingForPreparedOpening = true;
+          if (outboundDirection) {
+            deferLiveGreetingForPreparedOpening = true;
+            livePlaybackGate.suppressUntilHandoff = true;
+          }
           outboundAudioPlayer = createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
           callLatencyMetrics = {
             callId,
@@ -948,7 +964,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             if (!audio?.length || preparedOpeningPlayed) return;
             preparedOpeningPlayed = true;
             preparedOpeningText = text || "";
-            deferLiveGreetingForPreparedOpening = false;
+            deferLiveGreetingForPreparedOpening = true;
+            livePlaybackGate.suppressUntilHandoff = true;
             outboundAudioPlayer.enqueuePcm(audio, { fastStart: true });
             writeRecording(audio);
             if (preparedOpeningText) transcriptLines.push({ role: "ai", text: preparedOpeningText });
@@ -961,8 +978,49 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             const openingPlaybackMs = Math.round((audio.length / 32000) * 1000) + 200;
             setTimeout(() => {
               if (!isActive) return;
+              preparedOpeningPlaybackDone = true;
+              deferLiveGreetingForPreparedOpening = false;
               if (geminiSetupFinished) void triggerGreetingIfReady();
             }, openingPlaybackMs);
+          };
+
+          const startInboundPreparedOpening = (setupForOpening) => {
+            if (outboundDirection || preparedOpeningPlayed || !resolvedOrgId || !voiceName) return;
+            const openingGreetingText = buildOpeningGreetingText({
+              direction: "inbound",
+              orgName: setupForOpening?.orgName || orgName,
+              agentName: (setupForOpening?.activeConfig && setupForOpening.activeConfig.name) || (activeConfig && activeConfig.name) || "",
+              callerContactName: setupForOpening?.callerContactName || callerContactName,
+              language: taskConfig?.language,
+            });
+            deferLiveGreetingForPreparedOpening = true;
+            livePlaybackGate.suppressUntilHandoff = true;
+            log.info("⏱️ Generating inbound opening greeting TTS at answer");
+            generateOpeningAudio({
+              orgId: resolvedOrgId,
+              agentId: explicitAgentId || setupForOpening?.activeConfig?.id || null,
+              activeConfig: setupForOpening?.activeConfig || activeConfig,
+              campaignLabel: null,
+              voiceName,
+              openingGreetingText,
+              callerContactName: setupForOpening?.callerContactName || callerContactName,
+              language: taskConfig?.language,
+              metrics: callLatencyMetrics,
+            })
+              .then((audio) => {
+                if (!isActive) return;
+                if (audio?.length) {
+                  playPreparedOpeningPcm(audio, openingGreetingText, { prewarmHit: false });
+                } else {
+                  preparedOpeningPlaybackDone = true;
+                  releasePreparedOpeningDeferral("inbound opening TTS returned no audio");
+                }
+              })
+              .catch((err) => {
+                log.warn(`⚠️ Inbound opening TTS failed, will use Live greeting: ${err.message}`);
+                preparedOpeningPlaybackDone = true;
+                releasePreparedOpeningDeferral("inbound opening TTS failed");
+              });
           };
 
           if (outboundDirection && openingInflight) {
@@ -1001,6 +1059,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             voiceName = setup.voiceName || voiceName;
           }
           kbDocumentIds = setup.kbDocumentIds;
+
+          startInboundPreparedOpening(setup);
 
           if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
             log.info(`ℹ️ Using dynamic campaign questions for Vobiz call:`, customQuestions);
@@ -1155,7 +1215,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               prewarmedGeminiClientPromise,
               prewarmedFeatureFlagsPromise,
             },
-            { writeRecording }
+            { writeRecording },
+            livePlaybackGate
           ).then(session => {
             callLatencyMetrics.geminiConnectComplete = Date.now();
             if (callLatencyMetrics.geminiConnectStart) {
@@ -1380,7 +1441,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
 // GEMINI LIVE SESSION
 // ──────────═════════════════════
-async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null) {
+async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null, livePlaybackGate = null) {
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
   let lastRawBroadcastAt = 0;
 
@@ -1893,6 +1954,9 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         if (response.serverContent?.modelTurn?.parts) {
           for (const part of response.serverContent.modelTurn.parts) {
             if (part.inlineData?.mimeType?.startsWith("audio/")) {
+              if (livePlaybackGate?.suppressUntilHandoff || livePlaybackGate?.suppressUntilCallerSpeaks) {
+                continue;
+              }
               const raw24kPCM = Buffer.from(part.inlineData.data, "base64");
               if (onAudioOut) {
                 onAudioOut(raw24kPCM.length);
@@ -1942,6 +2006,9 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
           } else {
           lastCallerSpeechAt = Date.now();
           awaitingFirstAgentChunk = true;
+          if (livePlaybackGate) {
+            livePlaybackGate.suppressUntilCallerSpeaks = false;
+          }
 
           // Do not wait for Gemini's separate `interrupted` event to stop
           // stale model audio. The transcript is already proof that the
@@ -2165,7 +2232,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     },
     sendPreparedOpeningHandoff: async (spokenGreeting) => {
       if (session.conn && session.conn.ws && session.conn.ws.readyState === 1) {
-        const directive = `[System directive — NOT something the caller said. The call just connected and you have ALREADY spoken this exact opening greeting aloud to the caller (do NOT repeat it): "${spokenGreeting}". Wait silently for their response. When they answer, continue the conversation naturally from the full instructions — proceed to question 1 or their request without re-introducing yourself or saying the opening again.]`;
+        const directive = `[System context — NOT something the caller said. The call just connected and you have ALREADY spoken this exact opening greeting aloud to the caller (do NOT repeat it, paraphrase it, or speak any greeting now): "${spokenGreeting}". Remain completely silent until the caller speaks. When they answer, continue from the full instructions without re-introducing yourself.]`;
         session.conn.ws.send(JSON.stringify({
           client_content: {
             turns: [
@@ -2174,7 +2241,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 parts: [{ text: directive }],
               },
             ],
-            turn_complete: true,
+            // turn_complete:false — a completed turn here makes the model speak another greeting over the prepared clip.
+            turn_complete: false,
           },
         }));
       }
