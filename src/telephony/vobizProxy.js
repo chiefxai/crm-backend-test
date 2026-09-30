@@ -176,6 +176,8 @@ function verifyVobizStreamToken(token) {
 // holds the actual right key (the callee's number, from webhook "To").
 const vobizCallCallee = new Map();
 const vobizCallQuestions = new Map();
+/** Snapshot of campaign questions for post-call finalize (live map entry is deleted on answer). */
+const vobizCallQuestionsForFinalize = new Map();
 const vobizCallTaskConfig = new Map();
 // callId -> orgId, so the calls-table insert at finalizeCall() can tag which
 // org this recording belongs to. Set either at outbound-trigger time (known
@@ -326,8 +328,16 @@ function aliasVobizCallState(ids) {
   copyMapAcrossIds(vobizPrewarmedSetup, all);
   copyMapAcrossIds(vobizPrewarmedOpening, all);
   copyMapAcrossIds(vobizPrewarmedClients, all);
+  copyMapAcrossIds(vobizRingLiveSessions, all);
   copySetAcrossIds(vobizMachineDetectedCalls, all);
   return all;
+}
+
+function clearRingLiveSessionAliases(entry) {
+  if (!entry) return;
+  for (const [id, mapped] of [...vobizRingLiveSessions.entries()]) {
+    if (mapped === entry) vobizRingLiveSessions.delete(id);
+  }
 }
 
 function rememberOutboundCall(ids, { orgId, direction, attemptNumber, retryContext, fromNumber, toNumber }) {
@@ -732,11 +742,11 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
 
   settledPrewarm.then((payload) => {
     if (!payload?.finalPrompt || isPreparedOpeningGreetingEnabled()) return;
-    for (const id of callSids) {
-      startOutboundRingLiveGeminiConnect(id, payload, orgId).catch((err) => {
-        log.warn(`⚠️ Ring-time Live Gemini preconnect failed for ${id}: ${err.message}`);
-      });
-    }
+    const primaryCallId = callSid || callSids[0];
+    if (!primaryCallId) return;
+    startOutboundRingLiveGeminiConnect(primaryCallId, payload, orgId, callSids).catch((err) => {
+      log.warn(`⚠️ Ring-time Live Gemini preconnect failed for ${primaryCallId}: ${err.message}`);
+    });
   });
 
   return { success: true, callSid, callSids };
@@ -1058,16 +1068,26 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               adoptedRingLiveSession = ringLiveEntry;
               ringLiveEntry.stubWs.attach(vobizWs);
               ringLiveEntry.transport.streamId = streamId;
-              vobizRingLiveSessions.delete(callId);
+              clearRingLiveSessionAliases(ringLiveEntry);
               log.info(`⏱️ Adopted ring-time Live Gemini session for call ${callId}`);
+            } else {
+              log.info(`⏱️ No ring-time Live session to adopt for call ${callId} (will connect on answer)`);
             }
           }
           outboundAudioPlayer = adoptedRingLiveSession?.player
             || createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
           if (adoptedRingLiveSession) {
             outboundAudioPlayer.setWebSocket(vobizWs);
+            outboundAudioPlayer.setWriteRecording(writeRecording);
             geminiSessionPromise = adoptedRingLiveSession.sessionPromise;
             for (const line of adoptedRingLiveSession.transcriptLines) transcriptLines.push(line);
+            adoptedRingLiveSession.sessionPromise
+              ?.then((session) => {
+                if (!session || !isActive) return;
+                if (session.setPersistCallId) session.setPersistCallId(generatedCallId);
+                if (session.setWriteRecording) session.setWriteRecording(writeRecording);
+              })
+              ?.catch(() => {});
           }
           callLatencyMetrics = {
             callId,
@@ -1179,6 +1199,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
           if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
             log.info(`ℹ️ Using dynamic campaign questions for Vobiz call:`, customQuestions);
+            if (sanitizedCallee) vobizCallQuestionsForFinalize.set(sanitizedCallee, customQuestions);
             vobizCallQuestions.delete(sanitizedCallee);
           }
 
@@ -1344,7 +1365,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               prewarmedFeatureFlagsPromise,
             },
             { writeRecording },
-            livePlaybackGate
+            livePlaybackGate,
+            callerContactName
           ).then(session => {
             callLatencyMetrics.geminiConnectComplete = Date.now();
             if (callLatencyMetrics.geminiConnectStart) {
@@ -1526,8 +1548,12 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     }
 
     const workflowQuestions = sanitizedCalleeForFinalize
-      ? postCallAgents.normalizeQuestions(vobizCallQuestions.get(sanitizedCalleeForFinalize))
+      ? postCallAgents.normalizeQuestions(
+        vobizCallQuestionsForFinalize.get(sanitizedCalleeForFinalize)
+          || vobizCallQuestions.get(sanitizedCalleeForFinalize),
+      )
       : null;
+    if (sanitizedCalleeForFinalize) vobizCallQuestionsForFinalize.delete(sanitizedCalleeForFinalize);
 
     postCallQueue.enqueue("finalizeCall:vobiz", {
       callId: generatedCallId, callerNumber, recordingUrl, durationSeconds: duration,
@@ -1569,9 +1595,15 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
 // GEMINI LIVE SESSION
 // ──────────═════════════════════
-async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null, livePlaybackGate = null) {
+async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null, livePlaybackGate = null, callerContactName = null) {
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
   let lastRawBroadcastAt = 0;
+  // Ring-time Live uses a temporary call id until the media WS connects; adopt
+  // rebinds this to the real generatedCallId so lead_responses match the UI.
+  let persistCallId = callId;
+  const recordingSink = {
+    writeRecording: recordingHooks?.writeRecording || null,
+  };
 
   // Contact capture state (used when Gemini doesn't fire a toolCall) — was
   // previously declared in handleVobizSession, a sibling function with no
@@ -1963,7 +1995,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 : { error: "This feature is currently disabled." };
             } else if (call.name === "save_question_response") {
               const phone = getCallerNumber ? getCallerNumber() : "Vobiz Call";
-              result = await handleSaveQuestionResponse(orgId, callId, phone, call.args.question, call.args.answer, normalizedQuestions);
+              result = await handleSaveQuestionResponse(orgId, persistCallId, phone, call.args.question, call.args.answer, normalizedQuestions, callerContactName);
             } else if (call.name === "send_email_document") {
               result = (await featureFlags.isEnabled("email_documents"))
                 ? await handleSendEmailDocument(call.args.recipient_email, call.args.subject, call.args.body, call.args.document_type)
@@ -2013,10 +2045,11 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               }
               }
             } else if (call.name === "save_enquiry") {
-              result = await handleSaveEnquiry(orgId, callId, call.args, getCallerNumber ? getCallerNumber() : null);
+              result = await handleSaveEnquiry(orgId, persistCallId, call.args, getCallerNumber ? getCallerNumber() : null);
             } else if (call.name === "save_contact_details") {
               const phoneForContact = getCallerNumber ? getCallerNumber() : null;
-              result = await callFinalizer.saveContactDetailsNow(orgId, phoneForContact, vobizCallDirection.get(callId) || "unknown", call.args);
+              const vobizId = getVobizCallId ? getVobizCallId() : callId;
+              result = await callFinalizer.saveContactDetailsNow(orgId, phoneForContact, vobizCallDirection.get(vobizId) || "unknown", call.args);
             } else if (call.name === "get_starhealth_quote") {
               const quote = { status: "deferred_by_design" }; // live wait removed (was up to 25s dead air) — always defer to post-call WhatsApp delivery now
               if (quote.status === "ok") {
@@ -2120,7 +2153,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
 
               // Save to recording file without allowing a late Gemini frame
               // to crash the Node process after the call has already ended.
-              if (recordingHooks?.writeRecording) recordingHooks.writeRecording(pcm16k);
+              if (recordingSink.writeRecording) recordingSink.writeRecording(pcm16k);
               else if (!recordStream.destroyed && !recordStream.writableEnded) recordStream.write(pcm16k);
             }
           }
@@ -2297,6 +2330,12 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   }
 
   return {
+    setPersistCallId(id) {
+      if (id) persistCallId = String(id);
+    },
+    setWriteRecording(fn) {
+      recordingSink.writeRecording = typeof fn === "function" ? fn : null;
+    },
     sendAudio: async (base64Pcm16k) => {
       await session.sendRealtimeInput({
         media: {
@@ -2386,9 +2425,12 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
  * Start Gemini Live during outbound ring (live opening mode) so setup finishes before the callee answers.
  * The media WebSocket is attached on answer via a stub socket — target sub-2s answer-to-first-speech.
  */
-async function startOutboundRingLiveGeminiConnect(callId, payload, orgId) {
+async function startOutboundRingLiveGeminiConnect(callId, payload, orgId, aliasCallIds = []) {
   if (isPreparedOpeningGreetingEnabled()) return;
-  if (!payload?.finalPrompt || vobizRingLiveSessions.has(callId)) return;
+  if (!payload?.finalPrompt) return;
+  for (const id of [callId, ...aliasCallIds]) {
+    if (id && vobizRingLiveSessions.has(id)) return;
+  }
 
   const stubWs = createRingStubVobizWebSocket();
   const transport = { streamId: null };
@@ -2441,15 +2483,19 @@ async function startOutboundRingLiveGeminiConnect(callId, payload, orgId) {
     { prewarmedGeminiClientPromise, prewarmedFeatureFlagsPromise: null },
     null,
     null,
+    payload.callerContactName || payload.setup?.callerContactName || null,
   ).catch((err) => {
-    vobizRingLiveSessions.delete(callId);
+    clearRingLiveSessionAliases(entry);
     throw err;
   });
 
   vobizRingLiveSessions.set(callId, entry);
-  log.info(`⏱️ Ring-time Live Gemini connect started for call ${callId} (prompt ${payload.finalPrompt.length} chars)`);
+  for (const aliasId of aliasCallIds) {
+    if (aliasId && aliasId !== callId) vobizRingLiveSessions.set(aliasId, entry);
+  }
+  log.info(`⏱️ Ring-time Live Gemini connect started for call ${callId} (prompt ${payload.finalPrompt.length} chars, aliases=${aliasCallIds.length})`);
   setTimeout(() => {
-    if (vobizRingLiveSessions.get(callId) === entry) vobizRingLiveSessions.delete(callId);
+    if (vobizRingLiveSessions.get(callId) === entry) clearRingLiveSessionAliases(entry);
   }, CALL_CACHE_TTL_MS);
 }
 
@@ -2635,8 +2681,8 @@ async function handleSearchPolicyKnowledgeBase(query) {
   }
 }
 
-async function handleSaveQuestionResponse(orgId, callId, phone, question, answer, questionsList = []) {
-  return questionnaire.saveQuestionResponse({ orgId, callId, phone, question, answer, questionsList });
+async function handleSaveQuestionResponse(orgId, callId, phone, question, answer, questionsList = [], callerContactName = null) {
+  return questionnaire.saveQuestionResponse({ orgId, callId, phone, question, answer, questionsList, callerContactName });
 }
 
 // Saves a mid-call question/request the AI couldn't fully resolve, so a
