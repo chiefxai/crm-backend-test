@@ -14,7 +14,8 @@ const {
   vobizCallNumbers, vobizCallCallee, vobizCallOrgs, vobizCallDirection,
   vobizCallUuidToInternalId, vobizMachineDetectedCalls,
   vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, createVobizStreamToken,
-  aliasVobizCallState, collectVobizCallIds, findCachedCallIdByPhone, syncDialerProviderCallSid
+  aliasVobizCallState, collectVobizCallIds, findCachedCallIdByPhone, syncDialerProviderCallSid,
+  scheduleInboundVobizPrewarm,
 } = require("../telephony/vobizProxy");
 
 // Webhook fired for BOTH genuine inbound calls AND as the answer_url for
@@ -188,6 +189,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
         setTimeout(() => vobizCallOrgs.delete(CallUUID), 1800000);
         vobizCallDirection.set(CallUUID, "inbound");
         setTimeout(() => vobizCallDirection.delete(CallUUID), 1800000);
+        scheduleInboundVobizPrewarm(CallUUID, orgId, From || "", To || "");
         global.broadcastLog(`📞 Incoming call from ${From || "unknown number"}`, {
           type: "call_started", orgId, callerNumber: From || null, direction: "inbound", provider: "vobiz"
         });
