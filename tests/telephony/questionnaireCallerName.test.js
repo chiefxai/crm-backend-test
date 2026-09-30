@@ -56,4 +56,32 @@ describe("questionnaire caller name guards", () => {
     expect(result.answer).toBe("sanjay");
     expect(result.coerced).toBe(true);
   });
+
+  test("rejects CRM contact name as answer to non-name questions", () => {
+    const insuranceQuestions = [
+      { label: "gender", question: "What is your gender — Male or Female?" },
+      { label: "income", question: "What is your approximate annual income in rupees?" },
+    ];
+    for (const q of insuranceQuestions) {
+      const result = prepareQuestionnaireSave({
+        question: q.question,
+        answer: "sanjay",
+        questionsList: insuranceQuestions,
+        callerContactName: "sanjay",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/CRM contact name/i);
+    }
+  });
+
+  test("allows CRM contact name as nominee when question asks for nominee", () => {
+    const result = prepareQuestionnaireSave({
+      question: "Who would you like to name as the nominee for this policy?",
+      answer: "sanjay",
+      questionsList: [{ label: "nominee", question: "Who would you like to name as the nominee for this policy?" }],
+      callerContactName: "sanjay",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.answer).toBe("sanjay");
+  });
 });

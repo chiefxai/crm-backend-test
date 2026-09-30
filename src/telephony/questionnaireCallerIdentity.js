@@ -1,4 +1,5 @@
 const NAME_QUESTION_RE = /\b(full\s*name|your\s*name|name\s*please|know\s+your\s+name|caller'?s?\s*name|peru|payer\s*name)\b/i;
+const NOMINEE_QUESTION_RE = /\bnominee\b/i;
 
 const NON_ANSWER_ACK_RE = /^(ready to talk|pesla|pesalam|pesalama|hello|hi|hey|yes\??|ok|okay|aama|illa|haan|nahi|vanakkam|speak|talk|sure|fine|go ahead)\s*$/i;
 
@@ -6,6 +7,12 @@ function looksLikeNameQuestion(entry) {
   if (!entry) return false;
   const text = `${entry.label || ""} ${entry.question || ""}`;
   return NAME_QUESTION_RE.test(text);
+}
+
+function looksLikeNomineeQuestion(entry) {
+  if (!entry) return false;
+  const text = `${entry.label || ""} ${entry.question || ""}`;
+  return NOMINEE_QUESTION_RE.test(text);
 }
 
 function partitionQuestionsForKnownCaller(normalizedQuestions, callerContactName) {
@@ -62,11 +69,25 @@ function prepareQuestionnaireSave({ question, answer, questionsList = [], caller
     }
   }
 
+  const isNominee = match ? looksLikeNomineeQuestion(match) : looksLikeNomineeQuestion({ question });
+  if (
+    knownName
+    && !isName
+    && !isNominee
+    && normalizeNameToken(rawAnswer) === normalizeNameToken(knownName)
+  ) {
+    return {
+      ok: false,
+      error: `The answer must be what the caller said for this question — not their CRM contact name "${knownName}". Do not use the contact name as a placeholder for income, age, gender, yes/no, medical, premium, or other facts. Ask the question again and save only their real answer.`,
+    };
+  }
+
   return { ok: true, answer: rawAnswer };
 }
 
 module.exports = {
   looksLikeNameQuestion,
+  looksLikeNomineeQuestion,
   partitionQuestionsForKnownCaller,
   prepareQuestionnaireSave,
 };

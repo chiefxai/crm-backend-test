@@ -1081,6 +1081,9 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             outboundAudioPlayer.setWriteRecording(writeRecording);
             geminiSessionPromise = adoptedRingLiveSession.sessionPromise;
             for (const line of adoptedRingLiveSession.transcriptLines) transcriptLines.push(line);
+            if (adoptedRingLiveSession.persistCallIdRef) {
+              adoptedRingLiveSession.persistCallIdRef.current = generatedCallId;
+            }
             adoptedRingLiveSession.sessionPromise
               ?.then((session) => {
                 if (!session || !isActive) return;
@@ -1600,7 +1603,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   let lastRawBroadcastAt = 0;
   // Ring-time Live uses a temporary call id until the media WS connects; adopt
   // rebinds this to the real generatedCallId so lead_responses match the UI.
-  let persistCallId = callId;
+  const persistCallIdRef = recordingHooks?.persistCallIdRef || { current: callId };
+  if (!recordingHooks?.persistCallIdRef) persistCallIdRef.current = callId;
   const recordingSink = {
     writeRecording: recordingHooks?.writeRecording || null,
   };
@@ -1810,7 +1814,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             }] : []),
             {
               name: "save_question_response",
-              description: "Record the client's answer to one of the mandatory questionnaire questions.",
+              description: "Record the caller's verbal answer to exactly one questionnaire question you already asked in this call. Use only what they said for that question — never the CRM contact name as a placeholder for income, age, gender, medical, or other facts. Call at most once per turn.",
               parameters: {
                 type: "OBJECT",
                 properties: {
@@ -1820,7 +1824,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   },
                   answer: {
                     type: "STRING",
-                    description: "The client's answer, response, or statement"
+                    description: "What the caller said in answer to that question only (not their name unless the question was explicitly about their name)"
                   }
                 },
                 required: ["question", "answer"]
@@ -1977,6 +1981,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
 
         if (allFunctionCalls.length > 0) {
           const functionResponses = [];
+          let questionnaireSavesThisMessage = 0;
           for (const call of allFunctionCalls) {
             if (call.name === "end_call" && endCallRequested) {
               functionResponses.push({
@@ -1994,8 +1999,17 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 ? await handleSearchPolicyKnowledgeBase(call.args.query)
                 : { error: "This feature is currently disabled." };
             } else if (call.name === "save_question_response") {
-              const phone = getCallerNumber ? getCallerNumber() : "Vobiz Call";
-              result = await handleSaveQuestionResponse(orgId, persistCallId, phone, call.args.question, call.args.answer, normalizedQuestions, callerContactName);
+              questionnaireSavesThisMessage += 1;
+              if (questionnaireSavesThisMessage > 1) {
+                result = {
+                  success: false,
+                  saved: false,
+                  error: "Only one save_question_response per turn. Save this answer, then ask the next question out loud and wait for their reply before saving again.",
+                };
+              } else {
+                const phone = getCallerNumber ? getCallerNumber() : "Vobiz Call";
+                result = await handleSaveQuestionResponse(orgId, persistCallIdRef.current, phone, call.args.question, call.args.answer, normalizedQuestions, callerContactName);
+              }
             } else if (call.name === "send_email_document") {
               result = (await featureFlags.isEnabled("email_documents"))
                 ? await handleSendEmailDocument(call.args.recipient_email, call.args.subject, call.args.body, call.args.document_type)
@@ -2045,7 +2059,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               }
               }
             } else if (call.name === "save_enquiry") {
-              result = await handleSaveEnquiry(orgId, persistCallId, call.args, getCallerNumber ? getCallerNumber() : null);
+              result = await handleSaveEnquiry(orgId, persistCallIdRef.current, call.args, getCallerNumber ? getCallerNumber() : null);
             } else if (call.name === "save_contact_details") {
               const phoneForContact = getCallerNumber ? getCallerNumber() : null;
               const vobizId = getVobizCallId ? getVobizCallId() : callId;
@@ -2331,7 +2345,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
 
   return {
     setPersistCallId(id) {
-      if (id) persistCallId = String(id);
+      if (id) persistCallIdRef.current = String(id);
     },
     setWriteRecording(fn) {
       recordingSink.writeRecording = typeof fn === "function" ? fn : null;
@@ -2453,6 +2467,7 @@ async function startOutboundRingLiveGeminiConnect(callId, payload, orgId, aliasC
     transport,
     geminiSetupFinished: false,
     sessionPromise: null,
+    persistCallIdRef: { current: internalCallId },
   };
 
   entry.sessionPromise = openGeminiSession(
@@ -2481,7 +2496,7 @@ async function startOutboundRingLiveGeminiConnect(callId, payload, orgId, aliasC
     payload.normalizedQuestions || [],
     player,
     { prewarmedGeminiClientPromise, prewarmedFeatureFlagsPromise: null },
-    null,
+    { persistCallIdRef: entry.persistCallIdRef },
     null,
     payload.callerContactName || payload.setup?.callerContactName || null,
   ).catch((err) => {

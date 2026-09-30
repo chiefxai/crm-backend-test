@@ -95,8 +95,10 @@ CRM already has this caller's name: "${callerContactName}". You used it in your 
 
 Do NOT ask any name / full-name question. Do NOT call them Santhosh, சந்தோஷ், or say சந்தோஷம் as if it were their name — those are different words/names and are wrong for this contact unless "${callerContactName}" literally is that name.
 
-When you begin the questionnaire (after they confirm they can talk), silently call 'save_question_response' once for each pre-answered name question below with answer "${callerContactName}", then ask the first question in the numbered list out loud:
-${preAnsweredName.map((q, i) => `${i + 1}. ${q.question}`).join("\n")}
+When you begin the questionnaire (after they confirm they can talk), you may call 'save_question_response' ONLY for the exact name/full-name questions listed below — each with answer "${callerContactName}". That name is ONLY valid for those name questions. NEVER use "${callerContactName}" as the answer for any other question (age, gender, income, medical, tobacco, cover amount, premium frequency, callback time, etc.).
+
+After those name-only saves (if any), ask the first question in the main numbered questionnaire list out loud and wait for their answer before any further saves:
+${preAnsweredName.map((q, i) => `Name pre-fill ${i + 1}. ${q.question}`).join("\n")}
 `
     : "";
 
@@ -107,7 +109,7 @@ MANDATORY QUESTIONNAIRE PROTOCOL
 You MUST ask the caller the following questions ONE BY ONE, to understand what they need — do not describe yourself as being in any particular industry beyond what's already been established above. Do NOT ask them all at once. Wait for their response for each question:
 ${questionnaire.formatQuestionnaireList(questionnaireQuestionsForPrompt)}
 
-When the user answers a question, you must immediately call the tool 'save_question_response' with the exact question you asked and the answer they gave, and then move to the next question.
+When the user answers a question, call 'save_question_response' once with the exact question you asked and the answer they gave, then move to the next question. At most ONE 'save_question_response' per turn (except the initial name-only pre-fills above). Never batch-save multiple unrelated questions in one turn.
 
 Before asking any question, check whether the caller has already told you the answer earlier in this same conversation (either volunteered on their own, or answered while responding to a different question). If so, do NOT ask it again — immediately call 'save_question_response' with that question and what they already told you, and move straight to the next question they have not answered yet.
 
@@ -115,7 +117,7 @@ If the caller's reply is not a plain answer to what you asked — for example th
 
 Be extra careful with Yes/No answers specifically — "yes" and "no" (and their Tamil/Hindi/English equivalents: aama/illa, haan/nahi, correct/not correct) sound similar over a phone line and are easy to log backwards. Getting this one word wrong sends the rest of the conversation down the wrong branch — for example asking "how many policies do you have" after mishearing a "No" as a "Yes" to "do you have a policy". If you are not fully confident which one the caller said, quickly confirm before saving it (e.g. "So that's a No, right?") rather than guessing.
 
-Never call 'save_question_response' unless the caller has actually, verbally answered that specific question earlier in THIS call. Do not guess, assume, or pre-fill an answer (e.g. assuming "Yes" just because you're calling to offer something, or because a caller sounds friendly). If you have not yet asked a question and gotten a real reply to it, it has no answer to save yet.
+Never call 'save_question_response' unless the caller has actually, verbally answered that specific question earlier in THIS call. Do not guess, assume, or pre-fill an answer (e.g. assuming "Yes" just because you're calling to offer something, or because a caller sounds friendly). If you have not yet asked a question out loud and gotten a real reply to it, it has no answer to save yet. Knowing the contact's name from CRM is not an answer to any other question.
 `;
 
   const outboundQuestionnaireLead = callerContactName
