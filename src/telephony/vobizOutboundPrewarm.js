@@ -7,6 +7,7 @@ const {
   buildGreetingCacheKey,
   agentConfigFingerprint,
   getOrGenerateOpeningGreetingAudio,
+  isPreparedOpeningGreetingEnabled,
 } = require("./vobizOpeningGreeting");
 
 const log = getLogger("telephony.vobizOutboundPrewarm");
@@ -128,17 +129,19 @@ function runOutboundPrewarm({
     });
     metrics.greetingPrepared = Date.now();
 
-    const openingAudioPromise = generateOpeningAudio({
-      orgId,
-      agentId,
-      activeConfig,
-      campaignLabel,
-      voiceName,
-      openingGreetingText,
-      callerContactName,
-      language: taskConfig?.language,
-      metrics,
-    });
+    const openingAudioPromise = isPreparedOpeningGreetingEnabled()
+      ? generateOpeningAudio({
+        orgId,
+        agentId,
+        activeConfig,
+        campaignLabel,
+        voiceName,
+        openingGreetingText,
+        callerContactName,
+        language: taskConfig?.language,
+        metrics,
+      })
+      : Promise.resolve(null);
 
     openingAudioPromise
       .then((openingGreetingAudio) => {

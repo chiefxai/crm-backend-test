@@ -2,6 +2,7 @@ const {
   buildOpeningGreetingText,
   buildGreetingCacheKey,
   agentConfigFingerprint,
+  isPreparedOpeningGreetingEnabled,
   _clearGreetingCacheForTests,
 } = require("../../src/telephony/vobizOpeningGreeting");
 

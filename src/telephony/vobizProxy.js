@@ -41,7 +41,12 @@ postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: 
 const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
 const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
 const { runOutboundPrewarm, generateOpeningAudio } = require("./vobizOutboundPrewarm");
-const { buildOpeningGreetingText, logGreetingLatency, PREPARED_OPENING_SPOKEN_PROMPT } = require("./vobizOpeningGreeting");
+const {
+  buildOpeningGreetingText,
+  logGreetingLatency,
+  PREPARED_OPENING_SPOKEN_PROMPT,
+  isPreparedOpeningGreetingEnabled,
+} = require("./vobizOpeningGreeting");
 
 // ── Per-call raw Gemini event log ───────────────────────────────
 // Google doesn't expose Live API (WebSocket) usage in AI Studio's log
@@ -954,7 +959,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           // Start the outbound audio pacer immediately — do not block first speech on
           // full KB/prompt prewarm (that path can take several seconds).
           answerAtMs = Date.now();
-          if (outboundDirection) {
+          const preparedOpeningMode = isPreparedOpeningGreetingEnabled();
+          if (outboundDirection && preparedOpeningMode) {
             deferLiveGreetingForPreparedOpening = true;
           }
           outboundAudioPlayer = createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
@@ -1004,7 +1010,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           };
 
           const startInboundPreparedOpening = (setupForOpening) => {
-            if (outboundDirection || preparedOpeningPlayed || !resolvedOrgId || !voiceName) return;
+            if (!preparedOpeningMode || outboundDirection || preparedOpeningPlayed || !resolvedOrgId || !voiceName) return;
             const openingGreetingText = buildOpeningGreetingText({
               direction: "inbound",
               orgName: setupForOpening?.orgName || orgName,
@@ -1041,7 +1047,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               });
           };
 
-          if (outboundDirection && openingInflight) {
+          if (preparedOpeningMode && outboundDirection && openingInflight) {
             openingInflight
               .then((opening) => {
                 if (!isActive) return;
@@ -1124,9 +1130,9 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               })
               : null);
 
-          if (!preparedOpeningPlayed && prewarmPayload?.openingGreetingAudio?.length) {
+          if (preparedOpeningMode && !preparedOpeningPlayed && prewarmPayload?.openingGreetingAudio?.length) {
             playPreparedOpeningPcm(prewarmPayload.openingGreetingAudio, openingGreetingTextAtAnswer, { prewarmHit: Boolean(prewarmPayload.finalPrompt) });
-          } else if (outboundDirection && !preparedOpeningPlayed && openingGreetingTextAtAnswer && voiceName && resolvedOrgId) {
+          } else if (preparedOpeningMode && outboundDirection && !preparedOpeningPlayed && openingGreetingTextAtAnswer && voiceName && resolvedOrgId) {
             const ttsMissReason = prewarmPayload?.metrics?.greetingError || (prewarmPayload ? "no_audio" : "prewarm_miss");
             log.info(`⏱️ Generating opening greeting TTS at answer (reason=${ttsMissReason})`);
             generateOpeningAudio({
@@ -1152,15 +1158,20 @@ async function handleVobizSession(vobizWs, streamContext = null) {
                 log.warn(`⚠️ Answer-time opening TTS failed, will use Live greeting: ${err.message}`);
                 releasePreparedOpeningDeferral("answer-time opening TTS failed");
               });
-          } else if (outboundDirection && !preparedOpeningPlayed) {
+          } else if (preparedOpeningMode && outboundDirection && !preparedOpeningPlayed) {
             releasePreparedOpeningDeferral("no prepared opening audio for this call");
+          } else if (!preparedOpeningMode && outboundDirection && !preparedOpeningPlayed) {
+            deferLiveGreetingForPreparedOpening = false;
+            preparedOpeningPlaybackDone = true;
           }
 
-          const usesPreparedOpening =
+          const usesPreparedOpening = preparedOpeningMode && (
             preparedOpeningPlayed
             || outboundDirection
             || Boolean(prewarmPayload?.openingGreetingAudio?.length)
-            || hadOpeningMapEntry;
+            || hadOpeningMapEntry
+            || (!outboundDirection && resolvedOrgId && voiceName)
+          );
           if (usesPreparedOpening) {
             finalPrompt += PREPARED_OPENING_SPOKEN_PROMPT;
           }

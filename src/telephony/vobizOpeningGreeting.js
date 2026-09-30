@@ -17,6 +17,16 @@ function resample24To16(buffer24) {
 const log = getLogger("telephony.vobizOpeningGreeting");
 
 const TTS_MODEL = "gemini-2.5-flash-preview-tts";
+
+/**
+ * Opening greeting audio source for Vobiz telephony.
+ * - "prepared" (default): pre-rendered PCM via gemini-2.5-flash-preview-tts during ring — fastest time-to-first-speech, different prosody than Live.
+ * - "live": no prepared clip; first speech comes from gemini-live-2.5-flash-native-audio after connect — most natural, ~2–4s more dead air on answer.
+ */
+function isPreparedOpeningGreetingEnabled() {
+  const mode = String(process.env.VOBIZ_OPENING_GREETING_MODE || "prepared").trim().toLowerCase();
+  return mode !== "live";
+}
 const GREETING_CONFIG_VERSION = 1;
 const GREETING_CACHE_TTL_MS = 15 * 60 * 1000;
 const GREETING_CACHE_MAX = 200;
@@ -172,6 +182,7 @@ The phone system has ALREADY played your opening greeting aloud to the caller. D
 module.exports = {
   GREETING_CONFIG_VERSION,
   TTS_MODEL,
+  isPreparedOpeningGreetingEnabled,
   buildOpeningGreetingText,
   buildGreetingCacheKey,
   agentConfigFingerprint,
