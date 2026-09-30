@@ -487,14 +487,18 @@ function buildOpeningTtsPaceInstruction(speed = 52) {
 }
 
 /**
- * Playback-rate correction for prepared opening PCM so it matches Live pacing
- * for the same agent speed slider (52 ≈ 1.0×).
+ * Playback-rate correction for prepared opening PCM so it matches Live pacing.
+ * Preview TTS is slower than Live at the same slider; baseline (~1.18×) corrects that.
+ * Agent Studio Speed still scales faster/slower on top (52 ≈ natural after correction).
+ * Override baseline: VOBIZ_OPENING_TTS_PLAYBACK_BASELINE (e.g. 1.22 if still slow).
  */
 function openingPlaybackFactorFromSpeed(speed = 52) {
   const s = Number(speed);
   const normalized = Number.isFinite(s) ? s : 52;
-  const factor = 0.82 + (normalized / 100) * 0.46;
-  return Math.min(1.35, Math.max(0.78, factor));
+  const rawBaseline = parseFloat(process.env.VOBIZ_OPENING_TTS_PLAYBACK_BASELINE || "1.18");
+  const baseline = Number.isFinite(rawBaseline) && rawBaseline > 0 ? rawBaseline : 1.18;
+  const sliderFactor = 0.9 + (normalized / 100) * 0.28;
+  return Math.min(1.45, Math.max(0.88, sliderFactor * baseline));
 }
 
 // Non-sensitive company facts the AI can freely speak about on a call —

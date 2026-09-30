@@ -23,7 +23,7 @@ function isPreparedOpeningGreetingEnabled() {
   const mode = String(process.env.VOBIZ_OPENING_GREETING_MODE || "prepared").trim().toLowerCase();
   return mode !== "live";
 }
-const GREETING_CONFIG_VERSION = 2;
+const GREETING_CONFIG_VERSION = 3;
 const GREETING_CACHE_TTL_MS = 15 * 60 * 1000;
 const GREETING_CACHE_MAX = 200;
 

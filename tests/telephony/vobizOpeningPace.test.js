@@ -42,6 +42,7 @@ describe("vobiz opening pace", () => {
 
   test("openingPlaybackFactorFromSpeed increases with slider", () => {
     expect(openingPlaybackFactorFromSpeed(80)).toBeGreaterThan(openingPlaybackFactorFromSpeed(40));
+    expect(openingPlaybackFactorFromSpeed(52)).toBeGreaterThan(1.15);
   });
 
   test("normalizeOpeningPcmForAgent shortens buffer for faster agent speed", () => {
