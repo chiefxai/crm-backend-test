@@ -1,15 +1,10 @@
-const {
-  buildOpeningTtsPrompt,
-  normalizeOpeningPcmForAgent,
-} = require("../../src/telephony/vobizOpeningGreeting");
+const { buildOpeningTtsPrompt } = require("../../src/telephony/vobizOpeningGreeting");
 const {
   pcmToTelephony16k,
   parsePcmSampleRateFromMime,
-  adjustPcm16PlaybackRate,
 } = require("../../src/utils/audioConverter");
-const { openingPlaybackFactorFromSpeed } = require("../../src/config/agentConfig");
 
-describe("vobiz opening pace", () => {
+describe("vobiz opening audio helpers", () => {
   test("parsePcmSampleRateFromMime reads rate parameter", () => {
     expect(parsePcmSampleRateFromMime("audio/pcm;rate=16000")).toBe(16000);
     expect(parsePcmSampleRateFromMime("audio/L16;rate=24000")).toBe(24000);
@@ -27,28 +22,10 @@ describe("vobiz opening pace", () => {
     expect(out.length).toBe(Math.round((4800 / 2) * (2 / 3)) * 2);
   });
 
-  test("adjustPcm16PlaybackRate speeds up audio when factor > 1", () => {
-    const pcm = Buffer.alloc(3200);
-    const faster = adjustPcm16PlaybackRate(pcm, 1.2);
-    expect(faster.length).toBeLessThan(pcm.length);
-  });
-
-  test("buildOpeningTtsPrompt reflects agent speed tiers", () => {
-    const fast = buildOpeningTtsPrompt("Hello", { speed: 80 });
-    const slow = buildOpeningTtsPrompt("Hello", { speed: 20 });
-    expect(fast).toMatch(/quick|energetic/i);
-    expect(slow).toMatch(/slower|deliberate/i);
-  });
-
-  test("openingPlaybackFactorFromSpeed increases with slider", () => {
-    expect(openingPlaybackFactorFromSpeed(80)).toBeGreaterThan(openingPlaybackFactorFromSpeed(40));
-    expect(openingPlaybackFactorFromSpeed(52)).toBeGreaterThan(1.15);
-  });
-
-  test("normalizeOpeningPcmForAgent shortens buffer for faster agent speed", () => {
-    const pcm = Buffer.alloc(6400);
-    const fast = normalizeOpeningPcmForAgent(pcm, { speed: 85 });
-    const slow = normalizeOpeningPcmForAgent(pcm, { speed: 25 });
-    expect(fast.length).toBeLessThan(slow.length);
+  test("buildOpeningTtsPrompt does not vary with agent speed (voice must stay stable)", () => {
+    const a = buildOpeningTtsPrompt("Vanakkam");
+    const b = buildOpeningTtsPrompt("Vanakkam");
+    expect(a).toBe(b);
+    expect(a).toMatch(/natural conversational pace/i);
   });
 });

@@ -6,7 +6,7 @@
 const fs = require("fs");
 const path = require("path");
 const ws = require("ws");
-const { getConfig, getConfigForOrg, buildRuntimePrompt, buildOpeningTtsPaceInstruction, buildCompanyInfoPrompt, getAgentConfigForNumber, getAgentConfigById } = require("../config/agentConfig");
+const { getConfig, getConfigForOrg, buildRuntimePrompt, buildCompanyInfoPrompt, getAgentConfigForNumber, getAgentConfigById } = require("../config/agentConfig");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("telephony.vobizProxy");
 const {
@@ -913,8 +913,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
       greetingHandoffSent = true;
       livePlaybackGate.dropGeminiAudioUntilCallerSpeaks = false;
       const greetingStartedAt = Date.now();
-      const paceHint = buildOpeningTtsPaceInstruction(activeConfig?.speed ?? 52);
-      await geminiSession.sendText(greetingText, { paceHint });
+      await geminiSession.sendText(greetingText);
       log.info(`⏱️ Initial greeting request sent in ${Date.now() - greetingStartedAt}ms [call=${callId}]`);
     } catch (e) {
       log.error("Failed to trigger initial greeting:", e.message);
@@ -2306,7 +2305,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         },
       });
     },
-    sendText: async (text, { paceHint = "" } = {}) => {
+    sendText: async (text) => {
       // Must be role "user" (turn_complete:true) to actually trigger the
       // model to generate + speak a new turn — a role "model" turn is
       // just prior context and produces no audio at all. But sending the
@@ -2320,8 +2319,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       // mid-call system-triggered turn, which must NOT reuse this
       // "speak your opening greeting" framing.
       if (session.conn && session.conn.ws && session.conn.ws.readyState === 1) {
-        const paceLine = paceHint ? ` ${paceHint}` : "";
-        const directive = `[System directive — NOT something the caller said. The call just connected. Greet the caller IMMEDIATELY without any hesitation, pause, or thinking — speak right now at natural phone-call pace (not slow or drawn out).${paceLine} In character, say: "${text}"]`;
+        const directive = `[System directive — NOT something the caller said. The call just connected. Greet the caller IMMEDIATELY without any hesitation, pause, or thinking — speak right now, in character: "${text}"]`;
         session.conn.ws.send(JSON.stringify({
           client_content: {
             turns: [

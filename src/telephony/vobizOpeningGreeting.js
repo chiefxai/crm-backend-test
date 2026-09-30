@@ -1,13 +1,8 @@
 const crypto = require("crypto");
 const { getLogger } = require("../observability/logger");
 const {
-  buildOpeningTtsPaceInstruction,
-  openingPlaybackFactorFromSpeed,
-} = require("../config/agentConfig");
-const {
   parsePcmSampleRateFromMime,
   pcmToTelephony16k,
-  adjustPcm16PlaybackRate,
 } = require("../utils/audioConverter");
 
 const log = getLogger("telephony.vobizOpeningGreeting");
@@ -16,13 +11,14 @@ const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
 /**
  * Opening greeting audio source for Vobiz telephony.
- * - "prepared" (default): outbound-only pre-rendered PCM (preview TTS — faster but different timbre than Live).
- * - "live": native Live opening for outbound (ring pre-connect). Inbound always uses Live opening (same voice as the agent).
- * Set VOBIZ_OPENING_GREETING_MODE=live for natural outbound opening voice.
+ * - "live" (default): Gemini Live speaks the opening — same native voice as the rest of the call.
+ *   Outbound uses ring-time Live pre-connect when prewarm finishes before answer.
+ * - "prepared": outbound-only preview-TTS PCM (faster first byte, different voice from Live).
+ * Set VOBIZ_OPENING_GREETING_MODE=prepared only if you accept the voice mismatch.
  */
 function isPreparedOpeningGreetingEnabled() {
-  const mode = String(process.env.VOBIZ_OPENING_GREETING_MODE || "prepared").trim().toLowerCase();
-  return mode !== "live";
+  const mode = String(process.env.VOBIZ_OPENING_GREETING_MODE || "live").trim().toLowerCase();
+  return mode === "prepared";
 }
 
 /**
@@ -34,7 +30,7 @@ function shouldUsePreparedOpeningGreeting(direction = "outbound") {
   if (!isPreparedOpeningGreetingEnabled()) return false;
   return String(direction || "").toLowerCase() === "outbound";
 }
-const GREETING_CONFIG_VERSION = 3;
+const GREETING_CONFIG_VERSION = 4;
 const GREETING_CACHE_TTL_MS = 15 * 60 * 1000;
 const GREETING_CACHE_MAX = 200;
 
@@ -121,19 +117,12 @@ function agentConfigFingerprint(activeConfig) {
   if (!activeConfig) return "";
   const name = activeConfig.name || "";
   const voice = activeConfig.activeVoice || "";
-  const speed = activeConfig.speed ?? 52;
   const snippet = (activeConfig.systemPrompt || "").slice(0, 120);
-  return crypto.createHash("sha256").update(`${name}|${voice}|${speed}|${snippet}`).digest("hex").slice(0, 16);
+  return crypto.createHash("sha256").update(`${name}|${voice}|${snippet}`).digest("hex").slice(0, 16);
 }
 
-function buildOpeningTtsPrompt(greetingText, activeConfig) {
-  const pace = buildOpeningTtsPaceInstruction(activeConfig?.speed ?? 52);
-  return `${pace}\n\nRead the following opening line aloud exactly as written. Do not add extra words or a second greeting:\n${greetingText}`;
-}
-
-function normalizeOpeningPcmForAgent(pcm16k, activeConfig) {
-  const factor = openingPlaybackFactorFromSpeed(activeConfig?.speed ?? 52);
-  return adjustPcm16PlaybackRate(pcm16k, factor);
+function buildOpeningTtsPrompt(greetingText) {
+  return `Read the following opening line aloud at a natural conversational pace. Do not add extra words or a second greeting:\n${greetingText}`;
 }
 
 function pruneGreetingCache() {
@@ -149,7 +138,7 @@ function pruneGreetingCache() {
 
 async function synthesizeOpeningGreetingPcm(geminiClient, voiceName, text, activeConfig = null) {
   if (!geminiClient || !voiceName || !text) throw new Error("geminiClient, voiceName, and text are required for opening TTS");
-  const ttsPrompt = buildOpeningTtsPrompt(text, activeConfig);
+  const ttsPrompt = buildOpeningTtsPrompt(text);
   const res = await geminiClient.models.generateContent({
     model: TTS_MODEL,
     contents: [{ role: "user", parts: [{ text: ttsPrompt }] }],
@@ -164,8 +153,7 @@ async function synthesizeOpeningGreetingPcm(geminiClient, voiceName, text, activ
   }
   const sourceRate = parsePcmSampleRateFromMime(audioPart.inlineData.mimeType, 24000);
   const rawPcm = Buffer.from(audioPart.inlineData.data, "base64");
-  const pcm16k = pcmToTelephony16k(rawPcm, sourceRate);
-  return normalizeOpeningPcmForAgent(pcm16k, activeConfig);
+  return pcmToTelephony16k(rawPcm, sourceRate);
 }
 
 async function getOrGenerateOpeningGreetingAudio({
@@ -210,7 +198,6 @@ module.exports = {
   buildGreetingCacheKey,
   agentConfigFingerprint,
   buildOpeningTtsPrompt,
-  normalizeOpeningPcmForAgent,
   getOrGenerateOpeningGreetingAudio,
   synthesizeOpeningGreetingPcm,
   logGreetingLatency,
