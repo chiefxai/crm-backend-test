@@ -248,8 +248,25 @@ const vobizPrewarmedOpening = new Map();
 // not spend the first part of the caller's conversation resolving project
 // credentials and constructing the Vertex client.
 const vobizPrewarmedClients = new Map();
+/** Outbound + live opening: Gemini Live connect started during ring (before Vobiz WS). */
+const vobizRingLiveSessions = new Map();
 
 const CALL_CACHE_TTL_MS = 1_800_000;
+
+function createRingStubVobizWebSocket() {
+  let real = null;
+  return {
+    get readyState() {
+      return real && real.readyState === 1 ? 1 : 1;
+    },
+    attach(ws) {
+      real = ws;
+    },
+    send(data) {
+      if (real && real.readyState === 1) real.send(data);
+    },
+  };
+}
 
 function uniqueCallIds(...values) {
   const ids = [];
@@ -354,6 +371,7 @@ setInterval(() => {
   if (vobizPrewarmedSetup.size > 500) {
     vobizPrewarmedSetup.clear();
     vobizPrewarmedOpening.clear();
+    vobizRingLiveSessions.clear();
   }
 }, 1800000).unref();
 
@@ -660,6 +678,15 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     rememberMap(vobizPrewarmedSetup, id, settledPrewarm);
   }
 
+  settledPrewarm.then((payload) => {
+    if (!payload?.finalPrompt || isPreparedOpeningGreetingEnabled()) return;
+    for (const id of callSids) {
+      startOutboundRingLiveGeminiConnect(id, payload, orgId).catch((err) => {
+        log.warn(`⚠️ Ring-time Live Gemini preconnect failed for ${id}: ${err.message}`);
+      });
+    }
+  });
+
   return { success: true, callSid, callSids };
 }
 
@@ -963,7 +990,24 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           if (outboundDirection && preparedOpeningMode) {
             deferLiveGreetingForPreparedOpening = true;
           }
-          outboundAudioPlayer = createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
+          let adoptedRingLiveSession = null;
+          if (!preparedOpeningMode && outboundDirection) {
+            const ringLiveEntry = vobizRingLiveSessions.get(callId);
+            if (ringLiveEntry) {
+              adoptedRingLiveSession = ringLiveEntry;
+              ringLiveEntry.stubWs.attach(vobizWs);
+              ringLiveEntry.transport.streamId = streamId;
+              vobizRingLiveSessions.delete(callId);
+              log.info(`⏱️ Adopted ring-time Live Gemini session for call ${callId}`);
+            }
+          }
+          outboundAudioPlayer = adoptedRingLiveSession?.player
+            || createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
+          if (adoptedRingLiveSession) {
+            outboundAudioPlayer.setWebSocket(vobizWs);
+            geminiSessionPromise = adoptedRingLiveSession.sessionPromise;
+            for (const line of adoptedRingLiveSession.transcriptLines) transcriptLines.push(line);
+          }
           callLatencyMetrics = {
             callId,
             providerCallId: callId,
@@ -1062,6 +1106,32 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           }
 
           void (async () => {
+          if (adoptedRingLiveSession) {
+            const payload = adoptedRingLiveSession.payload;
+            if (payload?.setup) {
+              customObjects = payload.setup.customObjects || [];
+              if (payload.setup.orgName) orgName = payload.setup.orgName;
+              if (payload.setup.callerContactName) callerContactName = payload.setup.callerContactName;
+              if (payload.setup.activeConfig) {
+                activeConfig = payload.setup.activeConfig;
+                voiceName = payload.voiceName || payload.setup.voiceName || voiceName;
+              }
+              kbDocumentIds = payload.kbDocumentIds ?? payload.setup.kbDocumentIds;
+            }
+            try {
+              const session = await adoptedRingLiveSession.sessionPromise;
+              if (session && isActive) {
+                geminiSetupFinished = adoptedRingLiveSession.geminiSetupFinished;
+                callLatencyMetrics.geminiConnectComplete = Date.now();
+                callLatencyMetrics.prewarmHit = true;
+                log.info(`⏱️ Ring-time Live Gemini ready on answer for ${callId} (setup=${geminiSetupFinished})`);
+                if (reconnectAttempts === 0) void triggerGreetingIfReady();
+              }
+            } catch (err) {
+              log.error(`❌ Adopted ring Live session failed for ${callId}:`, err.message);
+            }
+            return;
+          }
           const prewarmPayload = prewarmInflight ? await prewarmInflight : null;
           if (hadPrewarmMapEntry && !prewarmPayload) {
             log.info(`PREWARM_MISS callId=${callId}`);
@@ -1110,6 +1180,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               callerContactName,
               orgName,
               callerPhone: sanitizedCallee || calleeNumber,
+              deferInlineKnowledge: !preparedOpeningMode,
             });
             finalPrompt = promptBundle.finalPrompt;
             customToolDeclarations = promptBundle.customToolDeclarations;
@@ -2290,6 +2361,77 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       try { await session.close(); } catch {}
     },
   };
+}
+
+/**
+ * Start Gemini Live during outbound ring (live opening mode) so setup finishes before the callee answers.
+ * The media WebSocket is attached on answer via a stub socket — target sub-2s answer-to-first-speech.
+ */
+async function startOutboundRingLiveGeminiConnect(callId, payload, orgId) {
+  if (isPreparedOpeningGreetingEnabled()) return;
+  if (!payload?.finalPrompt || vobizRingLiveSessions.has(callId)) return;
+
+  const stubWs = createRingStubVobizWebSocket();
+  const transport = { streamId: null };
+  const internalCallId = `call_vobiz_ring_${String(callId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  const noopRecordStream = {
+    write() { return true; },
+    destroyed: false,
+    writableEnded: false,
+  };
+  const ringTranscriptLines = [];
+  const player = createVobizOutboundAudioPlayer(null, () => transport.streamId, { callId: internalCallId });
+  const prewarmedGeminiClientPromise = vobizPrewarmedClients.get(callId)
+    || genai.getClientForOrg(orgId).catch(() => null);
+
+  const entry = {
+    stubWs,
+    player,
+    transcriptLines: ringTranscriptLines,
+    payload,
+    transport,
+    geminiSetupFinished: false,
+    sessionPromise: null,
+  };
+
+  entry.sessionPromise = openGeminiSession(
+    stubWs,
+    payload.voiceName || VOICE_MAP[payload.activeConfig?.activeVoice] || "Achird",
+    payload.finalPrompt,
+    noopRecordStream,
+    ringTranscriptLines,
+    internalCallId,
+    () => transport.streamId,
+    () => {},
+    () => {},
+    () => {
+      entry.geminiSetupFinished = true;
+      log.info(`⏱️ Ring-time Live Gemini setup complete (callId=${callId})`);
+    },
+    () => vobizCallCallee.get(callId) || "",
+    payload.customToolDeclarations || [],
+    orgId,
+    payload.setup?.customObjects || [],
+    () => callId,
+    null,
+    () => {},
+    () => {},
+    payload.kbDocumentIds,
+    payload.normalizedQuestions || [],
+    player,
+    { prewarmedGeminiClientPromise, prewarmedFeatureFlagsPromise: null },
+    null,
+    null,
+  ).catch((err) => {
+    vobizRingLiveSessions.delete(callId);
+    throw err;
+  });
+
+  vobizRingLiveSessions.set(callId, entry);
+  log.info(`⏱️ Ring-time Live Gemini connect started for call ${callId} (prompt ${payload.finalPrompt.length} chars)`);
+  setTimeout(() => {
+    if (vobizRingLiveSessions.get(callId) === entry) vobizRingLiveSessions.delete(callId);
+  }, CALL_CACHE_TTL_MS);
 }
 
 // ──────────═════════════════════

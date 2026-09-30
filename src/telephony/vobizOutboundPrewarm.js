@@ -172,6 +172,7 @@ function runOutboundPrewarm({
         callerContactName,
         orgName,
         callerPhone: phoneNumber,
+        deferInlineKnowledge: !isPreparedOpeningGreetingEnabled(),
       }),
       openingAudioPromise,
     ]);

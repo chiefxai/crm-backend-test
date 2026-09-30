@@ -21,6 +21,8 @@ async function buildVobizSessionPrompt({
   callerContactName,
   orgName,
   callerPhone = null,
+  /** When true, skip loading KB into the system prompt (tool search only) — faster Live connect. */
+  deferInlineKnowledge = false,
 }) {
   const customObjects = setup.customObjects || [];
   let orgHasKnowledgeBase = setup.orgHasKnowledgeBase;
@@ -36,7 +38,9 @@ async function buildVobizSessionPrompt({
 
   if (orgHasKnowledgeBase && knowledgeBaseSearchEnabled) {
     let inlineKnowledge = setup.inlineKnowledge;
-    if (inlineKnowledge === undefined && resolvedOrgId) {
+    if (deferInlineKnowledge) {
+      inlineKnowledge = null;
+    } else if (inlineKnowledge === undefined && resolvedOrgId) {
       try {
         inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds);
       } catch {

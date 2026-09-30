@@ -21,7 +21,7 @@ const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 /**
  * Opening greeting audio source for Vobiz telephony.
  * - "prepared" (default): pre-rendered PCM via gemini-2.5-flash-preview-tts during ring — fastest time-to-first-speech, different prosody than Live.
- * - "live": no prepared clip; first speech comes from gemini-live-2.5-flash-native-audio after connect — most natural, ~2–4s more dead air on answer.
+ * - "live": native-audio Live opening; outbound pre-connects during ring when prewarm finishes before answer (target &lt;2s to first speech). Set in .env: VOBIZ_OPENING_GREETING_MODE=live
  */
 function isPreparedOpeningGreetingEnabled() {
   const mode = String(process.env.VOBIZ_OPENING_GREETING_MODE || "prepared").trim().toLowerCase();

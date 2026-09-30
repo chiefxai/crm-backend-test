@@ -80,4 +80,14 @@ describe("vobizOpeningGreeting", () => {
     expect(text).toContain("Ram");
     expect(text).toContain("ABC Insurance");
   });
+
+  test("isPreparedOpeningGreetingEnabled respects VOBIZ_OPENING_GREETING_MODE", () => {
+    const prev = process.env.VOBIZ_OPENING_GREETING_MODE;
+    delete process.env.VOBIZ_OPENING_GREETING_MODE;
+    expect(isPreparedOpeningGreetingEnabled()).toBe(true);
+    process.env.VOBIZ_OPENING_GREETING_MODE = "live";
+    expect(isPreparedOpeningGreetingEnabled()).toBe(false);
+    if (prev === undefined) delete process.env.VOBIZ_OPENING_GREETING_MODE;
+    else process.env.VOBIZ_OPENING_GREETING_MODE = prev;
+  });
 });
