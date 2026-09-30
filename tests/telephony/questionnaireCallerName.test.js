@@ -1,5 +1,6 @@
 const {
   looksLikeNameQuestion,
+  looksLikeQuestionnaireAck,
   partitionQuestionsForKnownCaller,
   prepareQuestionnaireSave,
 } = require("../../src/telephony/questionnaireCallerIdentity");
@@ -72,6 +73,22 @@ describe("questionnaire caller name guards", () => {
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/CRM contact name/i);
     }
+  });
+
+  test("treats py-salam style transcripts as acknowledgments", () => {
+    expect(looksLikeQuestionnaireAck("Py-SALAM")).toBe(true);
+    expect(looksLikeQuestionnaireAck("pesalam")).toBe(true);
+  });
+
+  test("rejects Not applicable placeholder answers", () => {
+    const result = prepareQuestionnaireSave({
+      question: "How old are you currently?",
+      answer: "Not applicable",
+      questionsList: [{ label: "age", question: "How old are you currently?" }],
+      callerContactName: "sanjay",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/placeholder/i);
   });
 
   test("allows CRM contact name as nominee when question asks for nominee", () => {
