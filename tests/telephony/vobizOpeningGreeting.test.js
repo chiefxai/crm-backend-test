@@ -85,10 +85,11 @@ describe("vobizOpeningGreeting", () => {
   test("shouldUsePreparedOpeningGreeting is outbound-only when prepared mode", () => {
     const prev = process.env.VOBIZ_OPENING_GREETING_MODE;
     delete process.env.VOBIZ_OPENING_GREETING_MODE;
+    expect(shouldUsePreparedOpeningGreeting("outbound")).toBe(false);
+    expect(shouldUsePreparedOpeningGreeting("inbound")).toBe(false);
+    process.env.VOBIZ_OPENING_GREETING_MODE = "prepared";
     expect(shouldUsePreparedOpeningGreeting("outbound")).toBe(true);
     expect(shouldUsePreparedOpeningGreeting("inbound")).toBe(false);
-    process.env.VOBIZ_OPENING_GREETING_MODE = "live";
-    expect(shouldUsePreparedOpeningGreeting("outbound")).toBe(false);
     if (prev === undefined) delete process.env.VOBIZ_OPENING_GREETING_MODE;
     else process.env.VOBIZ_OPENING_GREETING_MODE = prev;
   });
@@ -96,6 +97,8 @@ describe("vobizOpeningGreeting", () => {
   test("isPreparedOpeningGreetingEnabled respects VOBIZ_OPENING_GREETING_MODE", () => {
     const prev = process.env.VOBIZ_OPENING_GREETING_MODE;
     delete process.env.VOBIZ_OPENING_GREETING_MODE;
+    expect(isPreparedOpeningGreetingEnabled()).toBe(false);
+    process.env.VOBIZ_OPENING_GREETING_MODE = "prepared";
     expect(isPreparedOpeningGreetingEnabled()).toBe(true);
     process.env.VOBIZ_OPENING_GREETING_MODE = "live";
     expect(isPreparedOpeningGreetingEnabled()).toBe(false);
