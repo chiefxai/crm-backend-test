@@ -81,13 +81,31 @@ If the caller asks anything about this business, its products, services, pricing
   }
 
   const normalizedQuestions = postCallAgents.normalizeQuestions(activeQuestions);
+  const { toAsk: questionnaireQuestionsForPrompt, preAnsweredName } = questionnaire.partitionQuestionsForKnownCaller(
+    normalizedQuestions,
+    callerContactName,
+  );
+
+  const knownNamePrefillPrompt = preAnsweredName.length && callerContactName
+    ? `
+──────────
+KNOWN CONTACT — NAME ALREADY ON FILE
+──────────
+CRM already has this caller's name: "${callerContactName}". You used it in your opening greeting — keep using exactly this name for the entire call.
+
+Do NOT ask any name / full-name question. Do NOT call them Santhosh, சந்தோஷ், or say சந்தோஷம் as if it were their name — those are different words/names and are wrong for this contact unless "${callerContactName}" literally is that name.
+
+When you begin the questionnaire (after they confirm they can talk), silently call 'save_question_response' once for each pre-answered name question below with answer "${callerContactName}", then ask the first question in the numbered list out loud:
+${preAnsweredName.map((q, i) => `${i + 1}. ${q.question}`).join("\n")}
+`
+    : "";
 
   const dynamicQuestionnairePrompt = `
 ──────────
 MANDATORY QUESTIONNAIRE PROTOCOL
 ──────────
 You MUST ask the caller the following questions ONE BY ONE, to understand what they need — do not describe yourself as being in any particular industry beyond what's already been established above. Do NOT ask them all at once. Wait for their response for each question:
-${questionnaire.formatQuestionnaireList(normalizedQuestions)}
+${questionnaire.formatQuestionnaireList(questionnaireQuestionsForPrompt)}
 
 When the user answers a question, you must immediately call the tool 'save_question_response' with the exact question you asked and the answer they gave, and then move to the next question.
 
@@ -100,12 +118,16 @@ Be extra careful with Yes/No answers specifically — "yes" and "no" (and their 
 Never call 'save_question_response' unless the caller has actually, verbally answered that specific question earlier in THIS call. Do not guess, assume, or pre-fill an answer (e.g. assuming "Yes" just because you're calling to offer something, or because a caller sounds friendly). If you have not yet asked a question and gotten a real reply to it, it has no answer to save yet.
 `;
 
+  const outboundQuestionnaireLead = callerContactName
+    ? `This is an outbound call — you called them. After your opening greeting, wait until they confirm they can talk (e.g. "yes", "pesalam", "pesla"). That confirmation is NOT an answer to any questionnaire item — never save it with save_question_response. Then follow the KNOWN CONTACT — NAME ALREADY ON FILE section (if present) and ask the first numbered question below out loud.`
+    : "This is an outbound call — you called them, ask question 1 first, right after your opening greeting, before anything else. Do not skip ahead to a later question or start general small talk first.";
+
   const genericQuestionnairePrompt = `
 ──────────
 MANDATORY QUESTIONNAIRE PROTOCOL
 ──────────
-This is an outbound call — you called them, ask question 1 first, right after your opening greeting, before anything else. Do not skip ahead to a later question or start general small talk first.
-${questionnaire.formatQuestionnaireList(normalizedQuestions)}
+${outboundQuestionnaireLead}
+${questionnaire.formatQuestionnaireList(questionnaireQuestionsForPrompt)}
 
 Ask these ONE BY ONE, in this exact order. Wait for the caller's actual answer to the current question before moving to the next one.
 
@@ -123,7 +145,7 @@ ENDING THE CALL
 Once the conversation has naturally wrapped up — the caller's questions are answered, they say goodbye, or they have nothing further to add — say a brief warm goodbye, then call the 'end_call' tool. Do not call it mid-conversation or before saying goodbye.`;
 
   const callerIdentityPrompt = callerContactName
-    ? `\n━━━ CALLER IDENTITY ━━━\nThis caller is already a saved contact named "${callerContactName}". Address them by this name naturally during the call. Do NOT ask "what is your name?" — you already know it.\n`
+    ? `\n━━━ CALLER IDENTITY ━━━\nThis caller is already a saved contact named "${callerContactName}". Address them by this exact name (same spelling/pronunciation as in your greeting) for the entire call — in Tamil, English, or Tanglish. Do NOT ask "what is your name?" — you already know it. Do NOT substitute a different name (e.g. Santhosh / சந்தோஷ்) and do not use the Tamil word சந்தோஷம் ("great/glad") as if it were their name.\n`
     : "";
 
   let callerClockPrompt = "";
@@ -165,8 +187,8 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
   }
 
   let finalPrompt = customObjects.length > 0
-    ? buildRuntimePrompt(activeConfig) + "\n" + customObjectsPrompt + companyInfoPrompt + callerIdentityPrompt + callerClockPrompt + (hasCustomTaskQuestions ? "\n" + genericQuestionnairePrompt : "") + knowledgeBasePrompt + endCallPrompt
-    : buildRuntimePrompt(activeConfig) + "\n" + dynamicQuestionnairePrompt + companyInfoPrompt + callerIdentityPrompt + callerClockPrompt + knowledgeBasePrompt + endCallPrompt;
+    ? buildRuntimePrompt(activeConfig) + "\n" + customObjectsPrompt + companyInfoPrompt + callerIdentityPrompt + knownNamePrefillPrompt + callerClockPrompt + (hasCustomTaskQuestions ? "\n" + genericQuestionnairePrompt : "") + knowledgeBasePrompt + endCallPrompt
+    : buildRuntimePrompt(activeConfig) + "\n" + dynamicQuestionnairePrompt + companyInfoPrompt + callerIdentityPrompt + knownNamePrefillPrompt + callerClockPrompt + knowledgeBasePrompt + endCallPrompt;
   if (starhealthPrompt) finalPrompt += "\n" + starhealthPrompt;
 
   const kbInlineLength = (setup.inlineKnowledge && typeof setup.inlineKnowledge === "string")

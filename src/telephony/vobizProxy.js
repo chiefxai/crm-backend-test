@@ -1354,7 +1354,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
               prewarmedFeatureFlagsPromise,
             },
             { writeRecording },
-            livePlaybackGate
+            livePlaybackGate,
+            callerContactName
           ).then(session => {
             callLatencyMetrics.geminiConnectComplete = Date.now();
             if (callLatencyMetrics.geminiConnectStart) {
@@ -1579,7 +1580,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
 // GEMINI LIVE SESSION
 // ──────────═════════════════════
-async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null, livePlaybackGate = null) {
+async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null, livePlaybackGate = null, callerContactName = null) {
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
   let lastRawBroadcastAt = 0;
 
@@ -1973,7 +1974,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 : { error: "This feature is currently disabled." };
             } else if (call.name === "save_question_response") {
               const phone = getCallerNumber ? getCallerNumber() : "Vobiz Call";
-              result = await handleSaveQuestionResponse(orgId, callId, phone, call.args.question, call.args.answer, normalizedQuestions);
+              result = await handleSaveQuestionResponse(orgId, callId, phone, call.args.question, call.args.answer, normalizedQuestions, callerContactName);
             } else if (call.name === "send_email_document") {
               result = (await featureFlags.isEnabled("email_documents"))
                 ? await handleSendEmailDocument(call.args.recipient_email, call.args.subject, call.args.body, call.args.document_type)
@@ -2454,8 +2455,9 @@ async function startOutboundRingLiveGeminiConnect(callId, payload, orgId, aliasC
     { prewarmedGeminiClientPromise, prewarmedFeatureFlagsPromise: null },
     null,
     null,
+    payload.callerContactName || payload.setup?.callerContactName || null,
   ).catch((err) => {
-    vobizRingLiveSessions.delete(callId);
+    clearRingLiveSessionAliases(entry);
     throw err;
   });
 
@@ -2651,8 +2653,8 @@ async function handleSearchPolicyKnowledgeBase(query) {
   }
 }
 
-async function handleSaveQuestionResponse(orgId, callId, phone, question, answer, questionsList = []) {
-  return questionnaire.saveQuestionResponse({ orgId, callId, phone, question, answer, questionsList });
+async function handleSaveQuestionResponse(orgId, callId, phone, question, answer, questionsList = [], callerContactName = null) {
+  return questionnaire.saveQuestionResponse({ orgId, callId, phone, question, answer, questionsList, callerContactName });
 }
 
 // Saves a mid-call question/request the AI couldn't fully resolve, so a

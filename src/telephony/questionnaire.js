@@ -15,6 +15,7 @@
 const db = require("../db/repository");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("telephony.questionnaire");
+const callerIdentity = require("./questionnaireCallerIdentity");
 
 // Renders a normalized { label, question }[] (see postCallAgents.normalizeQuestions)
 // as the numbered list every provider's questionnaire prompt embeds. The AI
@@ -28,23 +29,36 @@ function formatQuestionnaireList(normalizedQuestions) {
 // match it against this call's normalized question list to recover the
 // short label (falls back to the question text itself when no match/label),
 // then persist it.
-async function saveQuestionResponse({ orgId, callId, phone, question, answer, questionsList = [] }) {
+async function saveQuestionResponse({ orgId, callId, phone, question, answer, questionsList = [], callerContactName = null }) {
   try {
     if (!orgId) throw new Error("orgId is required to save a questionnaire response");
+    const prepared = callerIdentity.prepareQuestionnaireSave({ question, answer, questionsList, callerContactName });
+    if (!prepared.ok) {
+      return { success: false, saved: false, error: prepared.error };
+    }
     const match = questionsList.find((q) => q.question === question);
     await db.create("leadresponses", orgId, {
       callId,
       policyholderPhone: phone || "Unknown",
       question,
-      answer,
+      answer: prepared.answer,
       label: match ? match.label : question,
     });
-    log.info(`✅ Questionnaire: Saved response for "${question}" ➔ "${answer}"`);
-    return { success: true, saved: true };
+    log.info(`✅ Questionnaire: Saved response for "${question}" ➔ "${prepared.answer}"`);
+    const result = { success: true, saved: true };
+    if (prepared.note) result.note = prepared.note;
+    if (prepared.coerced) result.coercedFromContact = true;
+    return result;
   } catch (err) {
     log.error("❌ Questionnaire save failed:", err.message);
     return { success: false, error: err.message };
   }
 }
 
-module.exports = { formatQuestionnaireList, saveQuestionResponse };
+module.exports = {
+  formatQuestionnaireList,
+  saveQuestionResponse,
+  looksLikeNameQuestion: callerIdentity.looksLikeNameQuestion,
+  partitionQuestionsForKnownCaller: callerIdentity.partitionQuestionsForKnownCaller,
+  prepareQuestionnaireSave: callerIdentity.prepareQuestionnaireSave,
+};
