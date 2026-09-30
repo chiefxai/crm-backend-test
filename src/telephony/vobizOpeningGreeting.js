@@ -161,6 +161,14 @@ function logGreetingLatency(callId, payload) {
   log.info(JSON.stringify({ event: "vobiz_call_latency", callId, ...payload }));
 }
 
+/** Appended to Gemini Live system prompt when opening audio is pre-rendered (TTS), not spoken by the model. */
+const PREPARED_OPENING_SPOKEN_PROMPT = `
+──────────
+OPENING GREETING ALREADY DELIVERED
+──────────
+The phone system has ALREADY played your opening greeting aloud to the caller. Do NOT say hello, vanakkam, introduce yourself, or repeat any greeting. Remain silent until the caller speaks. When they answer, go directly to question 1 or their request — no second greeting.
+`;
+
 module.exports = {
   GREETING_CONFIG_VERSION,
   TTS_MODEL,
@@ -170,5 +178,6 @@ module.exports = {
   getOrGenerateOpeningGreetingAudio,
   synthesizeOpeningGreetingPcm,
   logGreetingLatency,
+  PREPARED_OPENING_SPOKEN_PROMPT,
   _clearGreetingCacheForTests: () => greetingAudioCache.clear(),
 };
