@@ -13,6 +13,7 @@ function sendJson(wsConn, obj) {
  */
 function createVobizOutboundAudioPlayer(vobizWs, getStreamId, { writeRecording, callId = "unknown" } = {}) {
   let currentWs = vobizWs;
+  let recordOutbound = writeRecording || null;
   let outboundQueue = Buffer.alloc(0);
   let intervalId = null;
   let hasPrebuffered = false;
@@ -70,6 +71,9 @@ function createVobizOutboundAudioPlayer(vobizWs, getStreamId, { writeRecording, 
     setWebSocket(ws) {
       currentWs = ws;
     },
+    setWriteRecording(fn) {
+      recordOutbound = typeof fn === "function" ? fn : null;
+    },
     enqueuePcm(pcm16k, { fastStart = false } = {}) {
       if (!pcm16k || !pcm16k.length) return;
       audioStats.chunksIn++;
@@ -82,7 +86,7 @@ function createVobizOutboundAudioPlayer(vobizWs, getStreamId, { writeRecording, 
         log.warn(`⚠️ Vobiz audio queue capped [${callId}] at ${MAX_OUTBOUND_QUEUE_BYTES}B`);
       }
       if (fastStart && !hasPrebuffered) skipPrebufferOnce = true;
-      if (writeRecording) writeRecording(pcm16k);
+      if (recordOutbound) recordOutbound(pcm16k);
       startPacing();
     },
     clearQueue() {
