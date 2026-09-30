@@ -1502,6 +1502,49 @@ async function getResponsesByCallId(orgId, callId) {
   return (data || []).map(row => ({ label: row.label || row.question, question: row.question, answer: row.answer }));
 }
 
+/** Move questionnaire rows saved under a ring-time id onto the finalized call id. */
+async function rebindLeadResponsesCallId(orgId, fromCallId, toCallId) {
+  const from = String(fromCallId || "").trim();
+  const to = String(toCallId || "").trim();
+  if (!orgId || !from || !to || from === to) return 0;
+  const { data, error } = await supabase
+    .from("lead_responses")
+    .update({ call_id: to })
+    .eq("org_id", orgId)
+    .eq("call_id", from)
+    .select("call_id");
+  if (error) throw new Error(`[db.rebindLeadResponsesCallId] ${error.message}`);
+  const moved = Array.isArray(data) ? data.length : 0;
+  if (moved > 0) {
+    log.info(`🔁 Rebound ${moved} lead_responses row(s) from ${from} → ${to}`);
+  }
+  return moved;
+}
+
+async function getResponsesForCallIds(orgId, callIds) {
+  const ids = [...new Set((callIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
+  if (!orgId || !ids.length) return [];
+  const byQuestion = new Map();
+  for (const callId of ids) {
+    let rows = [];
+    try {
+      rows = await getResponsesByCallId(orgId, callId);
+    } catch (err) {
+      log.warn(`⚠️ getResponsesForCallIds failed for ${callId}:`, err.message);
+    }
+    for (const row of rows) {
+      if (!row?.question) continue;
+      const key = String(row.question).trim().toLowerCase();
+      const existing = byQuestion.get(key);
+      const answer = row.answer == null ? "" : String(row.answer).trim();
+      if (!existing || (!String(existing.answer || "").trim() && answer)) {
+        byQuestion.set(key, row);
+      }
+    }
+  }
+  return [...byQuestion.values()];
+}
+
 async function getResponsesForPhone(orgId, phone) {
   const digits = String(phone || "").replace(/[^\d]/g, "");
   if (!digits) return [];
@@ -2123,6 +2166,8 @@ module.exports = {
   findLeadByPhone,
   findCapturedNameForCall,
   getResponsesByCallId,
+  getResponsesForCallIds,
+  rebindLeadResponsesCallId,
   getResponsesForPhone,
   isNumberAvailable,
   signInWithPassword,

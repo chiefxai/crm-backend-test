@@ -30,6 +30,36 @@ function isMeaningfulCallerUtterance(text) {
   return true;
 }
 
+/** PCM 16 kHz 16-bit mono ≈ 32_000 bytes/s — ~1.5s of caller audio. */
+const MIN_INBOUND_AUDIO_BYTES_FOR_ANSWERED = 48_000;
+
+function countMeaningfulCallerWords(mergedTranscriptLines) {
+  return (mergedTranscriptLines || [])
+    .filter((l) => l.role === "user" && isMeaningfulCallerUtterance(l.text))
+    .reduce((sum, l) => sum + l.text.trim().split(/\s+/).filter(Boolean).length, 0);
+}
+
+function resolveCallAnswered({
+  isMachineDetected = false,
+  mergedTranscriptLines = [],
+  direction = "unknown",
+  durationSeconds = 0,
+  totalInboundAudioBytes = 0,
+  savedAnswerCount = 0,
+}) {
+  if (isMachineDetected) return false;
+  if (countMeaningfulCallerWords(mergedTranscriptLines) > 0) return true;
+  if (savedAnswerCount > 0) return true;
+  if (
+    direction === "outbound"
+    && durationSeconds >= 6
+    && totalInboundAudioBytes >= MIN_INBOUND_AUDIO_BYTES_FOR_ANSWERED
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function splitTranscriptLines(transcript) {
   return String(transcript || "")
     .split(/\n+/)
@@ -132,6 +162,8 @@ module.exports = {
   callerTurns,
   agentTurns,
   isMeaningfulCallerUtterance,
+  countMeaningfulCallerWords,
+  resolveCallAnswered,
   extractRelativeMinutesFromText,
   deriveTranscriptSignals,
   deriveAgentSchedulingSignals,
