@@ -14,7 +14,8 @@ describe("vobiz outbound greeting coordination", () => {
     expect(source).toContain("dropGeminiAudioUntilCallerSpeaks");
     expect(source).toContain("PREPARED_OPENING_SPOKEN_PROMPT");
     expect(source).toContain("Gemini silent handoff after prepared opening (no Live greeting)");
-    expect(source).toContain("startInboundPreparedOpening");
+    expect(source).toContain("shouldUsePreparedOpeningGreeting");
+    expect(source).toContain("scheduleInboundVobizPrewarm");
     expect(source).toMatch(/sendPreparedOpeningHandoff[\s\S]*turn_complete:\s*false/);
   });
 });
