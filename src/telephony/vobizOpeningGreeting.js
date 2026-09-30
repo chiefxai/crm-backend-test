@@ -16,12 +16,23 @@ const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
 /**
  * Opening greeting audio source for Vobiz telephony.
- * - "prepared" (default): pre-rendered PCM via gemini-2.5-flash-preview-tts during ring — fastest time-to-first-speech, different prosody than Live.
- * - "live": native-audio Live opening; outbound pre-connects during ring when prewarm finishes before answer (target under 2s to first speech). Set VOBIZ_OPENING_GREETING_MODE=live in .env.
+ * - "prepared" (default): outbound-only pre-rendered PCM (preview TTS — faster but different timbre than Live).
+ * - "live": native Live opening for outbound (ring pre-connect). Inbound always uses Live opening (same voice as the agent).
+ * Set VOBIZ_OPENING_GREETING_MODE=live for natural outbound opening voice.
  */
 function isPreparedOpeningGreetingEnabled() {
   const mode = String(process.env.VOBIZ_OPENING_GREETING_MODE || "prepared").trim().toLowerCase();
   return mode !== "live";
+}
+
+/**
+ * Pre-rendered opening uses a separate TTS model (different timbre from Live).
+ * Only outbound uses it when VOBIZ_OPENING_GREETING_MODE=prepared (default).
+ * Inbound always opens with Gemini Live so the voice matches the rest of the call.
+ */
+function shouldUsePreparedOpeningGreeting(direction = "outbound") {
+  if (!isPreparedOpeningGreetingEnabled()) return false;
+  return String(direction || "").toLowerCase() === "outbound";
 }
 const GREETING_CONFIG_VERSION = 3;
 const GREETING_CACHE_TTL_MS = 15 * 60 * 1000;
@@ -194,6 +205,7 @@ module.exports = {
   GREETING_CONFIG_VERSION,
   TTS_MODEL,
   isPreparedOpeningGreetingEnabled,
+  shouldUsePreparedOpeningGreeting,
   buildOpeningGreetingText,
   buildGreetingCacheKey,
   agentConfigFingerprint,

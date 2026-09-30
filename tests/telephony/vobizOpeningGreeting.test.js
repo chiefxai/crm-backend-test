@@ -3,6 +3,7 @@ const {
   buildGreetingCacheKey,
   agentConfigFingerprint,
   isPreparedOpeningGreetingEnabled,
+  shouldUsePreparedOpeningGreeting,
   _clearGreetingCacheForTests,
 } = require("../../src/telephony/vobizOpeningGreeting");
 
@@ -79,6 +80,17 @@ describe("vobizOpeningGreeting", () => {
     expect(text).toMatch(/Vanakkam/i);
     expect(text).toContain("Ram");
     expect(text).toContain("ABC Insurance");
+  });
+
+  test("shouldUsePreparedOpeningGreeting is outbound-only when prepared mode", () => {
+    const prev = process.env.VOBIZ_OPENING_GREETING_MODE;
+    delete process.env.VOBIZ_OPENING_GREETING_MODE;
+    expect(shouldUsePreparedOpeningGreeting("outbound")).toBe(true);
+    expect(shouldUsePreparedOpeningGreeting("inbound")).toBe(false);
+    process.env.VOBIZ_OPENING_GREETING_MODE = "live";
+    expect(shouldUsePreparedOpeningGreeting("outbound")).toBe(false);
+    if (prev === undefined) delete process.env.VOBIZ_OPENING_GREETING_MODE;
+    else process.env.VOBIZ_OPENING_GREETING_MODE = prev;
   });
 
   test("isPreparedOpeningGreetingEnabled respects VOBIZ_OPENING_GREETING_MODE", () => {
