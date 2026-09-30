@@ -72,8 +72,12 @@ function appendCallLog(callId, entry) {
 // ── Clients ───────────────────────────────────────────────────
 const genai = require("../ai/googleAiClient");
 const postCallAgents = require("../ai/postCallAgents");
-const { isMeaningfulCallerUtterance } = require("../ai/postCallAgents/decisionEngine");
+const { isMeaningfulCallerUtterance, resolveCallAnswered } = require("../ai/postCallAgents/decisionEngine");
 const questionnaire = require("./questionnaire");
+const {
+  looksLikeQuestionnaireAck,
+  looksLikeNameQuestion: questionnaireLooksLikeNameQuestion,
+} = require("./questionnaireCallerIdentity");
 const callFinalizer = require("./callFinalizer");
 
 
@@ -837,6 +841,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     }
   };
   const transcriptLines = [];
+  /** Ring-time Live may save lead_responses under a temporary id before adopt. */
+  let alternateCallIdsForFinalize = [];
 
   // Default/fallback until the org is resolved in the "start" handler below
   // (org-scoped config isn't known until then — see resolvedOrgId).
@@ -1082,6 +1088,15 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             geminiSessionPromise = adoptedRingLiveSession.sessionPromise;
             for (const line of adoptedRingLiveSession.transcriptLines) transcriptLines.push(line);
             if (adoptedRingLiveSession.persistCallIdRef) {
+              const ringCallId = adoptedRingLiveSession.persistCallIdRef.current;
+              if (ringCallId && ringCallId !== generatedCallId) {
+                alternateCallIdsForFinalize.push(ringCallId);
+                const adoptOrgId = vobizCallOrgs.get(callId) || null;
+                if (adoptOrgId) {
+                  db.rebindLeadResponsesCallId(adoptOrgId, ringCallId, generatedCallId)
+                    .catch((err) => log.warn(`⚠️ Lead response rebind ${ringCallId}→${generatedCallId} failed:`, err.message));
+                }
+              }
               adoptedRingLiveSession.persistCallIdRef.current = generatedCallId;
             }
             adoptedRingLiveSession.sessionPromise
@@ -1574,6 +1589,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
       // which broke whenever the lead's stored number and Vobiz's reported
       // callerNumber differed in country-code formatting.
       providerCallSid: callId,
+      alternateCallIds: alternateCallIdsForFinalize,
     });
   }
 
@@ -1647,10 +1663,6 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     lastSaveAt: 0,
   };
   const QUESTIONNAIRE_SAVE_MIN_GAP_MS = 2800;
-  const {
-    looksLikeQuestionnaireAck,
-    looksLikeNameQuestion: questionnaireLooksLikeNameQuestion,
-  } = require("./questionnaireCallerIdentity");
 
   // One stateful resampler per call — carries interpolation state across
   // Gemini's own small inlineData chunks so consecutive chunks resample
@@ -2574,7 +2586,7 @@ async function processPostCallData({
   liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes,
   orgId = null, direction = "unknown", isMachineDetected = false, attemptNumber = 1,
   retryContext = null, sanitizedCallee = null, providerCallSid = null,
-  workflowQuestions = null, billingReservationId = null,
+  workflowQuestions = null, billingReservationId = null, alternateCallIds = [],
 }) {
   callerNumber = normalizePhone(callerNumber);
 
@@ -2582,18 +2594,24 @@ async function processPostCallData({
   // Sentiment is computed once for Vobiz and passed into the shared finalizer.
   // Busy/no-real-conversation calls intentionally remain null.
   const mergedForSentiment = callFinalizer.mergeTranscriptLines(transcriptLines);
-  const callerWordCount = mergedForSentiment
-    .filter((line) => line.role === "user" && isMeaningfulCallerUtterance(line.text))
-    .reduce((sum, line) => sum + line.text.trim().split(/\s+/).filter(Boolean).length, 0);
-  const callAnswered = !isMachineDetected && callerWordCount > 0;
+  let liveAnswers = [];
+  try {
+    liveAnswers = await db.getResponsesForCallIds(orgId, [callId, ...alternateCallIds]);
+  } catch {}
+  const callAnswered = resolveCallAnswered({
+    isMachineDetected,
+    mergedTranscriptLines: mergedForSentiment,
+    direction,
+    durationSeconds,
+    totalInboundAudioBytes,
+    savedAnswerCount: (liveAnswers || []).filter((r) => r?.answer != null && String(r.answer).trim()).length,
+  });
 
   const fullTranscript = callFinalizer.buildFullTranscript(mergedForSentiment);
   let sentimentInputTokens = 0;
   let sentimentOutputTokens = 0;
 
   if (callAnswered) {
-    let liveAnswers = [];
-    try { liveAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
     const result = await postCallAgents.analyzeSentiment(fullTranscript, orgId, liveAnswers);
     sentiment = result.sentiment;
     sentimentInputTokens = result.inputTokens;
@@ -2661,6 +2679,8 @@ async function processPostCallData({
     // after summary, with the final sentiment available.
     sentimentInputTokens,
     sentimentOutputTokens,
+    totalInboundAudioBytes,
+    alternateCallIds,
   });
 
   if (billingReservationId) {

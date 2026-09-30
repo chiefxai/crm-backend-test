@@ -21,7 +21,11 @@
 const db = require("../db/repository");
 const objectsEngine = require("../crm/objectsEngine");
 const postCallAgents = require("../ai/postCallAgents");
-const { isMeaningfulCallerUtterance } = require("../ai/postCallAgents/decisionEngine");
+const {
+  isMeaningfulCallerUtterance,
+  countMeaningfulCallerWords,
+  resolveCallAnswered,
+} = require("../ai/postCallAgents/decisionEngine");
 const {
   findAdvisorCallbackResponse,
   resolveAdvisorCallbackIso,
@@ -338,6 +342,8 @@ async function finalizeCallRecord({
   followUp = null,
   sentimentInputTokens = 0,
   sentimentOutputTokens = 0,
+  totalInboundAudioBytes = 0,
+  alternateCallIds = [],
 }) {
   // Accumulates token usage across every post-call agent this function
   // runs (sentiment's is seeded in from the caller above; follow-up/
@@ -379,10 +385,7 @@ async function finalizeCallRecord({
   // of conversational post-processing. A zero-word caller transcript is
   // kept out of the conversational callback/enquiry pipeline so no-answer
   // and machine outcomes remain separate.
-  const callerWordCount = mergedTranscriptLines
-    .filter((l) => l.role === "user" && isMeaningfulCallerUtterance(l.text))
-    .reduce((sum, l) => sum + l.text.trim().split(/\s+/).filter(Boolean).length, 0);
-  const callAnswered = !isMachineDetected && callerWordCount > 0;
+  const callerWordCount = countMeaningfulCallerWords(mergedTranscriptLines);
 
   let { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
 
@@ -398,12 +401,23 @@ async function finalizeCallRecord({
   let workflowQuestions = getWorkflowQuestions();
   let workflowValidation = { complete: true, missingQuestions: [], requiredQuestions: [] };
 
-  try { callAnswers = await db.getResponsesByCallId(orgId, callId); } catch (err) {
+  try {
+    callAnswers = await db.getResponsesForCallIds(orgId, [callId, ...(alternateCallIds || [])]);
+  } catch (err) {
     log.warn(`⚠️ [${provider}] workflow response lookup failed; continuing without saved answers:`, err.message);
   }
 
+  const callAnswered = resolveCallAnswered({
+    isMachineDetected,
+    mergedTranscriptLines,
+    direction,
+    durationSeconds,
+    totalInboundAudioBytes,
+    savedAnswerCount: (callAnswers || []).filter((r) => r?.answer != null && String(r.answer).trim()).length,
+  });
+
   log.info(
-    `🔧 [${provider}] Post-call inputs: transcriptLines=${transcriptLines?.length || 0}, normalizedTranscriptLines=${mergedTranscriptLines.length}, workflowQuestions=${workflowQuestions?.length || 0}, callerWordCount=${callerWordCount}`
+    `🔧 [${provider}] Post-call inputs: transcriptLines=${transcriptLines?.length || 0}, normalizedTranscriptLines=${mergedTranscriptLines.length}, workflowQuestions=${workflowQuestions?.length || 0}, callerWordCount=${callerWordCount}, callAnswered=${callAnswered}, savedAnswers=${callAnswers?.length || 0}`
   );
 
   const workflowPromise = (workflowQuestions?.length && transcriptLines.length > 0)
@@ -540,8 +554,10 @@ async function finalizeCallRecord({
   }
 
   let aiSummary = fullTranscript.slice(0, 500);
+  let callIntent = "Unknown";
   if (postCallSummary.status === "fulfilled" && postCallSummary.value) {
     aiSummary = postCallSummary.value.text;
+    if (postCallSummary.value.outcome) callIntent = postCallSummary.value.outcome;
   }
 
   let scheduling = null;
@@ -745,7 +761,7 @@ async function finalizeCallRecord({
         duration: durationSeconds,
         status: finalStatus,
         sentiment,
-        intent: "Unknown",
+        intent: callIntent,
         transcript: transcriptForUi,
         summary: aiSummary,
         recordingUrl,
@@ -825,7 +841,7 @@ async function finalizeCallRecord({
           status: finalStatus,
           duration: durationSeconds,
           sentiment,
-          intent: "Unknown",
+          intent: callIntent,
           summary: aiSummary,
           recordingUrl,
           callId,
@@ -945,4 +961,14 @@ async function finalizeCallRecord({
   return { fullTranscript, mergedTranscriptLines };
 }
 
-module.exports = { finalizeCallRecord, mergeTranscriptLines, buildFullTranscript, uploadRecording, saveContactDetailsNow, resolvePostCallOutcome };
+module.exports = {
+  finalizeCallRecord,
+  mergeTranscriptLines,
+  buildFullTranscript,
+  uploadRecording,
+  saveContactDetailsNow,
+  resolvePostCallOutcome,
+  resolveCallAnswered,
+  countMeaningfulCallerWords,
+};
+// resolveCallAnswered + countMeaningfulCallerWords are implemented in decisionEngine.js

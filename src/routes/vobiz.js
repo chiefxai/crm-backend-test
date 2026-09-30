@@ -100,7 +100,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
         // Post-call finalizeCall() enqueues async work — the call_logs row may
         // not exist yet when Hangup arrives. Poll before writing a synthetic
         // No Answer row that would duplicate a Callback Scheduled entry.
-        const waitUntil = Date.now() + Number(process.env.VOBIZ_HANGUP_FALLBACK_WAIT_MS || 15000);
+        const waitUntil = Date.now() + Number(process.env.VOBIZ_HANGUP_FALLBACK_WAIT_MS || 25000);
         while (Date.now() < waitUntil) {
           if (await db.findCallLogByProviderCallSid(orgId, CallUUID)) {
             log.info(`⏭️ Vobiz Hangup fallback skipped — call log exists for CallUUID ${CallUUID}`);
