@@ -58,6 +58,8 @@ async function saveQuestionResponse({ orgId, callId, phone, question, answer, qu
 module.exports = {
   formatQuestionnaireList,
   saveQuestionResponse,
+  questionnaireProgressMeta: callerIdentity.questionnaireProgressMeta,
+  withQuestionnaireProgress: callerIdentity.withQuestionnaireProgress,
   looksLikeNameQuestion: callerIdentity.looksLikeNameQuestion,
   partitionQuestionsForKnownCaller: callerIdentity.partitionQuestionsForKnownCaller,
   prepareQuestionnaireSave: callerIdentity.prepareQuestionnaireSave,

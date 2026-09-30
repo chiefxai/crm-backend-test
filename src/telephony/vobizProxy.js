@@ -264,7 +264,7 @@ function createRingStubVobizWebSocket() {
   let real = null;
   return {
     get readyState() {
-      return real && real.readyState === 1 ? 1 : 1;
+      return real && real.readyState === 1 ? 1 : 0;
     },
     attach(ws) {
       real = ws;
@@ -1085,6 +1085,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           if (adoptedRingLiveSession) {
             outboundAudioPlayer.setWebSocket(vobizWs);
             outboundAudioPlayer.setWriteRecording(writeRecording);
+            outboundAudioPlayer.clearQueue();
+            log.info(`🔊 Cleared ring-time outbound audio backlog on adopt for call ${callId}`);
             geminiSessionPromise = adoptedRingLiveSession.sessionPromise;
             for (const line of adoptedRingLiveSession.transcriptLines) transcriptLines.push(line);
             if (adoptedRingLiveSession.persistCallIdRef) {
@@ -1456,6 +1458,11 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     hangupMs: 45000,
     onNudge: async (silentMs) => {
       if (!isActive || !geminiSessionPromise) return;
+      const queuedOutbound = outboundAudioPlayer?.getQueueLength?.() ?? 0;
+      if (queuedOutbound > 48_000) {
+        log.debug(`Skipping silence nudge for call ${callId} — agent still speaking (${queuedOutbound}B queued)`);
+        return;
+      }
       log.warn(`⚠️ Vobiz call ${callId}: no inbound audio for ${Math.round(silentMs / 1000)}s — possible stalled media stream. Nudging caller.`);
       if (global.broadcastLog) {
         global.broadcastLog(`⚠️ No response from caller for ${Math.round(silentMs / 1000)}s — checking in`, { type: "system", callId });
@@ -1661,8 +1668,14 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     meaningfulAnswerTurns: 0,
     nonNameSaves: 0,
     lastSaveAt: 0,
+    savedQuestions: new Set(),
   };
   const QUESTIONNAIRE_SAVE_MIN_GAP_MS = 2800;
+  const appendQuestionnaireToolFields = (result) => questionnaire.withQuestionnaireProgress(
+    result,
+    normalizedQuestions,
+    [...questionnaireGate.savedQuestions],
+  );
 
   // One stateful resampler per call — carries interpolation state across
   // Gemini's own small inlineData chunks so consecutive chunks resample
@@ -2023,11 +2036,11 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             } else if (call.name === "save_question_response") {
               questionnaireSavesThisMessage += 1;
               if (questionnaireSavesThisMessage > 1) {
-                result = {
+                result = appendQuestionnaireToolFields({
                   success: false,
                   saved: false,
                   error: "Only one save_question_response per turn. Save this answer, then ask the next question out loud and wait for their reply before saving again.",
-                };
+                });
               } else {
                 const phone = getCallerNumber ? getCallerNumber() : "Vobiz Call";
                 const questionText = call.args.question;
@@ -2035,21 +2048,27 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   normalizedQuestions.find((q) => q.question === questionText) || { question: questionText },
                 );
                 const now = Date.now();
-                if (
+                if (questionnaireGate.savedQuestions.has(questionText)) {
+                  result = appendQuestionnaireToolFields({
+                    success: false,
+                    saved: false,
+                    error: "This question was already saved for this call. Do not ask it again — follow the nextQuestion in questionnaireProgress.",
+                  });
+                } else if (
                   questionnaireGate.lastSaveAt > 0
                   && now - questionnaireGate.lastSaveAt < QUESTIONNAIRE_SAVE_MIN_GAP_MS
                 ) {
-                  result = {
+                  result = appendQuestionnaireToolFields({
                     success: false,
                     saved: false,
                     error: "You are saving answers too fast. Ask the next question out loud, wait for the caller to answer, then call save_question_response once.",
-                  };
+                  });
                 } else if (!isNameQ && questionnaireGate.nonNameSaves >= questionnaireGate.meaningfulAnswerTurns) {
-                  result = {
+                  result = appendQuestionnaireToolFields({
                     success: false,
                     saved: false,
                     error: "The caller has not given a real answer to this question yet. Ask it out loud and wait for their reply before save_question_response.",
-                  };
+                  });
                 } else {
                   result = await handleSaveQuestionResponse(
                     orgId,
@@ -2062,8 +2081,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   );
                   if (result.success && result.saved) {
                     questionnaireGate.lastSaveAt = now;
+                    questionnaireGate.savedQuestions.add(questionText);
                     if (!isNameQ) questionnaireGate.nonNameSaves += 1;
                   }
+                  result = appendQuestionnaireToolFields(result);
                 }
               }
             } else if (call.name === "send_email_document") {
@@ -2180,11 +2201,13 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         }
 
         if (!vobizWs || vobizWs.readyState !== 1) return;
+        const mediaStreamId = getStreamId ? getStreamId() : null;
 
         // AI audio response
         if (response.serverContent?.modelTurn?.parts) {
           for (const part of response.serverContent.modelTurn.parts) {
             if (part.inlineData?.mimeType?.startsWith("audio/")) {
+              if (!mediaStreamId) continue;
               if (livePlaybackGate?.dropGeminiAudioUntilCallerSpeaks) {
                 continue;
               }
@@ -2270,7 +2293,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             fillerTimer = null;
             if (!awaitingFirstAgentChunk) return;
             const filler = FILLER_CLIPS[voiceName];
-            if (!filler || !vobizWs || vobizWs.readyState !== 1) return;
+            if (!filler || !vobizWs || vobizWs.readyState !== 1 || !(getStreamId && getStreamId())) return;
             audioOut.setFillerPlaying(true);
             audioOut.enqueuePcm(filler);
             log.info(`🫧 Filler played while awaiting real reply (voice: ${voiceName})`);

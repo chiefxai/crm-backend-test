@@ -5,6 +5,10 @@ const NON_ANSWER_ACK_RE = /^(ready to talk|pesla|pesalam|pesalama|py-?\s*salam|p
 
 const PLACEHOLDER_ANSWER_RE = /^(not\s*applicable|n\/?a|na|none|unknown|unclear|no\s*response|not\s*provided|skip|skipped|nil|-|—|\[no\s*response\])$/i;
 
+const YES_NO_ONLY_ANSWER_RE = /^(yes|no|yeah|yep|nope|yup|nah|aama|illa|haan|nahi|correct|incorrect|right|wrong)\s*$/i;
+
+const YES_NO_QUESTION_RE = /\b(yes\s*or\s*no|male\s*or\s*female|can\s+(i|we)\s+|may\s+i\s+|shall\s+i\s+|ippo\s*pesalama|pesalama|ready\s*to\s*talk|speak\s*now|talk\s*now|is\s+that\s+(ok|okay|fine)|do\s+you\s+have\s+a\s+policy)\b/i;
+
 function normalizeAckToken(text) {
   return String(text || "").trim().toLowerCase().replace(/[^a-z]/g, "");
 }
@@ -35,6 +39,35 @@ function looksLikeNomineeQuestion(entry) {
   return NOMINEE_QUESTION_RE.test(text);
 }
 
+function looksLikeYesNoQuestion(entry) {
+  if (!entry) return false;
+  const text = `${entry.label || ""} ${entry.question || ""}`;
+  return YES_NO_QUESTION_RE.test(text);
+}
+
+function questionnaireProgressMeta(questionsList, savedQuestionTexts = []) {
+  const saved = new Set(savedQuestionTexts.filter(Boolean));
+  const list = questionsList || [];
+  const remaining = list.filter((q) => !saved.has(q.question));
+  const next = remaining[0] || null;
+  return {
+    savedQuestionTexts: [...saved],
+    remainingQuestionTexts: remaining.map((q) => q.question),
+    nextQuestion: next ? next.question : null,
+    allQuestionsAnswered: remaining.length === 0 && list.length > 0,
+  };
+}
+
+function withQuestionnaireProgress(result, questionsList, savedQuestionTexts) {
+  const progress = questionnaireProgressMeta(questionsList, savedQuestionTexts);
+  const instruction = progress.allQuestionsAnswered
+    ? "All questionnaire items are saved. Do not ask any questionnaire question again. Thank the caller and continue or close politely."
+    : progress.nextQuestion
+      ? `Do NOT repeat any question already saved. Ask ONLY this next question once, then wait for their answer: "${progress.nextQuestion}"`
+      : "Continue the questionnaire per the script.";
+  return { ...result, questionnaireProgress: progress, instruction };
+}
+
 function partitionQuestionsForKnownCaller(normalizedQuestions, callerContactName) {
   const name = String(callerContactName || "").trim();
   if (!name) {
@@ -61,8 +94,17 @@ function prepareQuestionnaireSave({ question, answer, questionsList = [], caller
 
   const looksLikeAck = !rawAnswer || looksLikeQuestionnaireAck(rawAnswer);
 
+  const isYesNoQ = match ? looksLikeYesNoQuestion(match) : looksLikeYesNoQuestion({ question });
+
+  if (!isName && !isYesNoQ && YES_NO_ONLY_ANSWER_RE.test(rawAnswer)) {
+    return {
+      ok: false,
+      error: 'A bare "Yes" or "No" is not a valid answer for this question (e.g. age, income, name). Ask the question again and save only the specific fact they said.',
+    };
+  }
+
   if (looksLikeAck) {
-    if (isName && knownName) {
+    if (isName && knownName && !/^(yes|no)\s*$/i.test(rawAnswer)) {
       return {
         ok: true,
         answer: knownName,
@@ -113,8 +155,11 @@ function prepareQuestionnaireSave({ question, answer, questionsList = [], caller
 module.exports = {
   looksLikeNameQuestion,
   looksLikeNomineeQuestion,
+  looksLikeYesNoQuestion,
   looksLikeQuestionnaireAck,
   looksLikePlaceholderAnswer,
+  questionnaireProgressMeta,
+  withQuestionnaireProgress,
   partitionQuestionsForKnownCaller,
   prepareQuestionnaireSave,
 };
