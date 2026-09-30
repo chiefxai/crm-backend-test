@@ -58,6 +58,7 @@ async function generateOpeningAudio({
       greetingText: openingGreetingText,
       cacheKey,
       allowCache: !callerContactName,
+      activeConfig,
     });
     if (metrics) {
       metrics.greetingCacheHit = cacheHit;

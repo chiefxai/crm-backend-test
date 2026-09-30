@@ -473,6 +473,30 @@ Speaking pace: ${speedDesc}
 Register warmth: ${friendlinessDesc}`;
 }
 
+/** Short pace directive for pre-rendered opening TTS (must match buildRuntimePrompt speed tiers). */
+function buildOpeningTtsPaceInstruction(speed = 52) {
+  const s = Number(speed);
+  const normalized = Number.isFinite(s) ? s : 52;
+  if (normalized >= 70) {
+    return "Speak at a quick, energetic conversational pace — clearly articulated, not drawn out or announcement-slow.";
+  }
+  if (normalized >= 35) {
+    return "Speak at a natural conversational pace — normal human phone-call speed, not slow or robotic.";
+  }
+  return "Speak at a slower, deliberate pace with brief pauses between phrases.";
+}
+
+/**
+ * Playback-rate correction for prepared opening PCM so it matches Live pacing
+ * for the same agent speed slider (52 ≈ 1.0×).
+ */
+function openingPlaybackFactorFromSpeed(speed = 52) {
+  const s = Number(speed);
+  const normalized = Number.isFinite(s) ? s : 52;
+  const factor = 0.82 + (normalized / 100) * 0.46;
+  return Math.min(1.35, Math.max(0.78, factor));
+}
+
 // Non-sensitive company facts the AI can freely speak about on a call —
 // name, location, contact channels, website, and the bio/what-we-do text.
 // Deliberately excludes taxId, license/registration numbers, compliance
@@ -599,6 +623,8 @@ module.exports = {
   getConfigForOrg,
   updateConfigForOrg,
   buildRuntimePrompt,
+  buildOpeningTtsPaceInstruction,
+  openingPlaybackFactorFromSpeed,
   buildCompanyInfoPrompt,
   buildIndustryPersona,
   getAgentConfigForNumber,
