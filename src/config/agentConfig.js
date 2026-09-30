@@ -473,6 +473,34 @@ Speaking pace: ${speedDesc}
 Register warmth: ${friendlinessDesc}`;
 }
 
+/** Short pace directive for pre-rendered opening TTS (must match buildRuntimePrompt speed tiers). */
+function buildOpeningTtsPaceInstruction(speed = 52) {
+  const s = Number(speed);
+  const normalized = Number.isFinite(s) ? s : 52;
+  if (normalized >= 70) {
+    return "Speak at a quick, energetic conversational pace — clearly articulated, not drawn out or announcement-slow.";
+  }
+  if (normalized >= 35) {
+    return "Speak at a natural conversational pace — normal human phone-call speed, not slow or robotic.";
+  }
+  return "Speak at a slower, deliberate pace with brief pauses between phrases.";
+}
+
+/**
+ * Playback-rate correction for prepared opening PCM so it matches Live pacing.
+ * Preview TTS is slower than Live at the same slider; baseline (~1.18×) corrects that.
+ * Agent Studio Speed still scales faster/slower on top (52 ≈ natural after correction).
+ * Override baseline: VOBIZ_OPENING_TTS_PLAYBACK_BASELINE (e.g. 1.22 if still slow).
+ */
+function openingPlaybackFactorFromSpeed(speed = 52) {
+  const s = Number(speed);
+  const normalized = Number.isFinite(s) ? s : 52;
+  const rawBaseline = parseFloat(process.env.VOBIZ_OPENING_TTS_PLAYBACK_BASELINE || "1.18");
+  const baseline = Number.isFinite(rawBaseline) && rawBaseline > 0 ? rawBaseline : 1.18;
+  const sliderFactor = 0.9 + (normalized / 100) * 0.28;
+  return Math.min(1.45, Math.max(0.88, sliderFactor * baseline));
+}
+
 // Non-sensitive company facts the AI can freely speak about on a call —
 // name, location, contact channels, website, and the bio/what-we-do text.
 // Deliberately excludes taxId, license/registration numbers, compliance
@@ -599,6 +627,8 @@ module.exports = {
   getConfigForOrg,
   updateConfigForOrg,
   buildRuntimePrompt,
+  buildOpeningTtsPaceInstruction,
+  openingPlaybackFactorFromSpeed,
   buildCompanyInfoPrompt,
   buildIndustryPersona,
   getAgentConfigForNumber,

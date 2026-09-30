@@ -1,18 +1,14 @@
 const crypto = require("crypto");
 const { getLogger } = require("../observability/logger");
-function resample24To16(buffer24) {
-  const aligned = new Uint8Array(buffer24.length);
-  aligned.set(buffer24);
-  const s24 = new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2);
-  const s16 = new Int16Array(Math.round(s24.length * 2 / 3));
-  for (let i = 0; i < s16.length; i++) {
-    const pos = i * 1.5;
-    const lo = Math.floor(pos);
-    const hi = Math.min(s24.length - 1, lo + 1);
-    s16[i] = s24[lo] * (1 - (pos - lo)) + s24[hi] * (pos - lo);
-  }
-  return Buffer.from(s16.buffer, s16.byteOffset, s16.byteLength);
-}
+const {
+  buildOpeningTtsPaceInstruction,
+  openingPlaybackFactorFromSpeed,
+} = require("../config/agentConfig");
+const {
+  parsePcmSampleRateFromMime,
+  pcmToTelephony16k,
+  adjustPcm16PlaybackRate,
+} = require("../utils/audioConverter");
 
 const log = getLogger("telephony.vobizOpeningGreeting");
 
@@ -27,7 +23,7 @@ function isPreparedOpeningGreetingEnabled() {
   const mode = String(process.env.VOBIZ_OPENING_GREETING_MODE || "prepared").trim().toLowerCase();
   return mode !== "live";
 }
-const GREETING_CONFIG_VERSION = 1;
+const GREETING_CONFIG_VERSION = 3;
 const GREETING_CACHE_TTL_MS = 15 * 60 * 1000;
 const GREETING_CACHE_MAX = 200;
 
@@ -114,8 +110,19 @@ function agentConfigFingerprint(activeConfig) {
   if (!activeConfig) return "";
   const name = activeConfig.name || "";
   const voice = activeConfig.activeVoice || "";
+  const speed = activeConfig.speed ?? 52;
   const snippet = (activeConfig.systemPrompt || "").slice(0, 120);
-  return crypto.createHash("sha256").update(`${name}|${voice}|${snippet}`).digest("hex").slice(0, 16);
+  return crypto.createHash("sha256").update(`${name}|${voice}|${speed}|${snippet}`).digest("hex").slice(0, 16);
+}
+
+function buildOpeningTtsPrompt(greetingText, activeConfig) {
+  const pace = buildOpeningTtsPaceInstruction(activeConfig?.speed ?? 52);
+  return `${pace}\n\nRead the following opening line aloud exactly as written. Do not add extra words or a second greeting:\n${greetingText}`;
+}
+
+function normalizeOpeningPcmForAgent(pcm16k, activeConfig) {
+  const factor = openingPlaybackFactorFromSpeed(activeConfig?.speed ?? 52);
+  return adjustPcm16PlaybackRate(pcm16k, factor);
 }
 
 function pruneGreetingCache() {
@@ -129,11 +136,12 @@ function pruneGreetingCache() {
   }
 }
 
-async function synthesizeOpeningGreetingPcm(geminiClient, voiceName, text) {
+async function synthesizeOpeningGreetingPcm(geminiClient, voiceName, text, activeConfig = null) {
   if (!geminiClient || !voiceName || !text) throw new Error("geminiClient, voiceName, and text are required for opening TTS");
+  const ttsPrompt = buildOpeningTtsPrompt(text, activeConfig);
   const res = await geminiClient.models.generateContent({
     model: TTS_MODEL,
-    contents: [{ role: "user", parts: [{ text }] }],
+    contents: [{ role: "user", parts: [{ text: ttsPrompt }] }],
     config: {
       responseModalities: ["AUDIO"],
       speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
@@ -143,8 +151,10 @@ async function synthesizeOpeningGreetingPcm(geminiClient, voiceName, text) {
   if (!audioPart) {
     throw new Error("Gemini TTS returned no audio for opening greeting");
   }
-  const raw24k = Buffer.from(audioPart.inlineData.data, "base64");
-  return resample24To16(raw24k);
+  const sourceRate = parsePcmSampleRateFromMime(audioPart.inlineData.mimeType, 24000);
+  const rawPcm = Buffer.from(audioPart.inlineData.data, "base64");
+  const pcm16k = pcmToTelephony16k(rawPcm, sourceRate);
+  return normalizeOpeningPcmForAgent(pcm16k, activeConfig);
 }
 
 async function getOrGenerateOpeningGreetingAudio({
@@ -153,6 +163,7 @@ async function getOrGenerateOpeningGreetingAudio({
   greetingText,
   cacheKey,
   allowCache = true,
+  activeConfig = null,
 }) {
   pruneGreetingCache();
   if (allowCache && cacheKey && greetingAudioCache.has(cacheKey)) {
@@ -160,7 +171,7 @@ async function getOrGenerateOpeningGreetingAudio({
     if (hit.expiresAt > Date.now()) return { audio: hit.audio, cacheHit: true };
     greetingAudioCache.delete(cacheKey);
   }
-  const audio = await synthesizeOpeningGreetingPcm(geminiClient, voiceName, greetingText);
+  const audio = await synthesizeOpeningGreetingPcm(geminiClient, voiceName, greetingText, activeConfig);
   if (allowCache && cacheKey && !cacheKey.includes("caller:")) {
     greetingAudioCache.set(cacheKey, { audio, expiresAt: Date.now() + GREETING_CACHE_TTL_MS });
   }
@@ -186,6 +197,8 @@ module.exports = {
   buildOpeningGreetingText,
   buildGreetingCacheKey,
   agentConfigFingerprint,
+  buildOpeningTtsPrompt,
+  normalizeOpeningPcmForAgent,
   getOrGenerateOpeningGreetingAudio,
   synthesizeOpeningGreetingPcm,
   logGreetingLatency,

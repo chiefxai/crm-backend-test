@@ -144,6 +144,75 @@ function createDownsampler24To8() {
  * continuous stream, regardless of how it was chunked on the way in.
  * @returns {(pcm24k: Buffer) => Buffer}
  */
+function parsePcmSampleRateFromMime(mimeType, fallback = 24000) {
+  const m = String(mimeType || "").match(/rate=(\d+)/i);
+  if (!m) return fallback;
+  const rate = parseInt(m[1], 10);
+  return Number.isFinite(rate) && rate > 0 ? rate : fallback;
+}
+
+function resample24To16Linear(buffer24) {
+  const aligned = new Uint8Array(buffer24.length);
+  aligned.set(buffer24);
+  const s24 = new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2);
+  const s16 = new Int16Array(Math.round(s24.length * 2 / 3));
+  for (let i = 0; i < s16.length; i++) {
+    const pos = i * 1.5;
+    const lo = Math.floor(pos);
+    const hi = Math.min(s24.length - 1, lo + 1);
+    s16[i] = s24[lo] * (1 - (pos - lo)) + s24[hi] * (pos - lo);
+  }
+  return Buffer.from(s16.buffer, s16.byteOffset, s16.byteLength);
+}
+
+/**
+ * Normalize Gemini TTS / PCM blobs to 16 kHz mono PCM16 for Vobiz playAudio.
+ * @param {Buffer} pcmBuffer
+ * @param {number} sourceSampleRate
+ */
+function pcmToTelephony16k(pcmBuffer, sourceSampleRate = 24000) {
+  const rate = sourceSampleRate || 24000;
+  if (!pcmBuffer?.length) return pcmBuffer;
+  if (rate === 16000) return pcmBuffer;
+  if (rate === 24000) return resample24To16Linear(pcmBuffer);
+  const aligned = new Uint8Array(pcmBuffer.length);
+  aligned.set(pcmBuffer);
+  const src = new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2);
+  const ratio = 16000 / rate;
+  const outLen = Math.max(1, Math.round(src.length * ratio));
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i / ratio;
+    const lo = Math.floor(pos);
+    const hi = Math.min(src.length - 1, lo + 1);
+    const frac = pos - lo;
+    out[i] = src[lo] * (1 - frac) + src[hi] * frac;
+  }
+  return Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+}
+
+/**
+ * Time-compress or expand 16 kHz PCM (factor > 1 = faster speech, < 1 = slower).
+ * @param {Buffer} pcm16k
+ * @param {number} factor
+ */
+function adjustPcm16PlaybackRate(pcm16k, factor) {
+  if (!pcm16k?.length || !factor || Math.abs(factor - 1) < 0.02) return pcm16k;
+  const aligned = new Uint8Array(pcm16k.length);
+  aligned.set(pcm16k);
+  const src = new Int16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength / 2);
+  const outLen = Math.max(1, Math.round(src.length / factor));
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * factor;
+    const lo = Math.floor(pos);
+    const hi = Math.min(src.length - 1, lo + 1);
+    const frac = pos - lo;
+    out[i] = src[lo] * (1 - frac) + src[hi] * frac;
+  }
+  return Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+}
+
 function createResampler24To16() {
   let carry = new Int16Array(0); // unconsumed trailing samples from the previous chunk, needed to interpolate the start of this one
   let phase = 0;                 // fractional position into `carry`/the new chunk where the next output sample starts
@@ -192,6 +261,10 @@ module.exports = {
   upsample8To16,
   downsample24To8,
   downsample16To8,
+  parsePcmSampleRateFromMime,
+  resample24To16Linear,
+  pcmToTelephony16k,
+  adjustPcm16PlaybackRate,
   createDownsampler24To8,
   createResampler24To16
 };
