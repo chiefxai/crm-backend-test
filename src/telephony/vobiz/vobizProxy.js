@@ -1244,8 +1244,10 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
           if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
             log.info(`ℹ️ Using dynamic campaign questions for Vobiz call:`, customQuestions);
+            vobizCallQuestionsForFinalize.set(callId, customQuestions);
             if (sanitizedCallee) vobizCallQuestionsForFinalize.set(sanitizedCallee, customQuestions);
-            vobizCallQuestions.delete(sanitizedCallee);
+            vobizCallQuestions.delete(callId);
+            if (sanitizedCallee) vobizCallQuestions.delete(sanitizedCallee);
           }
 
           let finalPrompt;
