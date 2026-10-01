@@ -11,6 +11,7 @@ const db = require("../db/repository");
 const { getQueue } = require("../queue");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("crm.dialerRetryEngine");
+const telephony = require("../telephony/registry");
 
 // Real cron schedule (was a bare setInterval) — every 5 minutes, on the
 // clock (:00, :05, :10, ...) rather than 5 minutes after whenever the
@@ -140,7 +141,7 @@ async function processDueRetries() {
         // reached, but the dialer task's own Active Working List row
         // would stay stuck on "Callback Scheduled" forever.
         taskId: retryContext.taskId, leadId: retryContext.leadId,
-        provider: retryContext.provider || row.provider || "vobiz",
+        provider: retryContext.provider || row.provider || telephony.getDefaultProvider(),
       });
     } catch (err) {
       log.error(`❌ [dialerRetryEngine] Auto-redial failed for ${row.leadName} (org ${row.orgId}):`, err.message);
@@ -158,9 +159,8 @@ async function processDueRetries() {
 // tracks toward MAX_RETRY_ATTEMPTS; a queue-level rethrow-and-retry would
 // just duplicate that with a different budget/backoff).
 async function handlePlaceRedialJob(data) {
-  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, provider = "vobiz" } = data;
+  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, provider = telephony.getDefaultProvider() } = data;
   try {
-    const telephony = require("../telephony/registry");
     await telephony.triggerOutboundCall(provider, orgId, dialTarget, {
       baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId,
     });
