@@ -58,7 +58,8 @@ wss.on("connection", (ws, req) => {
 
 module.exports = {
   name: "gemini",
-  label: "Gemini Browser Session",\n  capabilities: { inbound: false, outbound: false, recording: false, streaming: true, dtmf: false, numberProvisioning: false, machineDetection: false },
+  label: "Gemini Browser Session",
+  capabilities: { inbound: false, outbound: false, recording: false, streaming: true, dtmf: false, numberProvisioning: false, machineDetection: false },
   wsPaths: ["/session"],
 
   handleUpgrade(request, socket, head, _pathname) {
