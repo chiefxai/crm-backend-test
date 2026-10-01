@@ -38,16 +38,16 @@ const postCallQueue = getQueue();
 const POSTCALL_CONCURRENCY = parseInt(process.env.POSTCALL_QUEUE_CONCURRENCY || "5", 10);
 postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: POSTCALL_CONCURRENCY });
 
-const { createVobizOutboundAudioPlayer } = require("../vobizOutboundAudio");
-const { buildVobizSessionPrompt } = require("../vobizCallPrompt");
-const { runOutboundPrewarm, generateOpeningAudio } = require("../vobizOutboundPrewarm");
+const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
+const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
+const { runOutboundPrewarm, generateOpeningAudio } = require("./vobizOutboundPrewarm");
 const {
   buildOpeningGreetingText,
   logGreetingLatency,
   PREPARED_OPENING_SPOKEN_PROMPT,
   isPreparedOpeningGreetingEnabled,
   shouldUsePreparedOpeningGreeting,
-} = require("../vobizOpeningGreeting");
+} = require("./vobizOpeningGreeting");
 
 // ── Per-call raw Gemini event log ───────────────────────────────
 // Google doesn't expose Live API (WebSocket) usage in AI Studio's log
@@ -620,7 +620,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     throw err;
   }
 
-  const { buildVobizIncomingWebhookUrl } = require("../vobizWebhookAuth");
+  const { buildVobizIncomingWebhookUrl } = require("./vobizWebhookAuth");
   const callbackUrl = buildVobizIncomingWebhookUrl(baseUrl) || `${baseUrl}/api/vobiz/incoming`;
   const machineDetectionUrl = `${baseUrl}/api/vobiz/machine-detection`;
 
