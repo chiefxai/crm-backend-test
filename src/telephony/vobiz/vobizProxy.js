@@ -39,7 +39,8 @@ const POSTCALL_CONCURRENCY = parseInt(process.env.POSTCALL_QUEUE_CONCURRENCY || 
 postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: POSTCALL_CONCURRENCY });
 
 const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
-const { normalizePcmFrame } = require("../media/audioPipeline");\nconst { createToolCallDeduper } = require("../conversation/turnGuard");
+const { normalizePcmFrame } = require("../media/audioPipeline");
+const { createToolCallDeduper } = require("../conversation/turnGuard");
 const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
 const { runOutboundPrewarm, generateOpeningAudio } = require("./vobizOutboundPrewarm");
 const {
@@ -2373,7 +2374,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
           // queued AI speech from being played back over the caller and also
           // prevents old audio from surfacing seconds later after a queue
           // stall.
-          beginAudioGeneration("caller-speech");\n          if (audioOut.getQueueLength() > 0 || audioOut.isFillerPlaying()) {
+          beginAudioGeneration("caller-speech");
+          if (audioOut.getQueueLength() > 0 || audioOut.isFillerPlaying()) {
             if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
             audioOut.setFillerPlaying(false);
             audioOut.stopPacing();
@@ -2433,7 +2435,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         }
 
         // Barge-in: caller interrupted AI
-        if (response.serverContent?.interrupted) {\n          beginAudioGeneration("gemini-interrupted");
+        if (response.serverContent?.interrupted) {
+          beginAudioGeneration("gemini-interrupted");
           if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
           audioOut.setFillerPlaying(false);
           stopPacing();
