@@ -1,4 +1,4 @@
-const { buildOpeningTtsPrompt } = require("../../src/telephony/vobizOpeningGreeting");
+const { buildOpeningTtsPrompt } = require("../../src/telephony/vobiz/vobizOpeningGreeting");
 const {
   pcmToTelephony16k,
   parsePcmSampleRateFromMime,
