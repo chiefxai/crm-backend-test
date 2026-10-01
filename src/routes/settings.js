@@ -14,8 +14,7 @@ const authProvider = require("../auth");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.settings");
 const { isDuplicateKeyError } = require("../lib/dbErrors");
-const { buildVobizIncomingWebhookUrl } = require("../telephony/vobizWebhookAuth");
-const { ensureVobizInboundApplication } = require("../telephony/vobizInboundProvision");
+const telephony = require("../telephony/registry");
 const channelsEngine = require("../channels/engine");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
@@ -62,7 +61,7 @@ router.get("/vobiz-inbound-webhook", requireAuth, requireRole(ADMIN_ROLES), asyn
     const baseUrl = (process.env.PUBLIC_API_BASE_URL || process.env.PUBLIC_URL || process.env.API_BASE_URL || "")
       .trim()
       .replace(/\/$/, "");
-    const incomingUrl = buildVobizIncomingWebhookUrl(baseUrl);
+    const provider = telephony.findConnector("vobiz"); const incomingUrl = provider?.buildInboundWebhookUrl?.(baseUrl);
     if (!incomingUrl) {
       return res.status(503).json({
         error: "Public API base URL is not configured (set PUBLIC_API_BASE_URL).",
@@ -90,7 +89,7 @@ router.post("/vobiz-inbound-webhook/sync", requireAuth, requireRole(ADMIN_ROLES)
     if (!authId || !authToken || !phoneNumber) {
       return res.status(400).json({ error: "Connect Vobiz in Channels settings (authId, authToken, phone number) before syncing inbound routing." });
     }
-    const result = await ensureVobizInboundApplication(authId, authToken, phoneNumber);
+    const provider = telephony.findConnector("vobiz"); if (!provider?.provisionInboundNumber) return res.status(503).json({ error: "Vobiz provider is not registered." }); const result = await provider.provisionInboundNumber(authId, authToken, phoneNumber);
     res.json({
       success: true,
       appId: result.appId,
