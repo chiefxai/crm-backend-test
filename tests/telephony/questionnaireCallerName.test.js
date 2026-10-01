@@ -91,6 +91,27 @@ describe("questionnaire caller name guards", () => {
     expect(result.error).toMatch(/placeholder/i);
   });
 
+  test("rejects bare Yes as answer to age question", () => {
+    const result = prepareQuestionnaireSave({
+      question: "How old are you currently?",
+      answer: "Yes",
+      questionsList: questions,
+      callerContactName: "sanjay",
+    });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Yes.*No/i);
+  });
+
+  test("does not coerce bare Yes on name question to CRM contact", () => {
+    const result = prepareQuestionnaireSave({
+      question: "May I know your full name please?",
+      answer: "Yes",
+      questionsList: questions,
+      callerContactName: "sanjay",
+    });
+    expect(result.ok).toBe(false);
+  });
+
   test("allows CRM contact name as nominee when question asks for nominee", () => {
     const result = prepareQuestionnaireSave({
       question: "Who would you like to name as the nominee for this policy?",
