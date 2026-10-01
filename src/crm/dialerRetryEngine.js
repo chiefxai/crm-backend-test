@@ -160,7 +160,7 @@ async function processDueRetries() {
 // tracks toward MAX_RETRY_ATTEMPTS; a queue-level rethrow-and-retry would
 // just duplicate that with a different budget/backoff).
 async function handlePlaceRedialJob(data) {
-  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, campaignId: campaignId || taskId || null, provider = telephony.getDefaultProvider() } = data;
+  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, campaignId: campaignId || taskId || null, campaignId, provider = telephony.getDefaultProvider() } = data;
   try {
     await telephony.triggerOutboundCall(provider, orgId, dialTarget, {
       baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId,
