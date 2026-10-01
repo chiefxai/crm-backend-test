@@ -1641,6 +1641,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     if (vobizCallQuestionsForFinalize.has(callId)) vobizCallQuestionsForFinalize.delete(callId);
     if (sanitizedCalleeForFinalize) vobizCallQuestionsForFinalize.delete(sanitizedCalleeForFinalize);
 
+    log.info(`🚀 [vobiz] Enqueuing post-call pipeline for ${generatedCallId} | questions=${workflowQuestions.length} | transcriptLines=${transcriptLines.length}`);
     postCallQueue.enqueue("finalizeCall:vobiz", {
       callId: generatedCallId, callerNumber, recordingUrl, durationSeconds: duration,
       billingReservationId,
@@ -2511,6 +2512,7 @@ async function processPostCallData({
   retryContext = null, sanitizedCallee = null, providerCallSid = null,
   workflowQuestions = null, billingReservationId = null, alternateCallIds = [],
 }) {
+  log.info(`🧠 [vobiz] Post-call worker started for ${callId} | transcriptLines=${transcriptLines?.length || 0} | workflowQuestions=${workflowQuestions?.length || 0}`);
   callerNumber = normalizePhone(callerNumber);
 
   let sentiment = null;
