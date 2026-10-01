@@ -30,9 +30,14 @@ async function buildVobizSessionPrompt({
   const activeConfig = setup.activeConfig || getConfig();
   const preloadedQuestions = setup.questionsList || genericFallbackQuestions;
 
-  // Live calls are intentionally read-only. Only knowledge-base retrieval is
-  // exposed to Gemini Live; persistence is deferred to post-call agents.
-  const customToolDeclarations = [];
+  // Live calls are intentionally read-only for business/CRM data. The only
+  // live side-effect tool is end_call, which is required to terminate the
+  // telephony session when Gemini decides the conversation is complete.
+  const customToolDeclarations = [{
+    name: "end_call",
+    description: "End the current phone call when the conversation is complete. Use this after the final goodbye; this is the only live tool that may change call state.",
+    parameters: { type: "OBJECT", properties: {} }
+  }];
   let knowledgeBasePrompt = "";
 
   if (knowledgeBaseSearchEnabled && resolvedOrgId && kbMode !== "none") {
@@ -73,9 +78,11 @@ LIVE QUESTIONNAIRE PROTOCOL
 ──────────
 Ask the assigned questions ONE BY ONE in the required order. Wait for the caller’s real answer before moving to the next question.
 
-The live call is conversation-only. Do NOT call any CRM/database write tool. Do not save questionnaire answers during the call. The complete recording and transcript are handed to the post-call agents after hangup; those agents extract answers and perform persistence/actions.
+The live call is conversation-only for business/CRM data. Do NOT call any CRM/database write tool and do not save questionnaire answers during the call. The complete recording and transcript are handed to the post-call agents after hangup; those agents extract answers and perform persistence/actions.
 
 If the caller asks a business or policy question, use the read-only search_knowledge_base tool when needed, then answer naturally and continue the current question when appropriate.
+
+When the conversation is complete, say the final goodbye and call end_call to terminate the phone call. Do not rely on the caller hanging up. Do not continue asking questions after end_call is requested.
 `;
   const callerIdentityPrompt = callerContactName
     ? `\n━━━ CALLER IDENTITY ━━━\nThis caller is already a saved contact named "${callerContactName}". Address them by this exact name (same spelling/pronunciation as in your greeting) for the entire call — in Tamil, English, or Tanglish. Do NOT ask "what is your name?" — you already know it. Do NOT substitute a different name (e.g. Santhosh / சந்தோஷ்) and do not use the Tamil word சந்தோஷம் ("great/glad") as if it were their name.\n`
