@@ -4,7 +4,7 @@ const knowledgeBase = require("../../ai/knowledgeBase");
 const featureFlags = require("../../platform/featureFlags");
 const postCallAgents = require("../../ai/postCallAgents");
 const questionnaire = require("../questionnaire");
-const { GET_STARHEALTH_QUOTE_TOOL } = require("../vobizStarhealthTool");
+const { GET_STARHEALTH_QUOTE_TOOL } = require("./vobizStarhealthTool");
 const { getCallerTimezone } = require("../../lib/callerTimezone");
 const { nowInTimezone } = require("../../lib/timezoneConvert");
 
