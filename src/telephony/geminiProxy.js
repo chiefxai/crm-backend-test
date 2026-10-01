@@ -35,7 +35,7 @@ const db = require("../db/repository");
 const genai = require("../ai/googleAiClient");
 const postCallAgents = require("../ai/postCallAgents");
 const questionnaire = require("./questionnaire");
-const { getLogger } = require("../observability/logger");
+const { getLogger } = require("../observability/logger");\nconst { createToolCallDeduper } = require("./conversation/turnGuard");
 const { looksLikePhone } = require("../lib/phone");
 const log = getLogger("telephony.geminiProxy");
 
@@ -98,7 +98,7 @@ async function handleBrowserSession(browserWs, sessionContext = null) {
   let isActive = true;
   const startTime = Date.now();
 
-  const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;\n  const toolCallDeduper = createToolCallDeduper({ ttlMs: 6000 });
   const tempDir = path.join(__dirname, "../../temp");
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
   const tempPcmPath = path.join(tempDir, `${callId}.pcm`);
@@ -405,10 +405,22 @@ async function openGeminiSession(browserWs, voiceName, systemPrompt, recordStrea
 
         // Handle tool calls from Gemini (RAG search or saving questionnaire answers)
         if (response.toolCall) {
-          const functionCalls = response.toolCall.functionCalls;
+          const functionCalls = response.toolCall.functionCalls || [];
           const functionResponses = [];
+          const callsToProcess = [];
+          const seenCallsThisResponse = new Set();
 
           for (const call of functionCalls) {
+            const logicalKey = toolCallDeduper.key(call);
+            if (seenCallsThisResponse.has(logicalKey) || !toolCallDeduper.claim(call)) {
+              log.warn(`🛡️ Dropping duplicate/replayed Gemini browser tool call: ${call.name}`);
+              continue;
+            }
+            seenCallsThisResponse.add(logicalKey);
+            callsToProcess.push(call);
+          }
+
+          for (const call of callsToProcess) {
             log.info(`🛠️ Tool Call: Executing ${call.name}`);
             let result = {};
             if (call.name === "search_policy_knowledge_base") {
@@ -423,7 +435,7 @@ async function openGeminiSession(browserWs, voiceName, systemPrompt, recordStrea
             functionResponses.push({
               id: call.id,
               name: call.name,
-              response: { output: result }
+              response: { result }
             });
           }
 
