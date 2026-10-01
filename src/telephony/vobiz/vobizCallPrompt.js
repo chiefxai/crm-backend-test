@@ -1,10 +1,7 @@
 const { getConfig, buildRuntimePrompt } = require("../../config/agentConfig");
-const { buildCustomObjectTools } = require("../../utils/objectToolBuilder");
 const knowledgeBase = require("../../ai/knowledgeBase");
 const featureFlags = require("../../platform/featureFlags");
 const postCallAgents = require("../../ai/postCallAgents");
-const questionnaire = require("../questionnaire");
-const { GET_STARHEALTH_QUOTE_TOOL } = require("./vobizStarhealthTool");
 const { getCallerTimezone } = require("../../lib/callerTimezone");
 const { nowInTimezone } = require("../../lib/timezoneConvert");
 
@@ -33,46 +30,26 @@ async function buildVobizSessionPrompt({
   const activeConfig = setup.activeConfig || getConfig();
   const preloadedQuestions = setup.questionsList || genericFallbackQuestions;
 
-  const { functionDeclarations: customToolDeclarations, promptSection: customObjectsPrompt } = buildCustomObjectTools(customObjects);
+  // Live calls are intentionally read-only. Only knowledge-base retrieval is
+  // exposed to Gemini Live; persistence is deferred to post-call agents.
+  const customToolDeclarations = [];
   let knowledgeBasePrompt = "";
 
-  if (orgHasKnowledgeBase && knowledgeBaseSearchEnabled) {
-    let inlineKnowledge = setup.inlineKnowledge;
-    if (deferInlineKnowledge) {
-      inlineKnowledge = null;
-    } else if (inlineKnowledge === undefined && resolvedOrgId) {
-      try {
-        inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds);
-      } catch {
-        inlineKnowledge = null;
-      }
-    }
-    if (inlineKnowledge) {
-      knowledgeBasePrompt = `
+  if (knowledgeBaseSearchEnabled && resolvedOrgId && kbMode !== "none") {
+    customToolDeclarations.push({
+      name: "search_knowledge_base",
+      description: "Search this business knowledge base for facts, policies, products, services, pricing, or other information needed to answer the caller. This tool is read-only and must never be used to save or modify data.",
+      parameters: { type: "OBJECT", properties: {
+        query: { type: "STRING", description: "Search terms describing what to look up" }
+      }, required: ["query"] }
+    });
+    knowledgeBasePrompt = `
 ──────────
 KNOWLEDGE BASE
 ──────────
-Here is everything you know about this business — its products, services, pricing, and policies. Answer directly from this, instantly, with no tool call and no pause to "look it up" — you already have the facts:
-
-${inlineKnowledge}
-
-Keep the spoken answer short — one or two sentences, the direct answer only, not a full lecture. If the caller asks something not covered here, say you don't have that detail rather than guessing.
+Use the read-only search_knowledge_base tool when you need exact business, product, service, pricing, or policy facts. Never use a live tool to save questionnaire answers, contacts, enquiries, callbacks, quotes, messages, or other CRM data.
 `;
-    } else {
-      customToolDeclarations.push({
-        name: "search_knowledge_base",
-        description: "Search this business's knowledge base for facts, policies, or answers to the caller's question. Use this whenever the caller asks something you're not certain about rather than guessing.",
-        parameters: { type: "OBJECT", properties: { query: { type: "STRING", description: "Search terms describing what to look up" } }, required: ["query"] },
-      });
-      knowledgeBasePrompt = `
-──────────
-KNOWLEDGE BASE
-──────────
-If the caller asks anything about this business, its products, services, pricing, or policies, call the 'search_knowledge_base' tool with their question to get the exact facts before answering. Do not make up or guess details — use the retrieved text to explain. Keep the spoken answer short — one or two sentences, the direct answer only, not a full lecture. Long explanations add real delay before you start speaking; the caller can always ask a follow-up if they want more.
-`;
-    }
   }
-
   let activeQuestions = preloadedQuestions;
   let hasCustomTaskQuestions = false;
   if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
@@ -86,40 +63,20 @@ If the caller asks anything about this business, its products, services, pricing
     callerContactName,
   );
 
-  const knownNamePrefillPrompt = preAnsweredName.length && callerContactName
-    ? `
-──────────
-KNOWN CONTACT — NAME ALREADY ON FILE
-──────────
-CRM already has this caller's name: "${callerContactName}". You used it in your opening greeting — keep using exactly this name for the entire call.
-
-Do NOT ask any name / full-name question. Do NOT call them Santhosh, சந்தோஷ், or say சந்தோஷம் as if it were their name — those are different words/names and are wrong for this contact unless "${callerContactName}" literally is that name.
-
-When you begin the questionnaire (after they confirm they can talk), you may call 'save_question_response' ONLY for the exact name/full-name questions listed below — each with answer "${callerContactName}". That name is ONLY valid for those name questions. NEVER use "${callerContactName}" as the answer for any other question (age, gender, income, medical, tobacco, cover amount, premium frequency, callback time, etc.).
-
-After those name-only saves (if any), ask the first question in the main numbered questionnaire list out loud and wait for their answer before any further saves:
-${preAnsweredName.map((q, i) => `Name pre-fill ${i + 1}. ${q.question}`).join("\n")}
-`
+  const knownNamePrefillPrompt = callerContactName && preAnsweredName.length
+    ? `\nKNOWN CONTACT\nThe caller is already known as "${callerContactName}". Do not ask their name again.\n`
     : "";
 
   const dynamicQuestionnairePrompt = `
 ──────────
-MANDATORY QUESTIONNAIRE PROTOCOL
+LIVE QUESTIONNAIRE PROTOCOL
 ──────────
-You MUST ask the caller the following questions ONE BY ONE, to understand what they need — do not describe yourself as being in any particular industry beyond what's already been established above. Do NOT ask them all at once. Wait for their response for each question:
-${questionnaire.formatQuestionnaireList(questionnaireQuestionsForPrompt)}
+Ask the assigned questions ONE BY ONE in the required order. Wait for the caller’s real answer before moving to the next question.
 
-When the user gives a real answer to the question you just asked out loud, call 'save_question_response' once with that exact question and their answer, then ask the next question. At most ONE 'save_question_response' per turn (except the initial name-only pre-fills above). Never batch-save multiple questions.
+The live call is conversation-only. Do NOT call any CRM/database write tool. Do not save questionnaire answers during the call. The complete recording and transcript are handed to the post-call agents after hangup; those agents extract answers and perform persistence/actions.
 
-Only save an answer they clearly said in response to that specific question — not because you assume it, not from CRM data (except name pre-fills above), and never with placeholders like "Not applicable", "N/A", or "unknown". If they only said they are ready to talk (pesalam / yes / hello), that is not an answer to age, income, gender, or any other item.
-
-If the caller's reply is not a plain answer to what you asked — for example they ask "how does that work", "explain", "tell me more", or respond with a question of their own instead of answering — do NOT log it as a Yes/No answer and do NOT move to the next question yet. First use the 'search_policy_knowledge_base' tool to find the real answer and explain it to them in your own words, in the same language they're using — keep it to one or two short sentences, not a full lecture, since long explanations add real delay before you start speaking. Only call 'save_question_response' and move to the next question once they have actually answered what you asked.
-
-Be extra careful with Yes/No answers specifically — "yes" and "no" (and their Tamil/Hindi/English equivalents: aama/illa, haan/nahi, correct/not correct) sound similar over a phone line and are easy to log backwards. Getting this one word wrong sends the rest of the conversation down the wrong branch — for example asking "how many policies do you have" after mishearing a "No" as a "Yes" to "do you have a policy". If you are not fully confident which one the caller said, quickly confirm before saving it (e.g. "So that's a No, right?") rather than guessing.
-
-Never call 'save_question_response' unless the caller has actually, verbally answered that specific question earlier in THIS call. Do not guess, assume, or pre-fill an answer (e.g. assuming "Yes" just because you're calling to offer something, or because a caller sounds friendly). If you have not yet asked a question out loud and gotten a real reply to it, it has no answer to save yet. Knowing the contact's name from CRM is not an answer to any other question.
+If the caller asks a business or policy question, use the read-only search_knowledge_base tool when needed, then answer naturally and continue the current question when appropriate.
 `;
-
   const outboundQuestionnaireLead = callerContactName
     ? `This is an outbound call — you called them. After your opening greeting, wait until they confirm they can talk (e.g. "yes", "pesalam", "pesla"). That confirmation is NOT an answer to any questionnaire item — never save it with save_question_response. Then follow the KNOWN CONTACT — NAME ALREADY ON FILE section (if present) and ask the first numbered question below out loud.`
     : "This is an outbound call — you called them, ask question 1 first, right after your opening greeting, before anything else. Do not skip ahead to a later question or start general small talk first.";
@@ -188,11 +145,13 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
 `;
   }
 
-  let finalPrompt = customObjects.length > 0
-    ? buildRuntimePrompt(activeConfig) + "\n" + customObjectsPrompt + companyInfoPrompt + callerIdentityPrompt + knownNamePrefillPrompt + callerClockPrompt + (hasCustomTaskQuestions ? "\n" + genericQuestionnairePrompt : "") + knowledgeBasePrompt + endCallPrompt
-    : buildRuntimePrompt(activeConfig) + "\n" + dynamicQuestionnairePrompt + companyInfoPrompt + callerIdentityPrompt + knownNamePrefillPrompt + callerClockPrompt + knowledgeBasePrompt + endCallPrompt;
-  if (starhealthPrompt) finalPrompt += "\n" + starhealthPrompt;
-
+  const finalPrompt = buildRuntimePrompt(activeConfig)
+    + "\n" + dynamicQuestionnairePrompt
+    + companyInfoPrompt
+    + callerIdentityPrompt
+    + knownNamePrefillPrompt
+    + callerClockPrompt
+    + knowledgeBasePrompt;
   const kbInlineLength = (setup.inlineKnowledge && typeof setup.inlineKnowledge === "string")
     ? setup.inlineKnowledge.length
     : (knowledgeBasePrompt.includes("Here is everything") ? knowledgeBasePrompt.length : 0);
