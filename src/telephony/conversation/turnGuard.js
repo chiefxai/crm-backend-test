@@ -16,7 +16,7 @@ function stableNormalize(value) {
       return out;
     }, {});
   }
-  if (typeof value === "string") return value.trim().replace(/\\s+/g, " ");
+  if (typeof value === "string") return value.trim().replace(/\s+/g, " ");
   return value;
 }
 
