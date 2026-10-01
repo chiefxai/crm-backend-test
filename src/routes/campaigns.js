@@ -14,25 +14,41 @@ const log = getLogger("routes.campaigns");
 router.get("/campaigns", requireAuth, async (req, res) => {
   try {
     const pagination = parsePagination(req.query);
-    res.json(await db.list("campaigns", req.orgId, pagination || {}));
+    const result = await db.list("campaigns", req.orgId, pagination || {});
+    const rows = Array.isArray(result) ? result : result.rows;
+    const normalized = rows.map((campaign) => ({
+      ...campaign,
+      retryConfig: db.normalizeRetryPolicy(campaign.retryConfig || db.DEFAULT_RETRY_POLICY),
+    }));
+    res.json(Array.isArray(result) ? normalized : { ...result, rows: normalized });
   }
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
 router.post("/campaigns", requireAuth, async (req, res) => {
   try {
-    const c = await db.create("campaigns", req.orgId, req.body);
+    const body = { ...(req.body || {}) };
+    if (body.retryConfig !== undefined) {
+      body.retryConfig = db.normalizeRetryPolicy(body.retryConfig || {});
+    } else {
+      body.retryConfig = db.DEFAULT_RETRY_POLICY;
+    }
+    const c = await db.create("campaigns", req.orgId, body);
     global.broadcastLog(`📢 Created campaign: ${c.name}`, { type: "campaign", campaignId: c.id });
-    res.status(201).json(c);
+    res.status(201).json({ ...c, retryConfig: db.normalizeRetryPolicy(c.retryConfig || db.DEFAULT_RETRY_POLICY) });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
 router.patch("/campaigns/:id", requireAuth, async (req, res) => {
   try {
-    const updated = await db.patch("campaigns", req.orgId, req.params.id, req.body);
+    const body = { ...(req.body || {}) };
+    if (body.retryConfig !== undefined) {
+      body.retryConfig = db.normalizeRetryPolicy(body.retryConfig || {});
+    }
+    const updated = await db.patch("campaigns", req.orgId, req.params.id, body);
     if (!updated) return res.status(404).json({ error: "Campaign not found" });
     global.broadcastLog(`📢 Updated campaign: ${updated.name}`, { type: "campaign", campaignId: req.params.id });
-    res.json(updated);
+    res.json({ ...updated, retryConfig: db.normalizeRetryPolicy(updated.retryConfig || db.DEFAULT_RETRY_POLICY) });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
