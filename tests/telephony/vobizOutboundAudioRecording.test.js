@@ -1,4 +1,4 @@
-const { createVobizOutboundAudioPlayer } = require("../../src/telephony/vobizOutboundAudio");
+const { createVobizOutboundAudioPlayer } = require("../../src/telephony/vobiz/vobizOutboundAudio");
 
 describe("vobizOutboundAudio recording hook", () => {
   it("records PCM when setWriteRecording is attached after player creation", () => {
