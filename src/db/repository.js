@@ -23,7 +23,7 @@ const {
   dedupePendingScheduleRows,
 } = require("../crm/postCallScheduleDedupe");
 const { getLogger } = require("../observability/logger");
-const { buildVobizIncomingWebhookUrl } = require("../telephony/vobizWebhookAuth");
+const { buildVobizIncomingWebhookUrl } = require("../telephony/vobiz/vobizWebhookAuth");
 const organizationRepository = require("./repositories/organizationRepository");
 const aiUsageRepository = require("./repositories/aiUsageRepository");
 const log = getLogger("db.repository");
