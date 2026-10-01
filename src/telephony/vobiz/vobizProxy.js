@@ -2071,17 +2071,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   }
                 }
               }
-            } else if (call.name === "search_policy_knowledge_base") {
-              // Legacy read-only policy retrieval is retained for compatibility
-              // with an already-open/resumed session, but no CRM mutation is
-              // permitted during the live call.
-              result = (await featureFlags.isEnabled("knowledge_base_search"))
-                ? await handleSearchPolicyKnowledgeBase(call.args?.query)
-                : { error: "This feature is currently disabled." };
             } else {
               result = {
                 success: false,
-                error: "Live-call tools are read-only. Only knowledge-base search is available; CRM persistence is performed after the call by post-call agents.",
+                error: "Unsupported live-call tool. Only search_knowledge_base and end_call are available during the call. CRM persistence is performed after hangup by post-call agents.",
               };
             }
             log.info(`⏱️ DEBUG: tool "${call.name}" took ${Date.now() - __toolStart}ms`);
