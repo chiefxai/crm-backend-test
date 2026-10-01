@@ -1051,8 +1051,12 @@ async function hasNewerCallForPhone(orgId, phone, sinceIso, excludeId, campaignT
     if (row.id === excludeId) return false;
     if (!String(row.caller_number || row.lead_name || "").replace(/[^\d]/g, "").endsWith(last10)) return false;
     if (scopedTaskId) {
-      const rowTaskId = row.retry_context?.taskId ? String(row.retry_context.taskId) : null;
-      if (rowTaskId && rowTaskId !== scopedTaskId) return false;
+      const rowCampaignId = row.retry_context?.campaignId
+        ? String(row.retry_context.campaignId)
+        : (row.retry_context?.taskId ? String(row.retry_context.taskId) : null);
+      // A retry chain belongs to one campaign execution. A newer call from
+      // another campaign must NOT consume/supersede this campaign's retry.
+      if (rowCampaignId !== scopedTaskId) return false;
     }
     return true;
   });
@@ -1122,12 +1126,20 @@ async function claimCallForRetry(orgId, rowId) {
             AND REGEXP_REPLACE(COALESCE(newer.caller_number, newer.lead_name, ''), '[^0-9]', '')
               = REGEXP_REPLACE(COALESCE(c.caller_number, c.lead_name, ''), '[^0-9]', '')
             AND (
-              JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId')) IS NULL
-              OR JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId')) = ''
-              OR JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.taskId')) IS NULL
-              OR JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.taskId')) = ''
-              OR JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.taskId'))
-                = JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId'))
+              COALESCE(
+                JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.campaignId')),
+                JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId')),
+                ''
+              ) = ''
+              OR COALESCE(
+                JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.campaignId')),
+                JSON_UNQUOTE(JSON_EXTRACT(newer.retry_context, '$.taskId')),
+                ''
+              ) = COALESCE(
+                JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.campaignId')),
+                JSON_UNQUOTE(JSON_EXTRACT(c.retry_context, '$.taskId')),
+                ''
+              )
             )
         ) AS newer_call_for_same_number
       )`, [orgId, rowId, nowIso, nowIso]);
