@@ -2040,7 +2040,19 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             log.info(`🛠️ Vobiz Tool Call: Executing ${call.name}`, JSON.stringify(call.args || {}));
             const __toolStart = Date.now();
             let result = {};
-            if (call.name === "search_knowledge_base" && orgId) {
+            if (call.name === "end_call") {
+              // end_call is the only live side-effect tool. All CRM/detail
+              // persistence is deliberately deferred to post-call agents.
+              endCallRequested = true;
+              const providerCallId = getVobizCallId ? getVobizCallId() : callId;
+              result = { success: true, ending: true, message: "Call termination has been requested." };
+              log.info(`👋 end_call requested — hanging up in 3.5s | Call ID: ${callId} | Vobiz CallUUID: ${providerCallId}`);
+              setTimeout(() => {
+                hangupVobizCall(providerCallId, orgId).catch((err) => {
+                  log.error("❌ end_call hangup task failed:", err.message);
+                });
+              }, 3500);
+            } else if (call.name === "search_knowledge_base" && orgId) {
               if (!(await featureFlags.isEnabled("knowledge_base_search"))) {
                 result = { error: "This feature is currently disabled." };
               } else {
