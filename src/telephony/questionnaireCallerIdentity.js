@@ -92,9 +92,10 @@ function prepareQuestionnaireSave({ question, answer, questionsList = [], caller
   const isName = match ? looksLikeNameQuestion(match) : looksLikeNameQuestion({ question });
   const knownName = String(callerContactName || "").trim();
 
-  const looksLikeAck = !rawAnswer || looksLikeQuestionnaireAck(rawAnswer);
-
   const isYesNoQ = match ? looksLikeYesNoQuestion(match) : looksLikeYesNoQuestion({ question });
+  // "Yes"/"No" are valid answers when the active question is genuinely yes/no.
+  // They remain acknowledgments for open-ended questions.
+  const looksLikeAck = !rawAnswer || (looksLikeQuestionnaireAck(rawAnswer) && !(isYesNoQ && YES_NO_ONLY_ANSWER_RE.test(rawAnswer)));
 
   if (!isName && !isYesNoQ && YES_NO_ONLY_ANSWER_RE.test(rawAnswer)) {
     return {
