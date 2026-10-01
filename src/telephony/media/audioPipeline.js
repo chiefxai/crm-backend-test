@@ -40,6 +40,10 @@ function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE
     setWriteRecording(fn) { recordOutbound = typeof fn === "function" ? fn : null; },
     enqueuePcm(pcm16k, { fastStart = false, generation = null } = {}) {
       if (!pcm16k?.length) return;
+      if (generation != null && generation !== activeGeneration) {
+        log.debug("Dropped stale audio generation [" + callId + "]: " + generation + " !== " + activeGeneration);
+        return false;
+      }
       const normalized = normalizePcmFrame(pcm16k, { sampleRate });
       audioStats.chunksIn++; audioStats.bytesIn += normalized.pcm.length;
       outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, normalized.pcm]) : normalized.pcm;
