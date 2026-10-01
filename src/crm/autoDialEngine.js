@@ -380,7 +380,7 @@ async function processTask(task) {
       orgId, taskId, leadId: pendingLeadId, leadName: lead.name || null, leadPhone: lead.phone,
       taskName: task.name, provider, baseUrl, questions: task.questions, language: task.language,
       from, agentId, starhealthEnabled: !!task.starhealthEnabled,
-      retryPolicy: task.retryPolicy || task.callResults?.__retryConfig || null,
+      retryPolicy: task.retryConfig || task.retryPolicy || task.callResults?.__retryConfig || null,
       autoDialRunId: task.autoDialRunId || null,
     });
   } catch (err) {
