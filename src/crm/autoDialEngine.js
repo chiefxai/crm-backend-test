@@ -381,6 +381,7 @@ async function processTask(task) {
       taskName: task.name, provider, baseUrl, questions: task.questions, language: task.language,
       from, agentId, starhealthEnabled: !!task.starhealthEnabled,
       retryPolicy: task.retryConfig || task.retryPolicy || task.callResults?.__retryConfig || null,
+      campaignId: task.id,
       autoDialRunId: task.autoDialRunId || null,
     });
   } catch (err) {
@@ -401,7 +402,7 @@ async function processTask(task) {
 // leave the task's currentLeadId claimed until the queue exhausts its own
 // retries, stalling the whole task for no benefit.
 async function handlePlaceDialJob(data) {
-  const { orgId, taskId, leadId, leadName, leadPhone, taskName, provider, baseUrl, questions, language, from, agentId, starhealthEnabled, retryPolicy, autoDialRunId } = data;
+  const { orgId, taskId, leadId, leadName, leadPhone, taskName, provider, baseUrl, questions, language, from, agentId, starhealthEnabled, retryPolicy, campaignId, autoDialRunId } = data;
   try {
     // The job sat in the queue briefly between being enqueued and actually
     // running — re-check the task wasn't stopped in that window (POST
@@ -418,7 +419,7 @@ async function handlePlaceDialJob(data) {
     }
 
     const result = await telephony.triggerOutboundCall(provider, orgId, leadPhone, {
-      baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId, retryPolicy,
+      baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId, campaignId: campaignId || taskId, retryPolicy,
     });
 
     // The provider can answer/hang up very quickly. The finalizer may have
