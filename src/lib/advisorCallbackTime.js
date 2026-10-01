@@ -167,12 +167,12 @@ async function resolveAdvisorCallbackIso({ answer, question, callerPhone, orgId,
   return null;
 }
 
-function shouldSuppressDialerCallbackForAdvisorPreference(transcript, advisorResponsePresent) {
-  if (!advisorResponsePresent) return false;
-  const { deriveTranscriptSignals } = require("../ai/postCallAgents/decisionEngine");
-  const signals = deriveTranscriptSignals(transcript);
-  // Busy / "call me back later" for the AI agent still schedules a redial.
-  return !signals.busyRequest;
+function shouldSuppressDialerCallbackForAdvisorPreference(_transcript, advisorResponsePresent) {
+  // Once the workflow explicitly collected a callback time for a human
+  // advisor, this call must never enter the AI callback/redial path. The
+  // requested callback belongs to a human, even if the caller also used
+  // language such as "call me later" while answering that advisor question.
+  return !!advisorResponsePresent;
 }
 
 module.exports = {
