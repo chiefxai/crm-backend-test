@@ -463,7 +463,7 @@ async function finalizeCallRecord({
   let workflowValidation = { complete: true, missingQuestions: [], requiredQuestions: [] };
 
   try {
-    callAnswers = await db.getResponsesForCallIds(orgId, [callId, ...(alternateCallIds || [])]);
+    callAnswers = await db.getResponsesForCallIds(orgId, [callId, providerCallSid, ...(alternateCallIds || [])]);
   } catch (err) {
     log.warn(`⚠️ [${provider}] workflow response lookup failed; continuing without saved answers:`, err.message);
   }
