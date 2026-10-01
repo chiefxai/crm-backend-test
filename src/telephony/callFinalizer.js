@@ -151,6 +151,67 @@ function resolvePostCallOutcome({
   };
 }
 
+async function markDialerTaskCallEnded({
+  orgId,
+  retryContext,
+  callId,
+  providerCallSid = null,
+  durationSeconds = 0,
+  callAnswered = false,
+  preliminaryStatus = "Completed",
+}) {
+  if (!orgId || !retryContext?.taskId || !retryContext?.leadId) return false;
+  try {
+    const tasks = await db.list("dialertasks", orgId);
+    const task = tasks.find((t) => t.id === retryContext.taskId);
+    if (!task) return false;
+    const callResults = { ...(task.callResults || {}) };
+    const existing = callResults[retryContext.leadId] || {};
+    callResults[retryContext.leadId] = {
+      ...existing,
+      status: preliminaryStatus,
+      duration: durationSeconds,
+      sentiment: existing.sentiment ?? null,
+      intent: existing.intent ?? "Unknown",
+      summary: existing.summary ?? "Call completed; post-call analysis is processing.",
+      callId,
+      providerCallSid: providerCallSid || existing.providerCallSid || null,
+      callAnswered,
+      conversationOutcome: preliminaryStatus === "No Answer"
+        ? "no_answer"
+        : preliminaryStatus === "Answering Machine"
+          ? "answering_machine"
+          : "completed",
+    };
+
+    const remainingPending = (task.leadIds || []).some((leadId) => {
+      const result = callResults[leadId];
+      return !result || result.status === "Pending";
+    });
+    const waitingForCallbacks = !remainingPending && (task.leadIds || []).some((leadId) => {
+      const result = callResults[leadId];
+      return result?.status === "Callback Scheduled";
+    });
+    const taskFinished = !remainingPending && !waitingForCallbacks;
+
+    await db.patch("dialertasks", orgId, retryContext.taskId, {
+      callResults,
+      currentLeadId: null,
+      currentProviderCallSid: null,
+      currentProvider: null,
+      currentCallStartedAt: null,
+      autoDialEnabled: false,
+      autoDialStatus: taskFinished ? "completed" : (waitingForCallbacks ? "waiting_for_callbacks" : "paused"),
+      nextDialAt: null,
+    });
+    log.info(`✅ [dialer] Call-end boundary persisted for task ${retryContext.taskId}/${retryContext.leadId}: ${preliminaryStatus}`);
+    return true;
+  } catch (err) {
+    log.error(`❌ [dialer] Immediate call-end task update failed for ${retryContext.taskId}/${retryContext.leadId}:`, err.message);
+    return false;
+  }
+}
+
 async function uploadRecording(provider, callId, wavBuffer) {
   if (!storage.isConfigured()) {
     log.warn(`⚠️  [${provider}] recording not saved — STORAGE_ACCESS_KEY / STORAGE_SECRET_KEY / STORAGE_BUCKET are not set.`);
