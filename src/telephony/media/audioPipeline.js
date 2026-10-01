@@ -20,7 +20,9 @@ function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE
       if (!hasPrebuffered) { const minBytes = skipPrebufferOnce ? frameBytes : prebufferBytes; if (outboundQueue.length < minBytes) return; hasPrebuffered = true; skipPrebufferOnce = false; }
       if (outboundQueue.length < frameBytes) return;
       const chunk = outboundQueue.subarray(0, frameBytes);
-      try { sendFrame(chunk, { sampleRate, channels: 1, encoding: "pcm_s16le" }); } catch (err) { log.warn("Audio frame send failed [" + callId + "]: " + err.message); return; }
+      let sent = false;
+      try { sent = sendFrame(chunk, { sampleRate, channels: 1, encoding: "pcm_s16le" }) !== false; } catch (err) { log.warn("Audio frame send failed [" + callId + "]: " + err.message); }
+      if (!sent) return;
       outboundQueue = outboundQueue.subarray(frameBytes);
       const now = Date.now();
       if (audioStats.lastSendAt) audioStats.maxGapMs = Math.max(audioStats.maxGapMs, now - audioStats.lastSendAt);
