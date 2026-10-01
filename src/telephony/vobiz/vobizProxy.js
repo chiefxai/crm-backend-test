@@ -1574,6 +1574,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
       retryContext,
       callId: generatedCallId,
       providerCallSid: callId,
+      alternateCallIds: alternateCallIdsForFinalize,
       durationSeconds: duration,
       callAnswered: preliminaryCallAnswered,
       preliminaryStatus,
