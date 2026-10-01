@@ -35,7 +35,8 @@ const db = require("../db/repository");
 const genai = require("../ai/googleAiClient");
 const postCallAgents = require("../ai/postCallAgents");
 const questionnaire = require("./questionnaire");
-const { getLogger } = require("../observability/logger");\nconst { createToolCallDeduper } = require("./conversation/turnGuard");
+const { getLogger } = require("../observability/logger");
+const { createToolCallDeduper } = require("./conversation/turnGuard");
 const { looksLikePhone } = require("../lib/phone");
 const log = getLogger("telephony.geminiProxy");
 
@@ -98,7 +99,8 @@ async function handleBrowserSession(browserWs, sessionContext = null) {
   let isActive = true;
   const startTime = Date.now();
 
-  const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;\n  const toolCallDeduper = createToolCallDeduper({ ttlMs: 6000 });
+  const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const toolCallDeduper = createToolCallDeduper({ ttlMs: 6000 });
   const tempDir = path.join(__dirname, "../../temp");
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
   const tempPcmPath = path.join(tempDir, `${callId}.pcm`);
