@@ -828,6 +828,10 @@ async function finalizeCallRecord({
         recordingUrl,
         direction,
         createdAt: new Date().toISOString(),
+        // A dialer task is a campaign execution. The same contact + workflow
+        // may legitimately appear in many campaigns, so never collapse calls
+        // by leadId/workflowId alone.
+        campaignId: retryContext?.campaignId || retryContext?.taskId || null,
         providerCallSid,
         callbackTime: callbackTimeToStore,
         callbackReason: callbackReasonToStore,
