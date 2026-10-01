@@ -950,7 +950,9 @@ async function finalizeCallRecord({
       const task = tasks.find(t => t.id === retryContext.taskId);
       if (task) {
         const callResults = { ...(task.callResults || {}) };
+        const existing = callResults[retryContext.leadId] || {};
         callResults[retryContext.leadId] = {
+          ...existing,
           status: finalStatus,
           duration: durationSeconds,
           sentiment,
