@@ -25,7 +25,7 @@ const { buildCustomObjectTools, handleObjectToolCall } = require("../../utils/ob
 const knowledgeBase = require("../../ai/knowledgeBase");
 const postCallAgents = require("../../ai/postCallAgents");
 const questionnaire = require("../questionnaire");
-const vobizProxy = require("../vobizProxy");
+const vobizProxy = require("./vobizProxy");
 const { getLogger } = require("../../observability/logger");
 const log = getLogger("telephony.vobizPipeline");
 const {
