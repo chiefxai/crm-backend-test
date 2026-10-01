@@ -650,12 +650,45 @@ async function finalizeCallRecord({
       if (leadAdvisorCallbackTime) {
         const targetLeadId = leadId || (callerNumber ? (await db.findLeadByPhone(orgId, callerNumber).catch(() => null))?.id : null);
         if (targetLeadId) {
-          await db.patch("leads", orgId, targetLeadId, {
-            callbackTime: leadAdvisorCallbackTime,
-            updatedAt: new Date().toISOString(),
-          });
-          if (!leadId) leadId = targetLeadId;
-          log.info(`📅 [${provider}] Saved human advisor callback preference on lead ${targetLeadId}: ${leadAdvisorCallbackTime}`);
+          if (retryContext?.taskId) {
+            // Advisor callbacks belong to this campaign execution only.
+            // Do not write the time onto the shared contact/lead because the
+            // same person may be present in another campaign with a different
+            // human-advisor request.
+            const tasks = await db.list("dialertasks", orgId);
+            const task = tasks.find((t) => t.id === retryContext.taskId);
+            if (task) {
+              const callResults = { ...(task.callResults || {}) };
+              const existingResult = callResults[targetLeadId] || {};
+              callResults[targetLeadId] = {
+                ...existingResult,
+                advisorCallback: {
+                  ...(existingResult.advisorCallback || {}),
+                  status: "pending",
+                  time: leadAdvisorCallbackTime,
+                  requestedAt: new Date().toISOString(),
+                  callId: callId || existingResult.callId || null,
+                  campaignId: retryContext.campaignId || retryContext.taskId,
+                  leadId: targetLeadId,
+                  leadName: existingResult.leadName || retryContext.assignedContact?.name || callerNumber || "Unknown",
+                  callerNumber: existingResult.callerNumber || callerNumber || null,
+                  reason: "Caller requested a callback with a human advisor.",
+                },
+              };
+              await db.patch("dialertasks", orgId, retryContext.taskId, { callResults });
+              if (!leadId) leadId = targetLeadId;
+              log.info(`📅 [${provider}] Saved campaign-scoped human advisor callback for task ${retryContext.taskId}/${targetLeadId}: ${leadAdvisorCallbackTime}`);
+            }
+          } else {
+            // Legacy/non-campaign calls keep the existing contact-level
+            // preference because there is no campaign execution boundary.
+            await db.patch("leads", orgId, targetLeadId, {
+              callbackTime: leadAdvisorCallbackTime,
+              updatedAt: new Date().toISOString(),
+            });
+            if (!leadId) leadId = targetLeadId;
+            log.info(`📅 [${provider}] Saved human advisor callback preference on lead ${targetLeadId}: ${leadAdvisorCallbackTime}`);
+          }
         }
       }
     } catch (err) {

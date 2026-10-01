@@ -1214,22 +1214,19 @@ async function getScheduledCallbacks(orgId) {
     .eq("retry_status", "pending")
     .order("next_retry_at", { ascending: true });
   if (error) throw new Error(`[db.getScheduledCallbacks] ${error.message}`);
+
   const allRows = (data || []).map((row) => fromDbRow("calllogs", row));
   const rows = dedupePendingScheduleRows(allRows);
   await reconcilePendingScheduleDuplicates(orgId, allRows, rows);
 
-  const taskIds = [...new Set(rows.map((r) => r.retryContext?.taskId).filter(Boolean))];
-  let tasksById = {};
-  if (taskIds.length) {
-    const tasks = await list("dialertasks", orgId);
-    tasksById = Object.fromEntries(tasks.filter((t) => taskIds.includes(t.id)).map((t) => [t.id, t]));
-  }
+  const tasks = await list("dialertasks", orgId);
+  const taskById = Object.fromEntries((tasks || []).map((task) => [task.id, task]));
 
   const { getCallerTimezone } = require("../lib/callerTimezone");
   const { formatInstantInTimezone } = require("../lib/timezoneConvert");
 
-  return rows.map((row) => {
-    const task = row.retryContext?.taskId ? tasksById[row.retryContext.taskId] : null;
+  const automaticRows = rows.map((row) => {
+    const task = row.retryContext?.taskId ? taskById[row.retryContext.taskId] : null;
     const kind = row.status === "Callback Scheduled" ? "callback" : "not_answered";
     const reason = row.status === "Callback Scheduled"
       ? (row.callbackReason || "Caller asked to be called back.")
@@ -1246,17 +1243,58 @@ async function getScheduledCallbacks(orgId) {
       callbackTimeLocalLabel: formatInstantInTimezone(row.callbackTime || row.nextRetryAt, callerTimezone),
       nextRetryAtLocalLabel: formatInstantInTimezone(row.nextRetryAt, callerTimezone),
       scheduleLocalLabel: formatInstantInTimezone(scheduleIso, callerTimezone),
-      // Link retries to the dialer task (campaign) that placed the original
-      // call — not question_flows/workflow_id alone, since the same workflow
-      // can be reused across multiple campaigns created at different times.
       campaignId: task?.id || row.retryContext?.taskId || null,
       campaignName: task?.name || null,
-      // Back-compat for older clients that still read workflowName.
       workflowName: task?.name || null,
       campaignQuestions: task?.questions || row.retryContext?.questions || [],
       workflowQuestions: task?.questions || row.retryContext?.questions || [],
     };
   });
+
+  // Human advisor callbacks are deliberately NOT stored as pending call_logs
+  // retries. They are campaign execution records on dialer_tasks, so the
+  // automatic redial scheduler can never consume the advisor's reserved time.
+  const humanAdvisorRows = [];
+  const now = Date.now();
+  for (const task of tasks || []) {
+    for (const [leadId, result] of Object.entries(task.callResults || {})) {
+      const advisor = result?.advisorCallback;
+      if (!advisor || advisor.status !== "pending" || !advisor.time) continue;
+      const time = new Date(advisor.time);
+      if (Number.isNaN(time.getTime()) || time.getTime() <= now) continue;
+
+      const callerNumber = advisor.callerNumber || result.callerNumber || null;
+      const callerTimezone = getCallerTimezone(callerNumber);
+      humanAdvisorRows.push({
+        id: advisor.id || `human-advisor:${task.id}:${leadId}`,
+        leadName: advisor.leadName || result.leadName || callerNumber || "Unknown",
+        callerNumber,
+        direction: "outbound",
+        status: "Human Advisor Scheduled",
+        kind: "human_advisor",
+        reason: advisor.reason || "Caller requested a callback with a human advisor.",
+        callbackTime: advisor.time,
+        callbackReason: advisor.reason || "Caller requested a callback with a human advisor.",
+        nextRetryAt: null,
+        createdAt: advisor.requestedAt || result.completedAt || new Date().toISOString(),
+        campaignId: task.id,
+        campaignName: task.name || null,
+        workflowName: task.name || null,
+        campaignQuestions: task.questions || [],
+        workflowQuestions: task.questions || [],
+        callerTimezone,
+        callbackTimeLocalLabel: formatInstantInTimezone(advisor.time, callerTimezone),
+        nextRetryAtLocalLabel: null,
+        scheduleLocalLabel: formatInstantInTimezone(advisor.time, callerTimezone),
+        humanAdvisor: true,
+        callId: advisor.callId || result.callId || null,
+      });
+    }
+  }
+
+  return [...automaticRows, ...humanAdvisorRows]
+    .sort((a, b) => new Date(a.callbackTime || a.nextRetryAt || a.createdAt).getTime()
+      - new Date(b.callbackTime || b.nextRetryAt || b.createdAt).getTime());
 }
 
 // Cross-org pending retry scan used only by the durable callback scheduler.
