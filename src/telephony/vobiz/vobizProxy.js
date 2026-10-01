@@ -2088,7 +2088,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               functionResponses.push({
                 id: call.id,
                 name: call.name,
-                response: { output: { success: false, error: "Call is ending. Do not perform any more tools or ask any more questions." } },
+                response: { result: { success: false, error: "Call is ending. Do not perform any more tools or ask any more questions." } },
               });
               continue;
             }
@@ -2096,7 +2096,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               functionResponses.push({
                 id: call.id,
                 name: call.name,
-                response: { output: { success: true, note: "Call is already ending." } },
+                response: { result: { success: true, note: "Call is already ending." } },
               });
               continue;
             }
