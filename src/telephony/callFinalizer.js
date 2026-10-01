@@ -741,9 +741,19 @@ async function finalizeCallRecord({
 
   if (positiveLeadCandidate) {
     try {
+      // A dialer task is a campaign execution boundary. The Contact record
+      // remains the shared person identity; the "Lead" created by this
+      // campaign lives on task.callResults[leadId]. Never promote the shared
+      // Contact globally because that would make another campaign inherit
+      // this campaign's qualification.
+      const campaignScoped = Boolean(retryContext?.taskId);
+
       if (leadId) {
         const current = await db.getLeadById(orgId, leadId).catch(() => null);
-        if (current && (!current.pipelineStage ||
+        if (current) {
+          resolvedLeadName = current.name || resolvedLeadName;
+        }
+        if (!campaignScoped && current && (!current.pipelineStage ||
           current.pipelineStage === "contact" ||
           current.pipelineStage === "campaign" ||
           current.pipelineStage === "lead")) {
@@ -752,29 +762,34 @@ async function finalizeCallRecord({
             status: current.status || "New",
           });
           resolvedLeadName = updated?.name || resolvedLeadName;
-          log.info(`🎯 [${provider}] Positive call promoted existing contact ${leadId} to Leads`);
+          log.info(`🎯 [${provider}] Positive non-campaign call promoted contact ${leadId} to Leads`);
+        } else if (campaignScoped) {
+          log.info(`🎯 [${provider}] Positive campaign call kept contact ${leadId} unchanged; qualification is campaign-scoped`);
         }
       } else if (callerNumber) {
-        // Positive calls from a brand-new number should also appear in the
-        // Leads section. Use the phone as the dedupe key before creating.
+        // A brand-new caller is still one Contact. If this is a campaign
+        // execution, create the shared Contact only; the campaign Lead
+        // state is persisted below in that campaign's call result.
         const existing = await db.findLeadByPhone(orgId, callerNumber);
         if (existing) {
           leadId = existing.id;
           resolvedLeadName = existing.name || resolvedLeadName;
-          await db.patch("leads", orgId, leadId, { pipelineStage: "lead" }).catch(() => {});
+          if (!campaignScoped) {
+            await db.patch("leads", orgId, leadId, { pipelineStage: "lead" }).catch(() => {});
+          }
         } else {
           const created = await db.create("leads", orgId, {
             name: outcomeCallerName || extractedCallerName || resolvedLeadName || "Unknown Caller",
             phone: callerNumber,
             source: "voice_ai",
             status: "New",
-            pipelineStage: "lead",
+            pipelineStage: campaignScoped ? "campaign" : "lead",
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           });
           leadId = created.id;
           resolvedLeadName = created.name || resolvedLeadName;
-          log.info(`🎯 [${provider}] Positive call created new Lead ${leadId} for ${callerNumber}`);
+          log.info(`🎯 [${provider}] Positive ${campaignScoped ? "campaign contact" : "Lead"} created ${leadId} for ${callerNumber}`);
         }
       }
     } catch (err) {
@@ -916,6 +931,13 @@ async function finalizeCallRecord({
           conversationOutcome,
           callbackStatus,
           enquiryStatus,
+          // Campaign qualification is stored on the campaign execution,
+          // never on the shared Contact record. This allows the same person
+          // to be a Lead in Campaign A and a non-Lead in Campaign B.
+          pipelineStage: positiveLeadCandidate
+            ? "lead"
+            : (existing.pipelineStage || null),
+          leadStatus: existing.leadStatus || "New",
           // Calls placed through the job queue (autoDialEngine.js's
           // continuous dialer, dialerRetryEngine.js's auto-redials) land
           // here instead of DialerSimulator.tsx's own handleHangupCall,
