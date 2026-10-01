@@ -2453,6 +2453,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       onclose: (e) => {
         log.info(`🔌 Gemini closed for Vobiz. Code: ${e?.code}, Reason: ${e?.reason || "none"}`);
         if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+        beginAudioGeneration("gemini-session-close");
         stopPacing();
         // Finalize THIS session's usage row — idempotent, so if a
         // reconnect below also somehow triggers a second close event for
@@ -2546,6 +2547,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     },
     sendText: async (text) => {
       if (endCallRequested) return;
+      beginAudioGeneration("system-text-turn");
       // Must be role "user" (turn_complete:true) to actually trigger the
       // model to generate + speak a new turn — a role "model" turn is
       // just prior context and produces no audio at all. But sending the
@@ -2584,6 +2586,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     // back-to-back with no caller turn in between, once per silence nudge.
     sendNudge: async (text) => {
       if (endCallRequested) return;
+      beginAudioGeneration("silence-nudge");
       if (session.conn && session.conn.ws && session.conn.ws.readyState === 1) {
         const directive = `[System directive, not something the caller said: the caller has gone quiet. Briefly check in along these lines: "${text}" — do NOT re-introduce yourself, and do NOT repeat or restate whatever you already asked; just check they're still there, then continue waiting for their answer to your last question.]`;
         session.conn.ws.send(JSON.stringify({
