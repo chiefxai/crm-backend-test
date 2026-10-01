@@ -11,7 +11,7 @@ function normalizePcmFrame(pcm, { sampleRate = DEFAULT_SAMPLE_RATE, channels = D
 function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE, frameBytes = DEFAULT_FRAME_BYTES, prebufferBytes = DEFAULT_PREBUFFER_BYTES, maxQueueBytes = DEFAULT_MAX_QUEUE_BYTES, intervalMs = 20, writeRecording, callId = "unknown", loggerName = "telephony.audio" } = {}) {
   if (typeof sendFrame !== "function") throw new TypeError("sendFrame is required");
   const log = getLogger(loggerName);
-  let outboundQueue = Buffer.alloc(0), intervalId = null, hasPrebuffered = false, skipPrebufferOnce = false, fillerPlaying = false;
+  let outboundQueue = Buffer.alloc(0), intervalId = null, hasPrebuffered = false, skipPrebufferOnce = false, fillerPlaying = false;\n  // Provider-agnostic generation guard. Providers can invalidate the current\n  // spoken generation on barge-in/reconnect/new turn; stale audio is then\n  // rejected before it ever reaches the transport queue.\n  let activeGeneration = 0;
   let recordOutbound = typeof writeRecording === "function" ? writeRecording : null;
   const audioStats = { chunksIn: 0, bytesIn: 0, framesSent: 0, lastLogAt: 0, lastSendAt: 0, maxGapMs: 0 };
   const startPacing = () => {
@@ -44,7 +44,7 @@ function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE
       if (recordOutbound) recordOutbound(normalized.pcm);
       startPacing();
     },
-    clearQueue() { outboundQueue = Buffer.alloc(0); hasPrebuffered = false; skipPrebufferOnce = false; fillerPlaying = false; },
+    clearQueue() { outboundQueue = Buffer.alloc(0); hasPrebuffered = false; skipPrebufferOnce = false; fillerPlaying = false; },\n    beginGeneration() {\n      activeGeneration += 1;\n      outboundQueue = Buffer.alloc(0);\n      hasPrebuffered = false;\n      skipPrebufferOnce = false;\n      fillerPlaying = false;\n      return activeGeneration;\n    },\n    getGeneration: () => activeGeneration,
     stopPacing, startPacing,
     isFillerPlaying: () => fillerPlaying,
     setFillerPlaying(value) { fillerPlaying = Boolean(value); },
