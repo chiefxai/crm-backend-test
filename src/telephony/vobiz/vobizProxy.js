@@ -39,6 +39,7 @@ const POSTCALL_CONCURRENCY = parseInt(process.env.POSTCALL_QUEUE_CONCURRENCY || 
 postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: POSTCALL_CONCURRENCY });
 
 const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
+const { normalizePcmFrame } = require("../media/audioPipeline");
 const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
 const { runOutboundPrewarm, generateOpeningAudio } = require("./vobizOutboundPrewarm");
 const {
@@ -1419,10 +1420,8 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
             // Inbound payload is 16-bit little-endian PCM from Vobiz (L16 = host byte order)
             const rawPCM = Buffer.from(msg.media.payload, "base64");
-            // No byte-swap needed: L16 is already little-endian
-
-            // Vobiz sends 16kHz - send directly to Gemini
-            const pcm16k = rawPCM;
+            // Normalize at the provider boundary without introducing an extra buffer.
+            const pcm16k = normalizePcmFrame(rawPCM, { sampleRate: 16000, channels: 1, encoding: "pcm_s16le" }).pcm;
 
             // Send to Gemini
             await geminiSession.sendAudio(pcm16k.toString("base64"));
