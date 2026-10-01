@@ -1,7 +1,7 @@
 const {
   buildVobizIncomingWebhookUrl,
   extractSuppliedVobizWebhookSecret,
-} = require("../../src/telephony/vobizWebhookAuth");
+} = require("../../src/telephony/vobiz/vobizWebhookAuth");
 
 describe("vobizWebhookAuth", () => {
   const prevSecret = process.env.VOBIZ_WEBHOOK_SECRET;
