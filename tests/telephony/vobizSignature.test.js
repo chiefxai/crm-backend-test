@@ -1,5 +1,5 @@
 const crypto = require("crypto");
-const { verifyVobizWebhookSignature, vobizWebhookBaseUrl } = require("../../src/telephony/vobizSignature");
+const { verifyVobizWebhookSignature, vobizWebhookBaseUrl } = require("../../src/telephony/vobiz/vobizSignature");
 
 describe("vobizSignature", () => {
   test("verifies X-Vobiz-Signature-V3", () => {
