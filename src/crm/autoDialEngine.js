@@ -79,17 +79,17 @@ function mapCallStatusToResultStatus(status) {
 // fallback (see resolveProviderAndAgent below) for a task that was
 // started without ever picking an agent with its own assigned number.
 async function resolveProviderFromNumberString(orgId, outboundNumber) {
-  if (!outboundNumber) return { provider: "vobiz", from: undefined };
+  if (!outboundNumber) return { provider: telephony.getDefaultProvider(), from: undefined };
   let numbers = [];
   try {
     numbers = await db.list("numbers", orgId);
   } catch (err) {
     log.error(`❌ [autoDialEngine] Failed to look up numbers for org ${orgId}:`, err.message);
-    return { provider: "vobiz", from: outboundNumber };
+    return { provider: telephony.getDefaultProvider(), from: outboundNumber };
   }
   const match = numbers.find((n) => n.number === outboundNumber);
   const providerName = (match?.provider || "").toLowerCase();
-  if (providerName.includes("vobiz")) return { provider: "vobiz", from: outboundNumber };
+  const connector = telephony.findConnector(providerName); return { provider: connector?.name || providerName || telephony.getDefaultProvider(), from: outboundNumber };
   return { provider: providerName || "unknown", from: outboundNumber };
 }
 
@@ -125,7 +125,7 @@ async function resolveProviderAndAgent(orgId, task) {
         const numRow = numbers.find((n) => n.id === agent.outboundNumberId);
         if (numRow) {
           const providerName = (numRow.provider || "").toLowerCase();
-          const provider = providerName.includes("vobiz") ? "vobiz" : (providerName || "unknown");
+          const connector = telephony.findConnector(providerName); const provider = connector?.name || providerName || telephony.getDefaultProvider();
           return { provider, from: numRow.number, agentId };
         }
       }
@@ -539,7 +539,7 @@ async function processAutoDialTasks() {
 async function forceHangupCurrentCall(task) {
   if (!task.currentProviderCallSid) return;
   try {
-    const provider = task.currentProvider || "vobiz";
+    const provider = task.currentProvider || telephony.getDefaultProvider();
     await telephony.hangupCall(provider, task.currentProviderCallSid, task.orgId);
   } catch (err) {
     const message = String(err?.message || err || "");
