@@ -2125,13 +2125,13 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                     saved: false,
                     error: "You are saving answers too fast. Ask the next question out loud, wait for the caller to answer, then call save_question_response once.",
                   });
-                } else if (!isNameQ && questionnaireGate.nonNameSaves >= questionnaireGate.meaningfulAnswerTurns) {
-                  result = appendQuestionnaireToolFields({
-                    success: false,
-                    saved: false,
-                    error: "The caller has not given a real answer to this question yet. Ask it out loud and wait for their reply before save_question_response.",
-                  });
                 } else {
+                  // Do not gate tool execution on inputTranscription ordering.
+                  // Gemini documents that inputTranscription is delivered independently
+                  // and has no guaranteed ordering relative to other server messages.
+                  // The model may therefore issue the save tool before our transcript
+                  // callback arrives even though it already processed the caller's audio.
+                  // The answer validator is the authoritative semantic guard here.
                   result = await handleSaveQuestionResponse(
                     orgId,
                     persistCallIdRef.current,
