@@ -5,7 +5,7 @@ const {
   isPreparedOpeningGreetingEnabled,
   shouldUsePreparedOpeningGreeting,
   _clearGreetingCacheForTests,
-} = require("../../src/telephony/vobizOpeningGreeting");
+} = require("../../src/telephony/vobiz/vobizOpeningGreeting");
 
 describe("vobizOpeningGreeting", () => {
   beforeEach(() => _clearGreetingCacheForTests());
