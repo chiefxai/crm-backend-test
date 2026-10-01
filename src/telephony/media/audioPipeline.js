@@ -11,7 +11,11 @@ function normalizePcmFrame(pcm, { sampleRate = DEFAULT_SAMPLE_RATE, channels = D
 function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE, frameBytes = DEFAULT_FRAME_BYTES, prebufferBytes = DEFAULT_PREBUFFER_BYTES, maxQueueBytes = DEFAULT_MAX_QUEUE_BYTES, intervalMs = 20, writeRecording, callId = "unknown", loggerName = "telephony.audio" } = {}) {
   if (typeof sendFrame !== "function") throw new TypeError("sendFrame is required");
   const log = getLogger(loggerName);
-  let outboundQueue = Buffer.alloc(0), intervalId = null, hasPrebuffered = false, skipPrebufferOnce = false, fillerPlaying = false;\n  // Provider-agnostic generation guard. Providers can invalidate the current\n  // spoken generation on barge-in/reconnect/new turn; stale audio is then\n  // rejected before it ever reaches the transport queue.\n  let activeGeneration = 0;
+  let outboundQueue = Buffer.alloc(0), intervalId = null, hasPrebuffered = false, skipPrebufferOnce = false, fillerPlaying = false;
+  // Provider-agnostic generation guard. Providers can invalidate the current
+  // spoken generation on barge-in/reconnect/new turn; stale audio is then
+  // rejected before it ever reaches the transport queue.
+  let activeGeneration = 0;
   let recordOutbound = typeof writeRecording === "function" ? writeRecording : null;
   const audioStats = { chunksIn: 0, bytesIn: 0, framesSent: 0, lastLogAt: 0, lastSendAt: 0, maxGapMs: 0 };
   const startPacing = () => {
@@ -34,7 +38,7 @@ function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE
   return {
     PREBUFFER_BYTES: prebufferBytes,
     setWriteRecording(fn) { recordOutbound = typeof fn === "function" ? fn : null; },
-    enqueuePcm(pcm16k, { fastStart = false } = {}) {
+    enqueuePcm(pcm16k, { fastStart = false, generation = null } = {}) {
       if (!pcm16k?.length) return;
       const normalized = normalizePcmFrame(pcm16k, { sampleRate });
       audioStats.chunksIn++; audioStats.bytesIn += normalized.pcm.length;
@@ -44,7 +48,16 @@ function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE
       if (recordOutbound) recordOutbound(normalized.pcm);
       startPacing();
     },
-    clearQueue() {\n      // Clearing playback is also a semantic turn boundary. Any provider\n      // that uses clearQueue() on barge-in automatically invalidates audio\n      // that was generated before the interruption.\n      activeGeneration += 1;\n      outboundQueue = Buffer.alloc(0);\n      hasPrebuffered = false;\n      skipPrebufferOnce = false;\n      fillerPlaying = false;\n      return activeGeneration;\n    },\n    beginGeneration() {\n      activeGeneration += 1;\n      outboundQueue = Buffer.alloc(0);\n      hasPrebuffered = false;\n      skipPrebufferOnce = false;\n      fillerPlaying = false;\n      return activeGeneration;\n    },\n    getGeneration: () => activeGeneration,
+    clearQueue() { outboundQueue = Buffer.alloc(0); hasPrebuffered = false; skipPrebufferOnce = false; fillerPlaying = false; },
+    beginGeneration() {
+      activeGeneration += 1;
+      outboundQueue = Buffer.alloc(0);
+      hasPrebuffered = false;
+      skipPrebufferOnce = false;
+      fillerPlaying = false;
+      return activeGeneration;
+    },
+    getGeneration: () => activeGeneration,
     stopPacing, startPacing,
     isFillerPlaying: () => fillerPlaying,
     setFillerPlaying(value) { fillerPlaying = Boolean(value); },
