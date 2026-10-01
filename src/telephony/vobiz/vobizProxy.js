@@ -2090,9 +2090,6 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   error: "This exact questionnaire answer was already processed in this call. Do not ask the same question again.",
                 });
               } else {
-                questionnaireGate.handledToolCalls.add(semanticToolKey);
-                const cleanupTimer = setTimeout(() => questionnaireGate.handledToolCalls.delete(semanticToolKey), 10000);
-                cleanupTimer.unref?.();
               if (questionnaireSavesThisMessage > 1) {
                 result = appendQuestionnaireToolFields({
                   success: false,
@@ -2144,6 +2141,9 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   if (result.success && result.saved) {
                     questionnaireGate.lastSaveAt = now;
                     questionnaireGate.savedQuestions.add(questionText);
+                    questionnaireGate.handledToolCalls.add(semanticToolKey);
+                    const cleanupTimer = setTimeout(() => questionnaireGate.handledToolCalls.delete(semanticToolKey), 10000);
+                    cleanupTimer.unref?.();
                     if (!isNameQ) questionnaireGate.nonNameSaves += 1;
                   }
                   result = appendQuestionnaireToolFields(result);
