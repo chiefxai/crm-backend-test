@@ -1027,6 +1027,7 @@ module.exports = {
   mergeTranscriptLines,
   buildFullTranscript,
   uploadRecording,
+  markDialerTaskCallEnded,
   saveContactDetailsNow,
   resolvePostCallOutcome,
   resolveCallAnswered,
