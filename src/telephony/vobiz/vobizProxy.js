@@ -701,12 +701,30 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
       orgId,
       direction: "outbound",
       attemptNumber,
-      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz", retryPolicy: retryPolicy || null, billingReservationId: billingReservation?.id || null },
+      retryContext: {
+        questions, from, language, assignedContact, taskId, leadId,
+        campaignId: taskId || null,
+        provider: "vobiz",
+        retryPolicy: retryPolicy || null,
+        billingReservationId: billingReservation?.id || null,
+      },
       fromNumber: sanitizedFrom,
       toNumber: sanitizedTo,
     }
   );
   const callSid = responseCallIds[0] || callSids[0];
+
+  // IMPORTANT: scope campaign/workflow inputs to the actual provider call id.
+  // A contact can exist in multiple campaigns using the same workflow, and
+  // multiple campaigns can even dial the same phone concurrently. Phone-keyed
+  // state is only a compatibility fallback; exact call-id state is authoritative.
+  for (const id of callSids) {
+    if (questions?.length) rememberMap(vobizCallQuestions, id, questions);
+    if (language || (assignedContact && assignedContact.name && assignedContact.phone) || starhealthEnabled) {
+      rememberMap(vobizCallTaskConfig, id, { language, assignedContact, starhealthEnabled });
+    }
+    if (agentId) rememberMap(vobizCallAgentId, id, agentId);
+  }
 
   // Pre-warm org/agent/questionnaire/KB lookups now, while the callee's phone
   // is still ringing, instead of waiting for the "start" handler to do it
@@ -992,8 +1010,12 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           // never matched on a real outbound call.
           const calleeNumber = vobizCallCallee.get(callId) || "";
           const sanitizedCallee = calleeNumber.replace(/[\s\-\(\)\+]+/g, "");
-          const customQuestions = sanitizedCallee ? vobizCallQuestions.get(sanitizedCallee) : null;
-          const taskConfig = sanitizedCallee ? vobizCallTaskConfig.get(sanitizedCallee) : null;
+          const customQuestions = vobizCallQuestions.get(callId)
+            || (sanitizedCallee ? vobizCallQuestions.get(sanitizedCallee) : null);
+          const taskConfig = vobizCallTaskConfig.get(callId)
+            || (sanitizedCallee ? vobizCallTaskConfig.get(sanitizedCallee) : null);
+          if (vobizCallQuestions.has(callId)) vobizCallQuestions.delete(callId);
+          if (vobizCallTaskConfig.has(callId)) vobizCallTaskConfig.delete(callId);
           if (sanitizedCallee && vobizCallTaskConfig.has(sanitizedCallee)) vobizCallTaskConfig.delete(sanitizedCallee);
 
           // Diagnostic only (temporary) — org/call-log saving for this call
@@ -1038,8 +1060,10 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           });
           log.debug(`⏱️ Vobiz startup pre-warm launched at +${Date.now() - startupT0}ms after start handler entered (client pre-warmed=${hadPrewarmedClient})`);
 
-          const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
-          if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
+          const explicitAgentId = vobizCallAgentId.get(callId)
+            || (sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null);
+          if (vobizCallAgentId.has(callId)) vobizCallAgentId.delete(callId);
+          if (explicitAgentId && sanitizedCallee) vobizCallAgentId.delete(sanitizedCallee);
 
           const outboundDirection = (vobizCallDirection.get(callId) || "unknown") === "outbound";
           if (!outboundDirection && resolvedOrgId) {
@@ -1592,12 +1616,15 @@ async function handleVobizSession(vobizWs, streamContext = null) {
       }
     }
 
-    const workflowQuestions = sanitizedCalleeForFinalize
-      ? postCallAgents.normalizeQuestions(
-        vobizCallQuestionsForFinalize.get(sanitizedCalleeForFinalize)
-          || vobizCallQuestions.get(sanitizedCalleeForFinalize),
-      )
-      : null;
+    const workflowQuestions = postCallAgents.normalizeQuestions(
+      vobizCallQuestionsForFinalize.get(callId)
+        || vobizCallQuestions.get(callId)
+        || (sanitizedCalleeForFinalize
+          ? vobizCallQuestionsForFinalize.get(sanitizedCalleeForFinalize)
+            || vobizCallQuestions.get(sanitizedCalleeForFinalize)
+          : null),
+    );
+    if (vobizCallQuestionsForFinalize.has(callId)) vobizCallQuestionsForFinalize.delete(callId);
     if (sanitizedCalleeForFinalize) vobizCallQuestionsForFinalize.delete(sanitizedCalleeForFinalize);
 
     postCallQueue.enqueue("finalizeCall:vobiz", {
