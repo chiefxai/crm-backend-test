@@ -1689,6 +1689,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     nonNameSaves: 0,
     lastSaveAt: 0,
     savedQuestions: new Set(),
+    handledToolCalls: new Set(),
   };
   const QUESTIONNAIRE_SAVE_MIN_GAP_MS = 2800;
   const normalizeQuestionKey = (value) => String(value || "").trim().toLowerCase().replace(/\\s+/g, " ");
@@ -2078,6 +2079,20 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 : { error: "This feature is currently disabled." };
             } else if (call.name === "save_question_response") {
               questionnaireSavesThisMessage += 1;
+              const semanticToolKey = JSON.stringify({
+                question: String(call.args?.question || "").trim().toLowerCase().replace(/\\s+/g, " "),
+                answer: String(call.args?.answer || "").trim().toLowerCase().replace(/\\s+/g, " "),
+              });
+              if (questionnaireGate.handledToolCalls.has(semanticToolKey)) {
+                result = appendQuestionnaireToolFields({
+                  success: false,
+                  saved: false,
+                  error: "This exact questionnaire answer was already processed in this call. Do not ask the same question again.",
+                });
+              } else {
+                questionnaireGate.handledToolCalls.add(semanticToolKey);
+                const cleanupTimer = setTimeout(() => questionnaireGate.handledToolCalls.delete(semanticToolKey), 10000);
+                cleanupTimer.unref?.();
               if (questionnaireSavesThisMessage > 1) {
                 result = appendQuestionnaireToolFields({
                   success: false,
@@ -2133,6 +2148,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   }
                   result = appendQuestionnaireToolFields(result);
                 }
+              }
               }
             } else if (call.name === "send_email_document") {
               result = (await featureFlags.isEnabled("email_documents"))
@@ -2221,6 +2237,9 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               if (objectResult) result = objectResult;
             }
             log.info(`⏱️ DEBUG: tool "${call.name}" took ${Date.now() - __toolStart}ms`);
+            if (call.name === "save_question_response") {
+              log.info(`🧭 Questionnaire tool result: question="${String(call.args?.question || "").slice(0, 120)}" success=${result?.success === true} saved=${result?.saved === true} error="${String(result?.error || "").slice(0, 240)}"`);
+            }
             functionResponses.push({
               id: call.id,
               name: call.name,
@@ -2229,9 +2248,11 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
           }
 
           try {
-            session.sendToolResponse({ functionResponses });
+            await session.sendToolResponse({ functionResponses });
           } catch (err) {
-            session.send({ toolResponse: { functionResponses } });
+            log.warn("⚠️ sendToolResponse failed; trying legacy send:", err.message);
+            try { await session.send({ toolResponse: { functionResponses } }); }
+            catch (legacyErr) { log.error("❌ Gemini tool response failed:", legacyErr.message); }
           }
         }
 
