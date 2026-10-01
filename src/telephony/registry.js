@@ -6,6 +6,9 @@ function register(c){
   validateConnector(c);
   c.capabilities=capabilitiesOf(c);
   connectors.set(c.name,c);
+  if (typeof c.registerBackgroundWorkers === "function") {
+    c.registerBackgroundWorkers();
+  }
   log.info(`📡 Registered telephony connector: ${c.label||c.name} | capabilities=${JSON.stringify(c.capabilities)}`);
   return c;
 }
