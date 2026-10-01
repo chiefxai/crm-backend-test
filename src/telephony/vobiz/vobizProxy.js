@@ -2272,7 +2272,11 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             functionResponses.push({
               id: call.id,
               name: call.name,
-              response: { output: result }
+              // Gemini Live expects the function result inside response.result.
+              // Using response.output makes the tool call look unanswered to
+              // the model, which can cause it to re-issue the same function
+              // call with a new ID and repeat the spoken questionnaire turn.
+              response: { result }
             });
           }
 
