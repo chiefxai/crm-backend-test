@@ -10,7 +10,7 @@ describe("questionnaire answer validation", () => {
     })).toBe(true);
   });
 
-  test("accepts a bare No for a natural yes/no question", () => {
+  test("accepts bare Yes/No for a natural yes/no question", () => {
     const result = prepareQuestionnaireSave({
       question: "Do you smoke or use any tobacco products?",
       answer: "No",
@@ -20,6 +20,16 @@ describe("questionnaire answer validation", () => {
       }],
     });
     expect(result).toEqual({ ok: true, answer: "No" });
+
+    const yesResult = prepareQuestionnaireSave({
+      question: "Do you smoke or use any tobacco products?",
+      answer: "Yes",
+      questionsList: [{
+        label: "Tobacco",
+        question: "Do you smoke or use any tobacco products?",
+      }],
+    });
+    expect(yesResult).toEqual({ ok: true, answer: "Yes" });
   });
 
   test("still rejects bare No for a non-yes/no fact question", () => {
