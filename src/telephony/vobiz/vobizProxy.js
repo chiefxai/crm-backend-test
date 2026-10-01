@@ -36,7 +36,14 @@ const rechargeBilling = require("../../crm/rechargeBilling");
 // and empty answers forever. See src/queue and callFinalizer.js.
 const postCallQueue = getQueue();
 const POSTCALL_CONCURRENCY = parseInt(process.env.POSTCALL_QUEUE_CONCURRENCY || "5", 10);
-postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: POSTCALL_CONCURRENCY });
+let postCallWorkerRegistered = false;
+
+function registerPostCallWorker() {
+  if (postCallWorkerRegistered) return;
+  postCallQueue.process("finalizeCall:vobiz", processPostCallData, { concurrency: POSTCALL_CONCURRENCY });
+  postCallWorkerRegistered = true;
+  log.info(`🧠 Registered post-call worker: finalizeCall:vobiz (concurrency=${POSTCALL_CONCURRENCY})`);
+}
 
 const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
 const { normalizePcmFrame } = require("../media/audioPipeline");
@@ -1115,6 +1122,12 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             log.info(`🔊 Cleared ring-time outbound audio backlog on adopt for call ${callId}`);
             geminiSessionPromise = adoptedRingLiveSession.sessionPromise;
             for (const line of adoptedRingLiveSession.transcriptLines) transcriptLines.push(line);
+            // Ring-time Gemini continues running after adoption. Point its transcript
+            // sink at the real call's finalizer array so post-call processing receives
+            // every caller/agent turn, not just the snapshot that existed at answer.
+            adoptedRingLiveSession.sessionPromise
+              ?.then((session) => session?.setTranscriptTarget?.(transcriptLines))
+              ?.catch(() => {});
             if (adoptedRingLiveSession.persistCallIdRef) {
               const ringCallId = adoptedRingLiveSession.persistCallIdRef.current;
               if (ringCallId && ringCallId !== generatedCallId) {
@@ -1684,6 +1697,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 // GEMINI LIVE SESSION
 // ──────────═════════════════════
 async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], outboundAudioPlayer = null, prewarmedDeps = null, recordingHooks = null, livePlaybackGate = null, callerContactName = null) {
+  let transcriptSink = transcriptLines;
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
   let lastRawBroadcastAt = 0;
   // Ring-time Live uses a temporary call id until the media WS connects; adopt
@@ -2191,7 +2205,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             audioOut.enqueuePcm(filler);
             log.info(`🫧 Filler played while awaiting real reply (voice: ${voiceName})`);
           }, FILLER_DEBOUNCE_MS);
-          transcriptLines.push({ role: "user", text });
+          transcriptSink.push({ role: "user", text });
           if (global.broadcastLog) {
             global.broadcastLog(`👤 Caller: "${text}"`, { type: "transcript", role: "user", text });
           }
@@ -2216,7 +2230,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             awaitingFirstAgentChunk = false;
           }
           log.info(`🤖 Agent to Vobiz: "${text}"`);
-          transcriptLines.push({ role: "ai", text });
+          transcriptSink.push({ role: "ai", text });
           if (global.broadcastLog) {
             global.broadcastLog(`🤖 Agent: "${text}"`, { type: "transcript", role: "ai", text });
           }
@@ -2326,6 +2340,9 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     },
     setWriteRecording(fn) {
       recordingSink.writeRecording = typeof fn === "function" ? fn : null;
+    },
+    setTranscriptTarget(target) {
+      if (Array.isArray(target)) transcriptSink = target;
     },
     sendAudio: async (base64Pcm16k) => {
       if (endCallRequested) return;
@@ -2892,5 +2909,5 @@ module.exports = {
   // audio helpers instead of duplicating them and risking drift.
   handleSearchPolicyKnowledgeBase, handleSaveQuestionResponse, handleSendEmailDocument,
   handleSendWhatsappMessage, handleSaveEnquiry, extractContactAndTrigger, hangupVobizCall, processPostCallData, createVobizStreamToken, verifyVobizStreamToken,
-  getWavHeader, resample24To16, appendCallLog,
+  getWavHeader, resample24To16, appendCallLog, registerPostCallWorker,
 };
