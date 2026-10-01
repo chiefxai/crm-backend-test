@@ -7,7 +7,7 @@ const PLACEHOLDER_ANSWER_RE = /^(not\s*applicable|n\/?a|na|none|unknown|unclear|
 
 const YES_NO_ONLY_ANSWER_RE = /^(yes|no|yeah|yep|nope|yup|nah|aama|illa|haan|nahi|correct|incorrect|right|wrong)\s*$/i;
 
-const YES_NO_QUESTION_RE = /\b(yes\s*or\s*no|male\s*or\s*female|can\s+(i|we)\s+|may\s+i\s+|shall\s+i\s+|ippo\s*pesalama|pesalama|ready\s*to\s*talk|speak\s*now|talk\s*now|is\s+that\s+(ok|okay|fine)|do\s+you\s+have\s+a\s+policy)\b/i;
+const YES_NO_QUESTION_RE = /\b(yes\s*or\s*no|male\s*or\s*female|can\s+(i|we)\s+|may\s+i\s+|shall\s+i\s+|ippo\s*pesalama|pesalama|ready\s*to\s*talk|speak\s*now|talk\s*now|is\s+that\s+(ok|okay|fine)|do\s+you\s+(have|smoke|drink|use|take|want|need|like|live|work|own|wear|use)|are\s+you\s+|is\s+your\s+|was\s+your\s+|did\s+you\s+|would\s+you\s+|could\s+you\s+|have\s+you\s+|has\s+your\s+|do\s+you\s+have\s+a\s+policy)\b/i;
 
 function normalizeAckToken(text) {
   return String(text || "").trim().toLowerCase().replace(/[^a-z]/g, "");
