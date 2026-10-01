@@ -44,7 +44,7 @@ function createOutboundAudioPlayer({ sendFrame, sampleRate = DEFAULT_SAMPLE_RATE
       if (recordOutbound) recordOutbound(normalized.pcm);
       startPacing();
     },
-    clearQueue() { outboundQueue = Buffer.alloc(0); hasPrebuffered = false; skipPrebufferOnce = false; fillerPlaying = false; },\n    beginGeneration() {\n      activeGeneration += 1;\n      outboundQueue = Buffer.alloc(0);\n      hasPrebuffered = false;\n      skipPrebufferOnce = false;\n      fillerPlaying = false;\n      return activeGeneration;\n    },\n    getGeneration: () => activeGeneration,
+    clearQueue() {\n      // Clearing playback is also a semantic turn boundary. Any provider\n      // that uses clearQueue() on barge-in automatically invalidates audio\n      // that was generated before the interruption.\n      activeGeneration += 1;\n      outboundQueue = Buffer.alloc(0);\n      hasPrebuffered = false;\n      skipPrebufferOnce = false;\n      fillerPlaying = false;\n      return activeGeneration;\n    },\n    beginGeneration() {\n      activeGeneration += 1;\n      outboundQueue = Buffer.alloc(0);\n      hasPrebuffered = false;\n      skipPrebufferOnce = false;\n      fillerPlaying = false;\n      return activeGeneration;\n    },\n    getGeneration: () => activeGeneration,
     stopPacing, startPacing,
     isFillerPlaying: () => fillerPlaying,
     setFillerPlaying(value) { fillerPlaying = Boolean(value); },
