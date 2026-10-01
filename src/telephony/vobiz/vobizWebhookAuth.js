@@ -1,6 +1,6 @@
 const crypto = require("crypto");
 const { getLogger } = require("../../observability/logger");
-const { verifyVobizWebhookSignature } = require("../vobizSignature");
+const { verifyVobizWebhookSignature } = require("./vobizSignature");
 
 const log = getLogger("telephony.vobizWebhookAuth");
 
