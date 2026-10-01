@@ -1532,6 +1532,27 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     // automatically — only a manual "Disconnect Call" click worked.
     const callerNumber = (direction === "outbound" && calleeNumber) ? calleeNumber : rawCallerNumber;
 
+    const preliminaryCallAnswered = resolveCallAnswered({
+      isMachineDetected,
+      mergedTranscriptLines: callFinalizer.mergeTranscriptLines(transcriptLines),
+      direction,
+      durationSeconds: duration,
+      totalInboundAudioBytes,
+      savedAnswerCount: 0,
+    });
+    const preliminaryStatus = isMachineDetected
+      ? "Answering Machine"
+      : (direction === "outbound" && !preliminaryCallAnswered ? "No Answer" : "Completed");
+    await callFinalizer.markDialerTaskCallEnded({
+      orgId,
+      retryContext,
+      callId: generatedCallId,
+      providerCallSid: callId,
+      durationSeconds: duration,
+      callAnswered: preliminaryCallAnswered,
+      preliminaryStatus,
+    });
+
     if (global.broadcastLog) {
       global.broadcastLog(`🛑 Call completed | Caller: ${callerNumber} | Duration: ${duration}s | Total Tokens: ${liveInputTokens + liveOutputTokens}`, { type: "system", duration, inputTokens: liveInputTokens, outputTokens: liveOutputTokens });
     }
@@ -1670,6 +1691,21 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     savedQuestions: new Set(),
   };
   const QUESTIONNAIRE_SAVE_MIN_GAP_MS = 2800;
+  const normalizeQuestionKey = (value) => String(value || "").trim().toLowerCase().replace(/\\s+/g, " ");
+  const refreshPersistedQuestionnaireState = async () => {
+    const ids = [...new Set([
+      persistCallIdRef.current,
+      getVobizCallId ? getVobizCallId() : null,
+      callId,
+    ].filter(Boolean).map(String))];
+    try {
+      const rows = await db.getResponsesForCallIds(orgId, ids);
+      for (const row of rows || []) if (row?.question) questionnaireGate.savedQuestions.add(row.question);
+    } catch (err) {
+      log.warn("⚠️ Questionnaire state refresh failed; keeping in-memory state:", err.message);
+    }
+    return [...questionnaireGate.savedQuestions];
+  };
   const appendQuestionnaireToolFields = (result) => questionnaire.withQuestionnaireProgress(
     result,
     normalizedQuestions,
@@ -2017,6 +2053,14 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
           const functionResponses = [];
           let questionnaireSavesThisMessage = 0;
           for (const call of allFunctionCalls) {
+            if (endCallRequested && call.name !== "end_call") {
+              functionResponses.push({
+                id: call.id,
+                name: call.name,
+                response: { output: { success: false, error: "Call is ending. Do not perform any more tools or ask any more questions." } },
+              });
+              continue;
+            }
             if (call.name === "end_call" && endCallRequested) {
               functionResponses.push({
                 id: call.id,
@@ -2047,11 +2091,15 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                   normalizedQuestions.find((q) => q.question === questionText) || { question: questionText },
                 );
                 const now = Date.now();
-                if (questionnaireGate.savedQuestions.has(questionText)) {
+                await refreshPersistedQuestionnaireState();
+                const questionKey = normalizeQuestionKey(questionText);
+                const alreadySavedQuestion = [...questionnaireGate.savedQuestions]
+                  .some((savedQuestion) => normalizeQuestionKey(savedQuestion) === questionKey);
+                if (alreadySavedQuestion) {
                   result = appendQuestionnaireToolFields({
                     success: false,
                     saved: false,
-                    error: "This question was already saved for this call. Do not ask it again — follow the nextQuestion in questionnaireProgress.",
+                    error: "This question was already answered and saved for this call. Do not speak or ask it again. Follow questionnaireProgress.nextQuestion exactly.",
                   });
                 } else if (
                   questionnaireGate.lastSaveAt > 0
@@ -2206,6 +2254,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         if (response.serverContent?.modelTurn?.parts) {
           for (const part of response.serverContent.modelTurn.parts) {
             if (part.inlineData?.mimeType?.startsWith("audio/")) {
+              if (endCallRequested) continue;
               if (!mediaStreamId) continue;
               if (livePlaybackGate?.dropGeminiAudioUntilCallerSpeaks) {
                 continue;
@@ -2432,6 +2481,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       recordingSink.writeRecording = typeof fn === "function" ? fn : null;
     },
     sendAudio: async (base64Pcm16k) => {
+      if (endCallRequested) return;
       await session.sendRealtimeInput({
         media: {
           data: base64Pcm16k,
@@ -2440,6 +2490,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       });
     },
     sendText: async (text) => {
+      if (endCallRequested) return;
       // Must be role "user" (turn_complete:true) to actually trigger the
       // model to generate + speak a new turn — a role "model" turn is
       // just prior context and produces no audio at all. But sending the
@@ -2477,6 +2528,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     // live from a call transcript that showed the same question said
     // back-to-back with no caller turn in between, once per silence nudge.
     sendNudge: async (text) => {
+      if (endCallRequested) return;
       if (session.conn && session.conn.ws && session.conn.ws.readyState === 1) {
         const directive = `[System directive, not something the caller said: the caller has gone quiet. Briefly check in along these lines: "${text}" — do NOT re-introduce yourself, and do NOT repeat or restate whatever you already asked; just check they're still there, then continue waiting for their answer to your last question.]`;
         session.conn.ws.send(JSON.stringify({
@@ -2493,6 +2545,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       }
     },
     sendPreparedOpeningHandoff: async (spokenGreeting) => {
+      if (endCallRequested) return;
       if (session.conn && session.conn.ws && session.conn.ws.readyState === 1) {
         const directive = `[System context — NOT something the caller said. The call just connected and you have ALREADY spoken this exact opening greeting aloud to the caller (do NOT repeat it, paraphrase it, or speak any greeting now): "${spokenGreeting}". Remain completely silent until the caller speaks. When they answer, continue from the full instructions without re-introducing yourself.]`;
         session.conn.ws.send(JSON.stringify({
