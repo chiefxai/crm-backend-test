@@ -1,14 +1,14 @@
 const db = require("../../db/repository");
 const genai = require("../../ai/googleAiClient");
 const { getLogger } = require("../../observability/logger");
-const { buildVobizSessionPrompt } = require("../vobizCallPrompt");
+const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
 const {
   buildOpeningGreetingText,
   buildGreetingCacheKey,
   agentConfigFingerprint,
   getOrGenerateOpeningGreetingAudio,
   isPreparedOpeningGreetingEnabled,
-} = require("../vobizOpeningGreeting");
+} = require("./vobizOpeningGreeting");
 
 const log = getLogger("telephony.vobizOutboundPrewarm");
 
