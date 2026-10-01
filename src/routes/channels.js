@@ -18,7 +18,7 @@ const auditLog = require("../platform/auditLog");
 const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.channels");
-const { ensureVobizInboundApplication } = require("../telephony/vobizInboundProvision");
+const telephony = require("../telephony/registry");
 
 const channelsRouter = express.Router();
 const conversationsRouter = express.Router();
@@ -93,7 +93,7 @@ channelsRouter.post("/vobiz", requireAuth, requireRole(ADMIN_ROLES), async (req,
       friendlyName: `${phoneNumber} (Vobiz)`,
     }).catch((err) => log.warn(`⚠️ Could not ensure virtual_numbers row for ${phoneNumber}: ${err.message}`));
     try {
-      await ensureVobizInboundApplication(authId, authToken, phoneNumber);
+      const provider = telephony.findConnector("vobiz"); if (!provider?.provisionInboundNumber) throw new Error("Vobiz provider is not registered."); await provider.provisionInboundNumber(authId, authToken, phoneNumber);
     } catch (err) {
       log.warn(`⚠️ Vobiz inbound Answer URL sync failed (configure manually if needed): ${err.message}`);
     }
