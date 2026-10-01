@@ -1897,122 +1897,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         thinkingConfig: { thinkingBudget: 0 },
       },
 
-      tools: [
-        {
-          functionDeclarations: [
-            // Legacy lending/insurance policy search — only relevant for orgs
-            // still on the hardcoded lending questionnaire path (no custom
-            // objects set up for their actual industry). Orgs with custom
-            // objects get the industry-appropriate 'search_knowledge_base'
-            // tool below instead; including this one for them would hand
-            // the AI a tool that talks about "insurance policy" regardless
-            // of what business the org actually runs.
-            ...(customObjects.length === 0 && vobizKbEnabled ? [{
-              name: "search_policy_knowledge_base",
-              description: "Search the insurance policy documents database for definitions, policy terms, coverages, limits, and rules.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  query: {
-                    type: "STRING",
-                    description: "Specific search terms or keywords to query in the insurance policy database"
-                  }
-                },
-                required: ["query"]
-              }
-            }] : []),
-            {
-              name: "save_question_response",
-              description: "Record the caller's verbal answer to exactly one questionnaire question you already asked in this call. Use only what they said for that question — never the CRM contact name as a placeholder for income, age, gender, medical, or other facts. Call at most once per turn.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  question: {
-                    type: "STRING",
-                    description: "The exact question asked to the client"
-                  },
-                  answer: {
-                    type: "STRING",
-                    description: "What the caller said in answer to that question only (not their name unless the question was explicitly about their name)"
-                  }
-                },
-                required: ["question", "answer"]
-              }
-            },
-            ...(vobizEmailEnabled ? [{
-              name: "send_email_document",
-              description: "Send an email document to the user's Gmail ID. Use this when the user requests a copy of their document, loan package, or summary, and you have confirmed their Gmail ID.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  recipient_email: {
-                    type: "STRING",
-                    description: "The recipient's email address (Gmail ID)"
-                  },
-                  subject: {
-                    type: "STRING",
-                    description: "The subject line of the email"
-                  },
-                  body: {
-                    type: "STRING",
-                    description: "The main body content of the email"
-                  },
-                  document_type: {
-                    type: "STRING",
-                    description: "The type of document being sent (e.g. 'policy brief', 'loan approval')"
-                  }
-                },
-                required: ["recipient_email", "subject", "body"]
-              }
-            }] : []),
-            ...(vobizWhatsappEnabled ? [{
-              name: "send_whatsapp_message",
-              description: "Send a WhatsApp message or document link to the user. Use this when the user requests information or a file copy via WhatsApp, and you have confirmed their WhatsApp number.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  whatsapp_number: {
-                    type: "STRING",
-                    description: "The target WhatsApp phone number (with country code)"
-                  },
-                  message: {
-                    type: "STRING",
-                    description: "The text message content to send"
-                  },
-                  document_url: {
-                    type: "STRING",
-                    description: "Optional URL of a document to attach"
-                  },
-                  file_name: {
-                    type: "STRING",
-                    description: "Optional name of the attached file"
-                  }
-                },
-                required: ["whatsapp_number", "message"]
-              }
-            }] : []),
-            ...(vobizAutoHangupEnabled ? [{
-              name: "end_call",
-              description: "End the current call. Call this only after you have said a brief goodbye to the caller and the conversation has naturally concluded (goals met, caller says goodbye, or caller has nothing further to add).",
-              parameters: { type: "OBJECT", properties: {} }
-            }] : []),
-            {
-              name: "save_contact_details",
-              description: "Save/update this caller's name, email, or location in the contact directory the moment they tell you — quietly, in the background, don't announce it as a database save. Call it as soon as they give you their name (even before anything else is discussed), and again any time they give you an email or location you didn't already have.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  name: { type: "STRING", description: "Caller's name, if they just gave it" },
-                  email: { type: "STRING", description: "Caller's email, if they just gave it" },
-                  location: { type: "STRING", description: "Caller's location, if they just gave it" }
-                },
-                required: []
-              }
-            },
-            ...customToolDeclarations
-          ]
-        }
-      ],
+      // Live Gemini is deliberately restricted to read-only knowledge retrieval.
+      // Questionnaire/contact/CRM/business writes are handled after hangup by
+      // the shared post-call pipeline.
+      tools: [{ functionDeclarations: [...customToolDeclarations] }],
       toolConfig: {
         functionCallingConfig: {
           mode: "AUTO"
@@ -2127,173 +2015,39 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             log.info(`🛠️ Vobiz Tool Call: Executing ${call.name}`, JSON.stringify(call.args || {}));
             const __toolStart = Date.now();
             let result = {};
-            if (call.name === "search_policy_knowledge_base") {
-              result = (await featureFlags.isEnabled("knowledge_base_search"))
-                ? await handleSearchPolicyKnowledgeBase(call.args.query)
-                : { error: "This feature is currently disabled." };
-            } else if (call.name === "save_question_response") {
-              questionnaireSavesThisMessage += 1;
-              const semanticToolKey = JSON.stringify({
-                question: String(call.args?.question || "").trim().toLowerCase().replace(/\\s+/g, " "),
-                answer: String(call.args?.answer || "").trim().toLowerCase().replace(/\\s+/g, " "),
-              });
-              if (questionnaireGate.handledToolCalls.has(semanticToolKey)) {
-                result = appendQuestionnaireToolFields({
-                  success: false,
-                  saved: false,
-                  error: "This exact questionnaire answer was already processed in this call. Do not ask the same question again.",
-                });
-              } else {
-              if (questionnaireSavesThisMessage > 1) {
-                result = appendQuestionnaireToolFields({
-                  success: false,
-                  saved: false,
-                  error: "Only one save_question_response per turn. Save this answer, then ask the next question out loud and wait for their reply before saving again.",
-                });
-              } else {
-                const phone = getCallerNumber ? getCallerNumber() : "Vobiz Call";
-                const questionText = call.args.question;
-                const isNameQ = questionnaireLooksLikeNameQuestion(
-                  normalizedQuestions.find((q) => q.question === questionText) || { question: questionText },
-                );
-                const now = Date.now();
-                await refreshPersistedQuestionnaireState();
-                const questionKey = normalizeQuestionKey(questionText);
-                const alreadySavedQuestion = [...questionnaireGate.savedQuestions]
-                  .some((savedQuestion) => normalizeQuestionKey(savedQuestion) === questionKey);
-                if (alreadySavedQuestion) {
-                  result = appendQuestionnaireToolFields({
-                    success: false,
-                    saved: false,
-                    error: "This question was already answered and saved for this call. Do not speak or ask it again. Follow questionnaireProgress.nextQuestion exactly.",
-                  });
-                } else if (
-                  questionnaireGate.lastSaveAt > 0
-                  && now - questionnaireGate.lastSaveAt < QUESTIONNAIRE_SAVE_MIN_GAP_MS
-                ) {
-                  result = appendQuestionnaireToolFields({
-                    success: false,
-                    saved: false,
-                    error: "You are saving answers too fast. Ask the next question out loud, wait for the caller to answer, then call save_question_response once.",
-                  });
-                } else {
-                  // Do not gate tool execution on inputTranscription ordering.
-                  // Gemini documents that inputTranscription is delivered independently
-                  // and has no guaranteed ordering relative to other server messages.
-                  // The model may therefore issue the save tool before our transcript
-                  // callback arrives even though it already processed the caller's audio.
-                  // The answer validator is the authoritative semantic guard here.
-                  result = await handleSaveQuestionResponse(
-                    orgId,
-                    persistCallIdRef.current,
-                    phone,
-                    questionText,
-                    call.args.answer,
-                    normalizedQuestions,
-                    callerContactName,
-                  );
-                  if (result.success && result.saved) {
-                    questionnaireGate.lastSaveAt = now;
-                    questionnaireGate.savedQuestions.add(questionText);
-                    questionnaireGate.handledToolCalls.add(semanticToolKey);
-                    const cleanupTimer = setTimeout(() => questionnaireGate.handledToolCalls.delete(semanticToolKey), 10000);
-                    cleanupTimer.unref?.();
-                    if (!isNameQ) questionnaireGate.nonNameSaves += 1;
-                  }
-                  result = appendQuestionnaireToolFields(result);
-                }
-              }
-              }
-            } else if (call.name === "send_email_document") {
-              result = (await featureFlags.isEnabled("email_documents"))
-                ? await handleSendEmailDocument(call.args.recipient_email, call.args.subject, call.args.body, call.args.document_type)
-                : { error: "This feature is currently disabled." };
-            } else if (call.name === "send_whatsapp_message") {
-              result = (await featureFlags.isEnabled("whatsapp_channel"))
-                ? await handleSendWhatsappMessage(call.args.whatsapp_number, call.args.message, call.args.document_url, call.args.file_name)
-                : { error: "This feature is currently disabled." };
-            } else if (call.name === "search_knowledge_base" && orgId) {
+            if (call.name === "search_knowledge_base" && orgId) {
               if (!(await featureFlags.isEnabled("knowledge_base_search"))) {
                 result = { error: "This feature is currently disabled." };
               } else {
-                const cacheKey = (call.args.query || "").trim().toLowerCase();
+                const cacheKey = (call.args?.query || "").trim().toLowerCase();
                 if (knowledgeBaseCache.has(cacheKey)) {
                   result = knowledgeBaseCache.get(cacheKey);
                 } else {
                   try {
                     const matches = await knowledgeBase.search(orgId, call.args.query, 3, kbDocumentIds);
-                    result = matches.length ? { results: matches.map((m) => m.content) } : { results: [], note: "No matching content found in the knowledge base." };
+                    result = matches.length
+                      ? { results: matches.map((m) => m.content) }
+                      : { results: [], note: "No matching content found in the knowledge base." };
                     knowledgeBaseCache.set(cacheKey, result);
                   } catch (err) {
                     result = { error: err.message };
                   }
                 }
               }
-            } else if (call.name === "end_call") {
-              if (!(await featureFlags.isEnabled("ai_auto_hangup"))) {
-                result = { error: "This feature is currently disabled." };
-              } else {
-              // Grace period before actually hanging up — the model calls this
-              // right after speaking its goodbye line, but that audio is still
-              // draining through the pacing/output pipeline to the caller's
-              // phone at this point. Cutting the call immediately would clip
-              // the farewell mid-sentence.
-              // hangupVobizCall needs Vobiz's own CallUUID (from the "start"
-              // stream event), not our internal generatedCallId (`callId`
-              // here) — passing the wrong one is why every AI-initiated
-              // hangup used to fail with Vobiz's "call not found".
-              if (endCallRequested) {
-                result = { success: true, note: "Call is already ending." };
-              } else {
-                endCallRequested = true;
-                const realVobizCallId = getVobizCallId ? getVobizCallId() : callId;
-                log.info(`👋 end_call requested — hanging up in 3.5s | Call ID: ${persistCallIdRef.current} | Vobiz CallUUID: ${realVobizCallId}`);
-                setTimeout(() => hangupVobizCall(realVobizCallId, orgId), 3500);
-                result = { success: true, note: "Call will end shortly." };
-              }
-              }
-            } else if (call.name === "save_enquiry") {
-              result = await handleSaveEnquiry(orgId, persistCallIdRef.current, call.args, getCallerNumber ? getCallerNumber() : null);
-            } else if (call.name === "save_contact_details") {
-              const phoneForContact = getCallerNumber ? getCallerNumber() : null;
-              const vobizId = getVobizCallId ? getVobizCallId() : callId;
-              result = await callFinalizer.saveContactDetailsNow(orgId, phoneForContact, vobizCallDirection.get(vobizId) || "unknown", call.args);
-            } else if (call.name === "get_starhealth_quote") {
-              const quote = { status: "deferred_by_design" }; // live wait removed (was up to 25s dead air) — always defer to post-call WhatsApp delivery now
-              if (quote.status === "ok") {
-                result = { success: true, plans: quote.plans.slice(0, 3) };
-              } else {
-                // Live fetch too slow/failed — retry once, longer, after the
-                // call ends, then deliver over WhatsApp if we have a number.
-                // Same "fire an async side effect and swallow errors" style
-                // as end_call's setTimeout above — no job queue exists here.
-                const phone = getCallerNumber ? getCallerNumber() : null;
-                const input = quote.input || call.args;
-                setTimeout(async () => {
-                  try {
-                    const retry = await starhealthQuote.getQuoteWithTimeout(input, 90000);
-                    if (retry.status === "ok" && phone) {
-                      const lines = retry.plans.slice(0, 3)
-                        .map((p, i) => `${i + 1}. ${p.name} — ${p.price} (Sum Insured: ${p.sumInsured}, ${p.policyPeriod})`)
-                        .join("\n");
-                      await handleSendWhatsappMessage(phone, `Here's your Star Health quote:\n${lines}`);
-                    } else if (retry.status !== "ok") {
-                      log.error(`❌ Star Health deferred quote retry failed for call ${callId}:`, retry.message || retry.status);
-                    }
-                  } catch (err) {
-                    log.error(`❌ Star Health deferred quote retry error for call ${callId}:`, err.message);
-                  }
-                }, 5000);
-                result = { success: true, deferred: true, message: "Quote will be sent to the caller after the call." };
-              }
-            } else if (orgId) {
-              const objectResult = await handleObjectToolCall(objectsEngine, orgId, customObjects, call.name, call.args);
-              if (objectResult) result = objectResult;
+            } else if (call.name === "search_policy_knowledge_base") {
+              // Legacy read-only policy retrieval is retained for compatibility
+              // with an already-open/resumed session, but no CRM mutation is
+              // permitted during the live call.
+              result = (await featureFlags.isEnabled("knowledge_base_search"))
+                ? await handleSearchPolicyKnowledgeBase(call.args?.query)
+                : { error: "This feature is currently disabled." };
+            } else {
+              result = {
+                success: false,
+                error: "Live-call tools are read-only. Only knowledge-base search is available; CRM persistence is performed after the call by post-call agents.",
+              };
             }
             log.info(`⏱️ DEBUG: tool "${call.name}" took ${Date.now() - __toolStart}ms`);
-            if (call.name === "save_question_response") {
-              log.info(`🧭 Questionnaire tool result: question="${String(call.args?.question || "").slice(0, 120)}" success=${result?.success === true} saved=${result?.saved === true} error="${String(result?.error || "").slice(0, 240)}"`);
-            }
             functionResponses.push({
               id: call.id,
               name: call.name,
