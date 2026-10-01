@@ -1335,6 +1335,16 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             finalPrompt += PREPARED_OPENING_SPOKEN_PROMPT;
           }
 
+          // Always carry the exact question set used by this live call into the
+          // post-call pipeline. Previously only dynamic campaign questions were
+          // retained, so normal organization questions could be asked live but
+          // never reach workflowAnswersAgent after hangup.
+          const questionsForPostCall = Array.isArray(normalizedQuestions)
+            ? normalizedQuestions
+            : [];
+          vobizCallQuestionsForFinalize.set(callId, questionsForPostCall);
+          if (sanitizedCallee) vobizCallQuestionsForFinalize.set(sanitizedCallee, questionsForPostCall);
+
           if (!isActive) return;
 
           // Connect to Gemini asynchronously in the background. Wrapped in a
