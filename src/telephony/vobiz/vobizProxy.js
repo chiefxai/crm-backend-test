@@ -2721,7 +2721,7 @@ async function processPostCallData({
   const mergedForSentiment = callFinalizer.mergeTranscriptLines(transcriptLines);
   let liveAnswers = [];
   try {
-    liveAnswers = await db.getResponsesForCallIds(orgId, [callId, ...alternateCallIds]);
+    liveAnswers = await db.getResponsesForCallIds(orgId, [callId, providerCallSid, ...alternateCallIds]);
   } catch {}
   const callAnswered = resolveCallAnswered({
     isMachineDetected,
