@@ -156,10 +156,40 @@ async function markDialerTaskCallEnded({
   retryContext,
   callId,
   providerCallSid = null,
+  alternateCallIds = [],
   durationSeconds = 0,
   callAnswered = false,
   preliminaryStatus = "Completed",
 }) {
+  // The call-end boundary runs before the post-call queue. A real caller can
+  // already have saved questionnaire answers by this point, while the
+  // in-memory transcript may still be incomplete. Never persist a misleading
+  // "No Answer" when durable answers prove that the caller engaged.
+  let persistedAnswerCount = 0;
+  try {
+    const responseIds = [...new Set([
+      callId,
+      providerCallSid,
+      ...(alternateCallIds || []),
+    ].filter(Boolean).map(String))];
+    const savedResponses = await db.getResponsesForCallIds(orgId, responseIds);
+    persistedAnswerCount = (savedResponses || []).filter(
+      (row) => row?.answer != null && String(row.answer).trim()
+    ).length;
+  } catch (err) {
+    log.warn(
+      `⚠️ [dialer] Call-end answer lookup failed for ${callId}; using live answered state:`,
+      err.message
+    );
+  }
+
+  if (!callAnswered && persistedAnswerCount > 0 && preliminaryStatus === "No Answer") {
+    callAnswered = true;
+    preliminaryStatus = "Completed";
+    log.info(
+      `✅ [dialer] Persisted questionnaire answers prove call ${callId} was answered (${persistedAnswerCount} answers)`
+    );
+  }
   if (!orgId || !retryContext?.taskId || !retryContext?.leadId) return false;
   try {
     const tasks = await db.list("dialertasks", orgId);
