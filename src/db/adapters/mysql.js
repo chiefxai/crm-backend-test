@@ -171,8 +171,9 @@ const TABLES = {
   campaigns: {
     pk: "id",
     columns: {
-      id: "text", org_id: "text", name: "text", status: "text", workflow_id: "text",
+      id: "text", org_id: "text", name: "name", status: "text", workflow_id: "text",
       total_leads: "int", called_leads: "int", successful_calls: "int",
+      retry_config: "json",
       created_at: "text", updated_at: "text"
     }
   },
