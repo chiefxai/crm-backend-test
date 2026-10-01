@@ -1,5 +1,5 @@
 const { getLogger } = require("../../observability/logger");
-const { buildVobizIncomingWebhookUrl } = require("../vobizWebhookAuth");
+const { buildVobizIncomingWebhookUrl } = require("./vobizWebhookAuth");
 
 const log = getLogger("telephony.vobizInboundProvision");
 
