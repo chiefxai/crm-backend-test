@@ -85,7 +85,7 @@ async function processDueRetries() {
       // retries before this fix (same underlying row shape), not just the
       // "Callback Scheduled" case this variable was renamed for.
       const dialTarget = row.callerNumber || row.leadName;
-      const campaignTaskId = row.retryContext?.taskId || null;
+      const campaignTaskId = row.retryContext?.campaignId || row.retryContext?.taskId || null;
       const alreadyHandled = await db.hasNewerCallForPhone(
         row.orgId,
         dialTarget,
@@ -141,6 +141,7 @@ async function processDueRetries() {
         // reached, but the dialer task's own Active Working List row
         // would stay stuck on "Callback Scheduled" forever.
         taskId: retryContext.taskId, leadId: retryContext.leadId,
+        campaignId: retryContext.campaignId || retryContext.taskId || null,
         provider: retryContext.provider || row.provider || telephony.getDefaultProvider(),
       });
     } catch (err) {
@@ -159,7 +160,7 @@ async function processDueRetries() {
 // tracks toward MAX_RETRY_ATTEMPTS; a queue-level rethrow-and-retry would
 // just duplicate that with a different budget/backoff).
 async function handlePlaceRedialJob(data) {
-  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, provider = telephony.getDefaultProvider() } = data;
+  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, campaignId: campaignId || taskId || null, provider = telephony.getDefaultProvider() } = data;
   try {
     await telephony.triggerOutboundCall(provider, orgId, dialTarget, {
       baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId,
