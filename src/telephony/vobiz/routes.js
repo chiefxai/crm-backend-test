@@ -6,7 +6,7 @@ const { safeErrorMessage } = require("../../observability/safeError");
 const router = require("express").Router();
 const db = require("../../db/repository");
 const { requireAuth } = require("../../middleware/auth");
-const { requireVobizWebhook } = require("../vobizWebhookAuth");
+const { requireVobizWebhook } = require("./vobizWebhookAuth");
 const channelsEngine = require("../../channels/engine");
 const { getLogger } = require("../../observability/logger");
 const log = getLogger("routes.vobiz");
@@ -16,7 +16,7 @@ const {
   vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, createVobizStreamToken,
   aliasVobizCallState, collectVobizCallIds, findCachedCallIdByPhone, syncDialerProviderCallSid,
   scheduleInboundVobizPrewarm,
-} = require("../vobizProxy");
+} = require("./vobizProxy");
 
 // Webhook fired for BOTH genuine inbound calls AND as the answer_url for
 // our own outbound calls. Vobiz doesn't distinguish — org is pre-cached for
@@ -256,7 +256,7 @@ router.post("/call", requireAuth, async (req, res) => {
   }
 
   try {
-    const { triggerVobizOutboundCall } = require("../vobizProxy");
+    const { triggerVobizOutboundCall } = require("./vobizProxy");
     let effectiveRetryPolicy = retryPolicy || null;
     if (taskId && !effectiveRetryPolicy) {
       const tasks = await db.list("dialertasks", req.orgId);
