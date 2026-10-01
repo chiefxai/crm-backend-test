@@ -78,7 +78,8 @@ const ENTITIES = {
     fields: {
       id: "id", name: "name", status: "status", workflowId: "workflow_id",
       totalLeads: "total_leads", calledLeads: "called_leads",
-      successfulCalls: "successful_calls", createdAt: "created_at", updatedAt: "updated_at"
+      successfulCalls: "successful_calls", retryConfig: "retry_config",
+      createdAt: "created_at", updatedAt: "updated_at"
     }
   },
   loans: {
