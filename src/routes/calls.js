@@ -148,7 +148,6 @@ router.get("/recordings/:callId/url", requireAuth, async (req, res) => {
     if (!url) return res.status(404).json({ error: "Recording not available" });
     res.json({
       url,
-      expiresAt: null,
       source: "object-storage",
       contentType: "audio/wav",
     });
