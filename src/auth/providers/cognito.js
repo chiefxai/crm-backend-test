@@ -6,16 +6,18 @@
 // tokens also carry a standard `cognito:groups` claim.
 //
 // Required IAM permissions for provisioning:
+//   cognito-idp:GetUser
 //   cognito-idp:AdminCreateUser
 //   cognito-idp:AdminSetUserPassword
 //   cognito-idp:AdminGetUser
 //   cognito-idp:AdminAddUserToGroup
 //   cognito-idp:AdminListGroupsForUser
 //   cognito-idp:AdminRemoveUserFromGroup
-//   cognito-idp:AdminDeleteUser (only when explicitly deleting a member)
+//   cognito-idp:AdminDeleteUser
 const { CognitoJwtVerifier } = require('aws-jwt-verify');
 const {
   CognitoIdentityProviderClient,
+  GetUserCommand,
   AdminCreateUserCommand,
   AdminSetUserPasswordCommand,
   AdminGetUserCommand,
@@ -35,14 +37,11 @@ const REGION = process.env.COGNITO_REGION;
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID;
 const CLIENT_ID = process.env.COGNITO_CLIENT_ID;
 
-// Super Admin is a platform role. Organization Admin and Team Member are
-// organization roles. Do not allow customer admins to create/assign Super Admin.
 const COGNITO_ROLES = Object.freeze({
   SUPER_ADMIN: 'SuperAdmin',
   ORGANIZATION_ADMIN: 'OrganizationAdmin',
   TEAM_MEMBER: 'TeamMember',
 });
-
 const ROLE_GROUPS = Object.freeze(Object.values(COGNITO_ROLES));
 const ROLE_SET = new Set(ROLE_GROUPS);
 
@@ -81,6 +80,29 @@ async function verifyToken(token) {
   }
 }
 
+// Access tokens are the correct authorization credential for CRM APIs, but
+// Cognito access-token claims do not normally contain the user's email.
+// Resolve the email from Cognito itself when an authenticated endpoint needs
+// identity-level authorization (for example the platform-admin allowlist).
+async function resolveIdentity(token, payload = {}) {
+  if (payload?.email || payload?.preferred_username) return payload;
+  if (!token || !REGION) return payload;
+
+  try {
+    const user = await getIdpClient().send(new GetUserCommand({ AccessToken: token }));
+    const email = getAttribute(user, 'email');
+    const name = getAttribute(user, 'name');
+    return {
+      ...payload,
+      ...(email ? { email } : {}),
+      ...(name ? { name } : {}),
+    };
+  } catch (err) {
+    log.warn('⚠️ Cognito identity enrichment failed', { error: err.message });
+    return payload;
+  }
+}
+
 function decodeToken(token) {
   try { return require('jsonwebtoken').decode(token); } catch { return null; }
 }
@@ -91,7 +113,6 @@ function normalizeRole(role) {
   return value;
 }
 
-/** Temporary password that satisfies typical Cognito pool policies (symbol, cases, digit). */
 function generateCompliantTemporaryPassword(length = 16) {
   const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const lower = 'abcdefghijklmnopqrstuvwxyz';
@@ -111,7 +132,6 @@ function generateCompliantTemporaryPassword(length = 16) {
 async function ensureRoleGroups() {
   if (!REGION || !USER_POOL_ID) throw new Error('Cognito authentication is not configured');
   const client = getIdpClient();
-
   for (const groupName of ROLE_GROUPS) {
     try {
       await client.send(new CreateGroupCommand({
@@ -147,13 +167,11 @@ async function syncUserRole(username, role) {
   const targetRole = normalizeRole(role);
   const client = getIdpClient();
   await ensureRoleGroups();
-
   const current = await client.send(new AdminListGroupsForUserCommand({
     UserPoolId: USER_POOL_ID,
     Username: username,
   }));
   const currentGroups = (current.Groups || []).map((g) => g.GroupName).filter(Boolean);
-
   for (const groupName of ROLE_GROUPS) {
     if (groupName !== targetRole && currentGroups.includes(groupName)) {
       await client.send(new AdminRemoveUserFromGroupCommand({
@@ -163,7 +181,6 @@ async function syncUserRole(username, role) {
       }));
     }
   }
-
   if (!currentGroups.includes(targetRole)) {
     await client.send(new AdminAddUserToGroupCommand({
       UserPoolId: USER_POOL_ID,
@@ -171,7 +188,6 @@ async function syncUserRole(username, role) {
       GroupName: targetRole,
     }));
   }
-
   return targetRole;
 }
 
@@ -179,12 +195,9 @@ async function provisionUser(email, password, name = '', role = COGNITO_ROLES.TE
   if (!REGION || !USER_POOL_ID) throw new Error('Cognito authentication is not configured');
   const normalizedEmail = String(email || '').trim().toLowerCase();
   if (!normalizedEmail) throw new Error('Email is required for Cognito provisioning');
-
   const targetRole = normalizeRole(role);
   const client = getIdpClient();
-
   await ensureRoleGroups();
-
   let user;
   try {
     const createRes = await client.send(new AdminCreateUserCommand({
@@ -205,11 +218,8 @@ async function provisionUser(email, password, name = '', role = COGNITO_ROLES.TE
       throw new Error(`Cognito user creation failed: ${err.message}`);
     }
   }
-
   if (!user?.Username) throw new Error('Cognito user could not be resolved after provisioning');
-
   const username = user.Username;
-
   if (password) {
     try {
       await client.send(new AdminSetUserPasswordCommand({
@@ -222,19 +232,11 @@ async function provisionUser(email, password, name = '', role = COGNITO_ROLES.TE
       throw new Error(`Cognito set-password failed: ${err.message}`);
     }
   }
-
   await syncUserRole(username, targetRole);
-
   const resolved = await getUser(username);
   const userId = getAttribute(resolved, 'sub') || getAttribute(user, 'sub');
   if (!userId) throw new Error('Cognito user was created but its immutable sub was not returned');
-
-  log.info('✅ Cognito user provisioned', {
-    userId,
-    email: normalizedEmail,
-    role: targetRole,
-  });
-
+  log.info('✅ Cognito user provisioned', { userId, email: normalizedEmail, role: targetRole });
   return userId;
 }
 
@@ -254,6 +256,7 @@ async function deleteUser(username) {
 
 module.exports = {
   verifyToken,
+  resolveIdentity,
   decodeToken,
   provisionUser,
   syncUserRole,
