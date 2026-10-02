@@ -19,6 +19,7 @@
 // ============================================================
 
 const db = require("../db/repository");
+const { normalizePhone } = require("../lib/phone");
 const objectsEngine = require("../crm/objectsEngine");
 const postCallAgents = require("../ai/postCallAgents");
 const {
@@ -306,6 +307,7 @@ function buildFullTranscript(mergedLines) {
 // either the lending leads table or the generic objects engine for
 // contacts, never both, so try leads first and fall back to objects.
 async function matchContact(orgId, callId, callerNumber, direction, extractedCallerName) {
+  callerNumber = normalizePhone(callerNumber);
   let leadId = null;
   let resolvedLeadName = null;
   try {
