@@ -1795,26 +1795,27 @@ async function findOrgIdForNumber(number) {
   if (!number) return null;
   const digitsOnly = String(number).replace(/[^\d]/g, "");
   if (!digitsOnly) return null;
-  const { data, error } = await supabase
-    .from("virtual_numbers")
-    .select("org_id, number");
-  if (error) throw new Error(`[db.findOrgIdForNumber] ${error.message}`);
-  const matches = (data || []).filter((row) => String(row.number).replace(/[^\d]/g, "").endsWith(digitsOnly.slice(-10)));
+  const last10 = digitsOnly.slice(-10);
+
+  // Inbound routing is a core MySQL data path. Do not depend on the
+  // legacy Supabase client here: a stale/unconfigured Supabase connection
+  // must never prevent a telephony DID from resolving to its organization.
+  const { rows: matches } = await _pool.query(
+    "SELECT org_id, number FROM virtual_numbers WHERE REPLACE(REPLACE(REPLACE(REPLACE(number, '+', ''), ' ', ''), '-', ''), '(', '') LIKE ?",
+    [`%${last10}`]
+  );
+
   if (matches.length > 1) {
-    // Two orgs somehow ended up owning the same number — routing an inbound
-    // call to whichever row happens to come back first would silently
-    // misroute the other org's calls. isNumberAvailable() below is meant to
-    // stop this at write time, but flag loudly if it ever happens anyway.
-    log.error(`❌ [db.findOrgIdForNumber] Number "${number}" matches ${matches.length} orgs (${matches.map((m) => m.org_id).join(", ")}) — routing to the first match, but this indicates a duplicate virtual_numbers row that should be fixed.`);
+    log.error(`❌ [db.findOrgIdForNumber] Number "${number}" matches ${matches.length} orgs (${matches.map((m) => m.org_id).join(", ")}) — duplicate virtual_numbers ownership detected.`);
   }
   if (matches.length) return matches[0].org_id;
 
-  const last10 = digitsOnly.slice(-10);
-  const { data: channels, error: chErr } = await supabase
-    .from("channels")
-    .select("org_id, external_id")
-    .eq("type", "vobiz");
-  if (chErr) throw new Error(`[db.findOrgIdForNumber] channels: ${chErr.message}`);
+  // Fallback to the Vobiz channel's external_id for numbers that were
+  // connected before the virtual_numbers row was created.
+  const { rows: channels } = await _pool.query(
+    "SELECT org_id, external_id FROM channels WHERE type = ?",
+    ["vobiz"]
+  );
   const channelMatch = (channels || []).find((row) =>
     String(row.external_id || "").replace(/[^\d]/g, "").endsWith(last10)
   );
@@ -2296,34 +2297,26 @@ async function assignAgentToNumber(agentId, numberId, orgId) {
 /** Returns the agent config for a given phone number, or null if none assigned. */
 async function getAgentForNumber(phoneNumber) {
   if (!phoneNumber) return null;
-  // NOTE: the mysql.js query-builder shim doesn't implement .not(), so
-  // ".not('agent_id','is',null)" used to throw a TypeError on every call —
-  // silently caught by every caller's try/catch, which meant this function
-  // NEVER actually returned an agent and the inbound "no agent assigned"
-  // reject check could never trigger. Do the not-null check in JS instead.
-  // Also match on last-10-digits like findOrgIdForNumber does, instead of
-  // an exact string match — a provider's "To" can carry a "+91" prefix
-  // that doesn't exactly match how the number is stored, which would
-  // otherwise make every call look unassigned even when an agent is set.
   const digitsOnly = String(phoneNumber).replace(/[^\d]/g, "");
   if (!digitsOnly) return null;
-  const { data: numbers, error: numErr } = await supabase
-    .from("virtual_numbers")
-    .select("agent_id, org_id, number");
-  if (numErr) return null;
-  const match = (numbers || []).find((row) =>
-    String(row.number).replace(/[^\d]/g, "").endsWith(digitsOnly.slice(-10))
+  const last10 = digitsOnly.slice(-10);
+
+  const { rows: numbers } = await _pool.query(
+    "SELECT agent_id, org_id, number FROM virtual_numbers WHERE agent_id IS NOT NULL"
   );
-  if (!match || !match.agent_id) return null;
-  const { data, error } = await supabase
-    .from("org_agents")
-    .select("*")
-    .eq("id", match.agent_id)
-    .single();
-  if (error || !data) return null;
-  const agent = agentFromRow(data);
-  // Disabled agent: fall back to org-level config the same way an
-  // unassigned number does, instead of answering with a paused agent.
+  const match = (numbers || []).find((row) =>
+    String(row.number || "").replace(/[^\d]/g, "").endsWith(last10)
+  );
+  if (!match?.agent_id) return null;
+
+  const { rows: agents } = await _pool.query(
+    "SELECT * FROM org_agents WHERE id = ? LIMIT 1",
+    [match.agent_id]
+  );
+  const row = agents?.[0];
+  if (!row) return null;
+
+  const agent = agentFromRow(row);
   if (agent.active === false) return null;
   return agent;
 }
