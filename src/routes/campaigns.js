@@ -287,7 +287,7 @@ router.delete("/dialer-tasks/:id", requireAuth, requireOrganizationAdmin, async 
       userEmail: req.userEmail,
     });
 
-    global.broadcastLog(\`🗑️ Deleted campaign task: \${result.taskName}\`, {
+    global.broadcastLog(`🗑️ Deleted campaign task: ${result.taskName}`, {
       type: "campaign-task-deleted",
       taskId: result.taskId,
       orgId: req.orgId,
