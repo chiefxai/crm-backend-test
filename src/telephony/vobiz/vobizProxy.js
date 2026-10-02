@@ -47,6 +47,7 @@ function registerPostCallWorker() {
 
 const { createVobizOutboundAudioPlayer } = require("./vobizOutboundAudio");
 const { normalizePcmFrame } = require("../media/audioPipeline");
+const { createCallRecorder, RECORDING_MODES } = require("../recording/manager");
 const { createToolCallDeduper } = require("../conversation/turnGuard");
 const { buildVobizSessionPrompt } = require("./vobizCallPrompt");
 const { runOutboundPrewarm, generateOpeningAudio } = require("./vobizOutboundPrewarm");
@@ -837,36 +838,20 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   if (!authorizedCallId || !authorizedOrgId) throw new Error("Vobiz stream authorization context is required");
 
   const generatedCallId = `call_vobiz_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const tempDir = path.join(__dirname, "../../../temp");
-  if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
-  const tempPcmPath = path.join(tempDir, `${generatedCallId}.pcm`);
-  const recordStream = fs.createWriteStream(tempPcmPath);
-  // A call can end while Gemini still has an in-flight callback. Never let a
-  // late audio frame write to an ended/error stream: Node treats an
-  // unhandled WriteStream error as a process-level crash.
-  let recordStreamClosed = false;
-  recordStream.on("error", (err) => {
-    recordStreamClosed = true;
-    log.error(`❌ Vobiz recording stream error [${generatedCallId}]:`, err.message);
+  // Provider-agnostic recording controller. Vobiz currently uses the
+  // platform recorder through this shared interface; future provider adapters
+  // can be plugged in without changing the live media or post-call pipeline.
+  const recordingMode = process.env.RECORDING_MODE || RECORDING_MODES.AUTO;
+  const callRecorder = createCallRecorder({
+    provider: "vobiz",
+    callId: generatedCallId,
+    orgId: authorizedCallId,
+    mode: recordingMode,
+    uploadPlatformRecording: (wavBuffer, id) => callFinalizer.uploadRecording("vobiz", id, wavBuffer),
+    logger: log,
   });
-  recordStream.on("finish", () => { recordStreamClosed = true; });
-  const writeRecording = (buffer) => {
-    if (recordStreamClosed || recordStream.destroyed || recordStream.writableEnded) return false;
-    try {
-      return recordStream.write(buffer);
-    } catch (err) {
-      recordStreamClosed = true;
-      log.error(`❌ Vobiz recording write failed [${generatedCallId}]:`, err.message);
-      return false;
-    }
-  };
-  const endRecording = () => {
-    if (recordStreamClosed || recordStream.destroyed || recordStream.writableEnded) return;
-    try { recordStream.end(); } catch (err) {
-      recordStreamClosed = true;
-      log.error(`❌ Vobiz recording close failed [${generatedCallId}]:`, err.message);
-    }
-  };
+  const writeRecording = (buffer) => callRecorder.write(buffer);
+  const endRecording = () => { void callRecorder.finalize(); };
   const transcriptLines = [];
   /** Ring-time Live may save lead_responses under a temporary id before adopt. */
   let alternateCallIdsForFinalize = [];
@@ -1629,20 +1614,11 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     // tool-calls hadn't already saved the answers.
     const sanitizedCalleeForFinalize = calleeNumber ? calleeNumber.replace(/[\s\-\(\)\+]+/g, "") : null;
 
-    // Recording upload happens once, right here, synchronously — never
-    // inside the queued job. The temp PCM file is deleted the moment it's
-    // read, so a retried job re-reading it would find nothing there.
-    let recordingUrl = null;
-    if (fs.existsSync(tempPcmPath)) {
-      try {
-        const rawPcm = fs.readFileSync(tempPcmPath);
-        const wavBuffer = Buffer.concat([getWavHeader(rawPcm.length), rawPcm]);
-        recordingUrl = await callFinalizer.uploadRecording("vobiz", generatedCallId, wavBuffer);
-      } finally {
-        try { fs.unlinkSync(tempPcmPath); } catch {}
-      }
-    }
-
+    // Finalize through the shared recording manager before enqueueing the
+    // retryable post-call job. The queue receives only a durable URL.
+    const recordingResult = await callRecorder.finalize();
+    const recordingUrl = recordingResult?.url || null;
+    log.info(`🎙️ [vobiz] Recording finalized for ${generatedCallId}: source=${recordingResult?.source || "none"} url=${recordingUrl ? "available" : "none"}`);
     const workflowQuestions = postCallAgents.normalizeQuestions(
       vobizCallQuestionsForFinalize.get(callId)
         || vobizCallQuestions.get(callId)
