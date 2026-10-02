@@ -12,7 +12,7 @@
 // ============================================================
 
 const db = require("../db/repository");
-const { normalizePhone } = require("../lib/phone");
+const { normalizePhone, normalizePhoneInput } = require("../lib/phone");
 
 function requireDb() {
   if (!db.supabase) {
@@ -273,13 +273,13 @@ async function createRecord(orgId, objectKey, body) {
   }
   const { stageKey, ...data } = body;
 
-  // Phone is a canonical identity field. Normalize every phone-typed
-  // object field before persistence so 9876543210 and +919876543210
-  // cannot become two different contact identities.
+  // Phone is a canonical identity field. When a phone field exists but the
+  // user leaves it empty, keep the configured country prefix as the editable
+  // starting value. A bare prefix is never considered a complete phone for
+  // contact matching/deduplication.
   for (const field of object.fields) {
-    if (field.type === "phone" && data[field.key]) {
-      data[field.key] = normalizePhone(data[field.key]);
-    }
+    if (field.type !== "phone") continue;
+    data[field.key] = normalizePhoneInput(data[field.key]);
   }
 
   validateAgainstFields(object.fields, data);
