@@ -27,7 +27,17 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
   const To = req.body.To || req.query.To;
   const CallUUID = req.body.CallUUID || req.query.CallUUID || req.body.callId || req.body.CallSid;
 
-  log.info(`🔎 Vobiz /incoming webhook — CallUUID="${CallUUID}" From="${String(From || "").replace(/.(?=.{4})/g, "*")}" To="${String(To || "").replace(/.(?=.{4})/g, "*")}"`);
+  const webhookEvent = String(req.body.Event || req.query.Event || "").trim().toLowerCase();
+  const callStatus = String(req.body.CallStatus || req.query.CallStatus || "").trim().toLowerCase();
+  const isHangupEvent = webhookEvent === "hangup"
+    || webhookEvent === "hang_up"
+    || callStatus === "completed"
+    || callStatus === "failed"
+    || callStatus === "busy"
+    || callStatus === "no-answer"
+    || callStatus === "no answer";
+
+  log.info(`🔎 Vobiz /incoming webhook — CallUUID="${CallUUID}" Event="${webhookEvent || "unknown"}" CallStatus="${callStatus || "unknown"}" From="${String(From || "").replace(/.(?=.{4})/g, "*")}" To="${String(To || "").replace(/.(?=.{4})/g, "*")}"`);
 
   const aliasedFromPhone = findCachedCallIdByPhone(To) || findCachedCallIdByPhone(From);
   aliasVobizCallState([CallUUID, aliasedFromPhone, ...collectVobizCallIds(req.body), ...collectVobizCallIds(req.query)]);
@@ -78,11 +88,11 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
   // inbound calls only learn their org from the dialed virtual number here.
   // Previously this lookup happened after the Hangup finalizer, so inbound
   // Hangup webhooks saw no orgId and never created call_logs/recordings.
-  let hangupOrgId = (req.body.Event === "Hangup" && CallUUID)
+  let hangupOrgId = (isHangupEvent && CallUUID)
     ? (vobizCallOrgs.get(CallUUID) || null)
     : null;
 
-  if (req.body.Event === "Hangup" && CallUUID && !hangupOrgId && To) {
+  if (isHangupEvent && CallUUID && !hangupOrgId && To) {
     try {
       hangupOrgId = await db.findOrgIdForNumber(To);
       if (hangupOrgId) {
@@ -99,7 +109,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
     }
   }
 
-  if (req.body.Event === "Hangup" && CallUUID) {
+  if (isHangupEvent && CallUUID) {
     // finalizeCall() cleans the in-memory org/call caches, so capture the
     // org before awaiting it. The captured value is also used by the
     // fallback and authoritative-duration paths below.
@@ -170,7 +180,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
   // the Hangup webhook confirms the call actually connected AND finalize()
   // above found a real finalizeCall() to run (so this call already has its
   // own call_logs row from that path, not the synthetic fallback above).
-  if (req.body.Event === "Hangup" && CallUUID && req.body.CallStatus === "completed") {
+  if (isHangupEvent && CallUUID && req.body.CallStatus === "completed") {
     const internalCallId = vobizCallUuidToInternalId.get(CallUUID);
     const realDuration = parseInt(req.body.Duration, 10);
     if (internalCallId && !Number.isNaN(realDuration)) {
