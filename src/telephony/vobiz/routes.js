@@ -73,9 +73,31 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
   // they're handled here in one place instead of split across separate
   // no-answer/AMD checks that could each miss a case the others don't
   // cover.
-  const hangupOrgId = (req.body.Event === "Hangup" && CallUUID)
+  // Resolve inbound ownership BEFORE finalization. Outbound calls already
+  // have org/direction cached by triggerVobizOutboundCall(), but genuine
+  // inbound calls only learn their org from the dialed virtual number here.
+  // Previously this lookup happened after the Hangup finalizer, so inbound
+  // Hangup webhooks saw no orgId and never created call_logs/recordings.
+  let hangupOrgId = (req.body.Event === "Hangup" && CallUUID)
     ? (vobizCallOrgs.get(CallUUID) || null)
     : null;
+
+  if (req.body.Event === "Hangup" && CallUUID && !hangupOrgId && To) {
+    try {
+      hangupOrgId = await db.findOrgIdForNumber(To);
+      if (hangupOrgId) {
+        vobizCallOrgs.set(CallUUID, hangupOrgId);
+        vobizCallDirection.set(CallUUID, "inbound");
+        setTimeout(() => {
+          vobizCallOrgs.delete(CallUUID);
+          vobizCallDirection.delete(CallUUID);
+        }, 1800000);
+        log.info(`📞 Vobiz inbound Hangup ownership resolved — CallUUID="${CallUUID}" orgId="${hangupOrgId}" direction="inbound"`);
+      }
+    } catch (err) {
+      log.error("❌ Vobiz inbound Hangup org lookup failed:", err.message);
+    }
+  }
 
   if (req.body.Event === "Hangup" && CallUUID) {
     // finalizeCall() cleans the in-memory org/call caches, so capture the
@@ -130,7 +152,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
           callerNumber: calleeNumber,
           duration,
           status,
-          direction: "outbound",
+          direction: vobizCallDirection.get(CallUUID) || "outbound",
           createdAt: new Date().toISOString(),
           providerCallSid: CallUUID,
           ...db.computeRetryFields(attemptNumber, retryContext?.retryPolicy || db.DEFAULT_RETRY_POLICY, calleeNumber),
