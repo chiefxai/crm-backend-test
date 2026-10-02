@@ -419,7 +419,7 @@ async function handlePlaceDialJob(data) {
     }
 
     const result = await telephony.triggerOutboundCall(provider, orgId, leadPhone, {
-      baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId, campaignId: campaignId || taskId, retryPolicy,
+      baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId, campaignId: campaignId || taskId, retryPolicy, autoDialRunId,
     });
 
     // The provider can answer/hang up very quickly. The finalizer may have
