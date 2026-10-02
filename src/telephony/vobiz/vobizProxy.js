@@ -845,7 +845,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   const callRecorder = createCallRecorder({
     provider: "vobiz",
     callId: generatedCallId,
-    orgId: authorizedCallId,
+    orgId: authorizedOrgId,
     mode: recordingMode,
     uploadPlatformRecording: (wavBuffer, id) => callFinalizer.uploadRecording("vobiz", id, wavBuffer),
     logger: log,
