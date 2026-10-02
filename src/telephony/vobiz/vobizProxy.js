@@ -1386,7 +1386,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             vobizWs,
             voiceName,
             finalPrompt,
-            recordStream,
+            writeRecording,
             transcriptLines,
             generatedCallId,
             () => streamId,
