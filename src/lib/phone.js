@@ -11,7 +11,20 @@
  *   +919876543210   → +919876543210  (already correct)
  *   +14155552671    → +14155552671   (non-Indian, returned as-is after stripping spaces)
  */
-function normalizePhone(raw) {
+const DEFAULT_PHONE_COUNTRY = String(process.env.DEFAULT_PHONE_COUNTRY || "IN").toUpperCase();
+const COUNTRY_CODES = {
+  IN: "+91",
+  US: "+1",
+  CA: "+1",
+  GB: "+44",
+  AE: "+971",
+};
+
+function getDefaultCountryCode(country = DEFAULT_PHONE_COUNTRY) {
+  return COUNTRY_CODES[String(country || DEFAULT_PHONE_COUNTRY).toUpperCase()] || "+91";
+}
+
+function normalizePhone(raw, options = {}) {
   if (!raw) return raw;
   let n = String(raw).replace(/[\s\-\(\)]/g, '');
 
@@ -37,6 +50,24 @@ function normalizePhone(raw) {
  *   +14155552671   → +1 415 555 2671  (US-style grouping)
  *   anything else  → returned as-is
  */
+/**
+ * Normalize a user-input phone field while preserving the distinction between
+ * an empty/incomplete number and a real E.164 phone identity.
+ * For now India is the default; set DEFAULT_PHONE_COUNTRY when expanding.
+ */
+function normalizePhoneInput(raw, options = {}) {
+  const countryCode = getDefaultCountryCode(options.country || DEFAULT_PHONE_COUNTRY);
+  if (!raw || !String(raw).trim()) return countryCode;
+  const value = normalizePhone(raw, options);
+  return value || countryCode;
+}
+
+function isCompletePhone(raw) {
+  if (!raw) return false;
+  const n = String(raw).trim();
+  return /^\+\d{7,15}$/.test(n) && n.length > 3;
+}
+
 function formatPhone(raw) {
   if (!raw) return raw;
   const n = normalizePhone(raw);
@@ -80,4 +111,4 @@ function looksLikeRealName(raw) {
   return !NAME_PLACEHOLDERS.has(trimmed.toLowerCase());
 }
 
-module.exports = { normalizePhone, formatPhone, looksLikePhone, looksLikeRealName };
+module.exports = { normalizePhone, normalizePhoneInput, getDefaultCountryCode, isCompletePhone, formatPhone, looksLikePhone, looksLikeRealName };
