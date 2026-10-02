@@ -371,7 +371,6 @@ async function remove(entity, orgId, id) {
   if (error) throw new Error(`[db.remove:${entity}] ${error.message}`);
   return true;
 }
-
 function parseJsonObject(value, fallback = {}) {
   if (value && typeof value === "object") return value;
   if (typeof value !== "string" || !value.trim()) return fallback;
@@ -2306,7 +2305,7 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
       const archiveRow = costArchiveRowFromSnapshot(archiveSnapshot, deletedByEmail);
       if (!archiveRow.id) archiveRow.id = require("crypto").randomUUID();
       await client.query(
-        `INSERT INTO `org_cost_archive` (id, org_id, org_name, workspace_name, industry, org_created_at, deleted_by_email, billing_period_end, ai_minutes_used, cost_per_minute_inr, ai_minutes_cost_inr, phone_charges, phone_cost_per_minute, call_provider_key, call_provider_label, ai_total_tokens, ai_input_tokens, ai_output_tokens, ai_call_count, ai_session_count, ai_token_provider_key, ai_token_provider_label, ai_token_rate_per_1k, ai_token_unit, ai_token_tax_percent, ai_token_base_cost_inr, ai_token_tax_amount_inr, ai_token_total_cost_inr, snapshot, created_at)
+        `INSERT INTO \`org_cost_archive\` (id, org_id, org_name, workspace_name, industry, org_created_at, deleted_by_email, billing_period_end, ai_minutes_used, cost_per_minute_inr, ai_minutes_cost_inr, phone_charges, phone_cost_per_minute, call_provider_key, call_provider_label, ai_total_tokens, ai_input_tokens, ai_output_tokens, ai_call_count, ai_session_count, ai_token_provider_key, ai_token_provider_label, ai_token_rate_per_1k, ai_token_unit, ai_token_tax_percent, ai_token_base_cost_inr, ai_token_tax_amount_inr, ai_token_total_cost_inr, snapshot, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            org_name=VALUES(org_name), workspace_name=VALUES(workspace_name), industry=VALUES(industry),
@@ -2359,7 +2358,7 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
     ];
 
     for (const table of ordered) {
-      await client.query(`DELETE FROM `${table}` WHERE org_id = ?`, [orgId]);
+      await client.query(`DELETE FROM \`${table}\` WHERE org_id = ?`, [orgId]);
     }
 
     // Cloud-project metadata uses organization_id rather than org_id.
