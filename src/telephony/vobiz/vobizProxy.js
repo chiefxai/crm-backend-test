@@ -1466,7 +1466,6 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           }).catch(err => {
             log.error("❌ Gemini session failed for Vobiz:", err.message);
             void callRecorder.finalize();
-            try { fs.unlinkSync(tempPcmPath); } catch {}
             try { if (vobizWs.readyState === 1) vobizWs.close(); } catch {}
             return null;
           });
@@ -2156,8 +2155,9 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
 
               // Save to recording file without allowing a late Gemini frame
               // to crash the Node process after the call has already ended.
-              if (recordingSink.writeRecording) recordingSink.writeRecording(pcm16k, { track: "agent" });
-              else if (!recordStream.destroyed && !recordStream.writableEnded) recordStream.write(pcm16k);
+              if (recordingSink.writeRecording) {
+                recordingSink.writeRecording(pcm16k, { track: "agent" });
+              }
             }
           }
         }
