@@ -135,6 +135,29 @@ router.post("/calls/:id/analyze", requireAuth, async (req, res) => {
 });
 
 // ── Call logs (org CRM table) ──
+// Authenticated recording resolver. The browser never receives an application
+// JWT in the S3 URL; storage.resolvePlaybackUrl() returns the short-lived
+// provider URL when private signed URLs are enabled.
+router.get("/recordings/:callId/url", requireAuth, async (req, res) => {
+  try {
+    const rows = await db.getCallLogsWithContacts(req.orgId, { callId: req.params.callId });
+    const call = rows?.[0];
+    if (!call) return res.status(404).json({ error: "Call not found" });
+    if (!call.recordingUrl) return res.status(404).json({ error: "Recording not available" });
+    const url = await storage.resolvePlaybackUrl(call.recordingUrl);
+    if (!url) return res.status(404).json({ error: "Recording not available" });
+    res.json({
+      url,
+      expiresAt: null,
+      source: "object-storage",
+      contentType: "audio/wav",
+    });
+  } catch (err) {
+    log.error("❌ /recordings/:callId/url error:", err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
 router.get("/call-logs", requireAuth, async (req, res) => {
   try {
     const pagination = parsePagination(req.query);
