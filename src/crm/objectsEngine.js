@@ -12,6 +12,7 @@
 // ============================================================
 
 const db = require("../db/repository");
+const { normalizePhone } = require("../lib/phone");
 
 function requireDb() {
   if (!db.supabase) {
@@ -218,20 +219,18 @@ function extractRecordName(data) {
 // to greet them by name and skip re-asking for it.
 async function findRecordByPhone(orgId, phone) {
   requireDb();
-  if (!phone) return null;
-  const digits = String(phone).replace(/[^\d]/g, "");
-  if (!digits) return null;
-  const last10 = digits.slice(-10);
+  const normalizedTarget = normalizePhone(phone);
+  if (!normalizedTarget) return null;
 
   const { data: records, error } = await db.supabase
     .from("object_records")
-    .select("*")
+    .select("*, object_id")
     .eq("org_id", orgId);
   if (error) throw new Error(`[objectsEngine.findRecordByPhone] ${error.message}`);
 
   for (const row of records || []) {
     const values = Object.values(row.data || {});
-    const matches = values.some((v) => typeof v === "string" && v.replace(/[^\d]/g, "").endsWith(last10) && v.replace(/[^\d]/g, "").length >= 7);
+    const matches = values.some((v) => typeof v === "string" && normalizePhone(v) === normalizedTarget);
     if (matches) return { id: row.id, name: extractRecordName(row.data) };
   }
   return null;
@@ -254,8 +253,14 @@ async function createContactFromCall(orgId, name, phone) {
   const phoneField = primary.fields.find((f) => f.type === "phone") || primary.fields.find((f) => f.key === "phone");
   if (!nameField) return null;
 
+  const normalizedPhone = phone ? normalizePhone(phone) : null;
+  if (normalizedPhone) {
+    const existing = await findRecordByPhone(orgId, normalizedPhone);
+    if (existing) return existing;
+  }
+
   const data = { [nameField.key]: name };
-  if (phoneField && phone) data[phoneField.key] = phone;
+  if (phoneField && normalizedPhone) data[phoneField.key] = normalizedPhone;
   return createRecord(orgId, primary.key, data);
 }
 
@@ -267,6 +272,16 @@ async function createRecord(orgId, objectKey, body) {
     throw err;
   }
   const { stageKey, ...data } = body;
+
+  // Phone is a canonical identity field. Normalize every phone-typed
+  // object field before persistence so 9876543210 and +919876543210
+  // cannot become two different contact identities.
+  for (const field of object.fields) {
+    if (field.type === "phone" && data[field.key]) {
+      data[field.key] = normalizePhone(data[field.key]);
+    }
+  }
+
   validateAgainstFields(object.fields, data);
 
   let stageId = null;
@@ -294,6 +309,13 @@ async function patchRecord(orgId, objectKey, recordId, body) {
     throw err;
   }
   const { stageKey, ...patch } = body;
+
+  // Apply the same canonical phone representation on updates.
+  for (const field of object.fields) {
+    if (field.type === "phone" && patch[field.key]) {
+      patch[field.key] = normalizePhone(patch[field.key]);
+    }
+  }
 
   const { data: existing, error: getErr } = await db.supabase
     .from("object_records")
