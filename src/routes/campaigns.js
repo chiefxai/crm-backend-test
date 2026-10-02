@@ -110,7 +110,15 @@ router.post("/workflows/sync", requireAuth, async (req, res) => {
 // ── Dialer tasks + retries ──
 router.get("/dialer-tasks", requireAuth, async (req, res) => {
   try {
-    const rows = await db.getDialerTasksWithContacts(req.orgId);
+    let rows;
+    try {
+      rows = await db.getDialerTasksWithContacts(req.orgId);
+    } catch (joinErr) {
+      // Contact enrichment must never make the Dialer unavailable. Fall back
+      // to the canonical task rows; individual call results can still render.
+      log.error("❌ /api/dialer-tasks contact enrichment failed:", joinErr.message);
+      rows = await db.list("dialertasks", req.orgId);
+    }
     // Each task's callResults[leadId].recordingUrl is a bare object key in
     // STORAGE_USE_SIGNED_URLS mode (see storage/index.js) — resolve every
     // one to a fresh playable link, in parallel across the whole page of
