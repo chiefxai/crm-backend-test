@@ -110,7 +110,7 @@ router.post("/workflows/sync", requireAuth, async (req, res) => {
 // ── Dialer tasks + retries ──
 router.get("/dialer-tasks", requireAuth, async (req, res) => {
   try {
-    const rows = await db.list("dialertasks", req.orgId);
+    const rows = await db.getDialerTasksWithContacts(req.orgId);
     // Each task's callResults[leadId].recordingUrl is a bare object key in
     // STORAGE_USE_SIGNED_URLS mode (see storage/index.js) — resolve every
     // one to a fresh playable link, in parallel across the whole page of
