@@ -787,6 +787,7 @@ async function runSchemaMigration(client) {
       ["idx_calls_org_created", "calls", ["org_id", "created_at"]],
       ["idx_lead_responses_org_call_created", "lead_responses", ["org_id", "call_id", "created_at"]],
       ["idx_enquiries_org_status_created", "enquiries", ["org_id", "status", "created_at"]],
+      ["idx_enquiries_org_lead", "enquiries", ["org_id", "lead_id"]],
       ["idx_messages_conversation_created", "messages", ["conversation_id", "created_at"]],
       ["idx_conversations_org_last_message", "conversations", ["org_id", "last_message_at"]],
       ["idx_workflow_runs_org_status_created", "workflow_runs", ["org_id", "status", "started_at"]],
@@ -844,6 +845,21 @@ async function runSchemaMigration(client) {
           `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
         );
       }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
     }
 
     for (const flagKey of ["leads", "pipeline"]) {
