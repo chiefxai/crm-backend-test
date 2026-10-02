@@ -852,6 +852,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   });
   const writeRecording = (buffer) => callRecorder.write(buffer);
   const endRecording = () => { void callRecorder.finalize(); };
+  await callRecorder.start();
   const transcriptLines = [];
   /** Ring-time Live may save lead_responses under a temporary id before adopt. */
   let alternateCallIdsForFinalize = [];
