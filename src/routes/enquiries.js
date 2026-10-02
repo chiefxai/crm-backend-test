@@ -14,11 +14,11 @@ router.get("/", requireAuth, async (req, res) => {
     if (!pagination) {
       // Either the full unpaginated list, or (used by the call-detail
       // sidebar) just one call's own enquiries — no openCount needed.
-      const rows = await db.list("enquiries", req.orgId, { callId });
+      const rows = await db.getEnquiriesWithContacts(req.orgId, { callId });
       return res.json(callId ? { rows } : rows);
     }
 
-    const result = await db.list("enquiries", req.orgId, { ...pagination, callId });
+    const result = await db.getEnquiriesWithContacts(req.orgId, { ...pagination, callId });
 
     // The page view's header shows "N still open" across the WHOLE table,
     // not just this page — a cheap count-only query alongside the paged
@@ -37,7 +37,14 @@ router.get("/", requireAuth, async (req, res) => {
 
 router.patch("/:id", requireAuth, async (req, res) => {
   try {
-    const updated = await db.patch("enquiries", req.orgId, req.params.id, req.body);
+    const patch = { ...(req.body || {}) };
+    // Prefer the canonical contact relationship. If the caller only supplies
+    // callId, resolve its lead_id so future reads can JOIN directly to leads.
+    if (!patch.leadId && patch.callId) {
+      const call = await db.getCallLogById(req.orgId, patch.callId);
+      if (call?.leadId) patch.leadId = call.leadId;
+    }
+    const updated = await db.patch("enquiries", req.orgId, req.params.id, patch);
     if (!updated) return res.status(404).json({ error: "Enquiry not found" });
     res.json(updated);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
