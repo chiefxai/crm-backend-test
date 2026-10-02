@@ -1495,16 +1495,23 @@ async function supersedeConflictingPendingCallLogs(orgId, keepRow) {
 // frontend can chip them "Callback" vs "Not Answered" instead of lumping
 // every pending redial under one label.
 async function getScheduledCallbacks(orgId) {
-  const { data, error } = await supabase
-    .from("call_logs")
-    .select("*")
-    .eq("org_id", orgId)
-    .in("status", ["Callback Scheduled", "No Answer", "Answering Machine"])
-    .eq("retry_status", "pending")
-    .order("next_retry_at", { ascending: true });
-  if (error) throw new Error(`[db.getScheduledCallbacks] ${error.message}`);
+  const { rows: joinedRows } = await _pool.query(`
+    SELECT cl.*, l.name AS contact_name, l.phone AS contact_phone
+      FROM call_logs cl
+      LEFT JOIN leads l ON l.org_id = cl.org_id AND l.id = cl.lead_id
+     WHERE cl.org_id = ?
+       AND cl.status IN ('Callback Scheduled', 'No Answer', 'Answering Machine')
+       AND cl.retry_status = 'pending'
+     ORDER BY cl.next_retry_at ASC`, [orgId]);
 
-  const allRows = (data || []).map((row) => fromDbRow("calllogs", row));
+  const allRows = (joinedRows || []).map((row) => {
+    const api = fromDbRow("calllogs", row);
+    api.contactId = row.lead_id || null;
+    api.contactName = row.contact_name || null;
+    api.contactPhone = row.contact_phone || null;
+    if (row.contact_name) api.leadName = row.contact_name;
+    return api;
+  });
   const rows = dedupePendingScheduleRows(allRows);
   await reconcilePendingScheduleDuplicates(orgId, allRows, rows);
 
