@@ -851,7 +851,6 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     logger: log,
   });
   const writeRecording = (buffer) => callRecorder.write(buffer);
-  const endRecording = () => { void callRecorder.finalize(); };
   await callRecorder.start();
   const transcriptLines = [];
   /** Ring-time Live may save lead_responses under a temporary id before adopt. */
@@ -1440,7 +1439,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             return session;
           }).catch(err => {
             log.error("❌ Gemini session failed for Vobiz:", err.message);
-            endRecording();
+            void callRecorder.finalize();
             try { fs.unlinkSync(tempPcmPath); } catch {}
             try { if (vobizWs.readyState === 1) vobizWs.close(); } catch {}
             return null;
@@ -1526,7 +1525,6 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     isFinalized = true;
     isActive = false;
     silenceWatchdog.stop();
-    endRecording();
     const duration = Math.round((Date.now() - startTime) / 1000);
     if (!recordStreamClosed) {
       const RECORD_FINISH_TIMEOUT_MS = 5000;
