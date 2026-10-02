@@ -17,7 +17,6 @@
 const { CognitoJwtVerifier } = require('aws-jwt-verify');
 const {
   CognitoIdentityProviderClient,
-  ListUsersCommand,
   AdminCreateUserCommand,
   AdminSetUserPasswordCommand,
   AdminGetUserCommand,
@@ -261,7 +260,6 @@ async function deleteUser(username) {
 
 module.exports = {
   verifyToken,
-  resolveIdentity,
   decodeToken,
   provisionUser,
   syncUserRole,
