@@ -1103,7 +1103,11 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             || createVobizOutboundAudioPlayer(vobizWs, () => streamId, { callId: generatedCallId });
           if (adoptedRingLiveSession) {
             outboundAudioPlayer.setWebSocket(vobizWs);
-            outboundAudioPlayer.setWriteRecording(writeRecording);
+            // Recording is owned by the Gemini session's recording sink.
+            // Do not attach the same sink to the audio player here: that
+            // would append every agent PCM frame twice to the platform
+            // recording on adopted/prewarmed calls.
+            outboundAudioPlayer.setWriteRecording(null);
             outboundAudioPlayer.clearQueue();
             log.info(`🔊 Cleared ring-time outbound audio backlog on adopt for call ${callId}`);
             geminiSessionPromise = adoptedRingLiveSession.sessionPromise;
