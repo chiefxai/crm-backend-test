@@ -134,13 +134,66 @@ async function signedUrl(key, expiresIn = SIGNED_URL_TTL_SECONDS) {
 // forever — so it can't ever be served stale/expired, and turning signed
 // mode on/off doesn't require touching already-stored rows either way.
 // Safe to call unconditionally on any recording url value, in either mode.
+function objectKeyFromStoredValue(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!/^https?:\/\//i.test(raw)) return raw.replace(/^\/+/, "");
+
+  try {
+    const url = new URL(raw);
+    const bucket = BUCKET();
+    const pathname = decodeURIComponent(url.pathname || "").replace(/^\/+/, "");
+
+    const publicBase = process.env.STORAGE_PUBLIC_URL;
+    if (publicBase) {
+      const base = new URL(publicBase);
+      const basePath = base.pathname.replace(/^\/+|\/+$/g, "");
+      if (url.origin === base.origin && (!basePath || pathname.startsWith(basePath + "/"))) {
+        return basePath ? pathname.slice(basePath.length + 1) : pathname;
+      }
+    }
+
+    if (
+      url.hostname === bucket + ".s3.amazonaws.com" ||
+      url.hostname.startsWith(bucket + ".s3.") ||
+      url.hostname === bucket + ".s3.dualstack.amazonaws.com"
+    ) {
+      return pathname;
+    }
+
+    const endpoint = process.env.STORAGE_ENDPOINT;
+    if (endpoint) {
+      const endpointUrl = new URL(endpoint);
+      if (url.origin === endpointUrl.origin) {
+        const prefix = bucket + "/";
+        return pathname.startsWith(prefix) ? pathname.slice(prefix.length) : pathname;
+      }
+    }
+
+    if (url.searchParams.has("X-Amz-Signature") && pathname) {
+      return pathname.startsWith(bucket + "/") ? pathname.slice(bucket.length + 1) : pathname;
+    }
+  } catch (err) {
+    log.warn("⚠️ [storage] Could not parse stored playback URL: " + err.message);
+  }
+
+  return null;
+}
+
 async function resolvePlaybackUrl(value, expiresIn = SIGNED_URL_TTL_SECONDS) {
   if (!value) return value;
-  if (/^https?:\/\//i.test(value)) return value;
+  const raw = String(value);
+  const key = objectKeyFromStoredValue(value);
+
+  // External provider URLs that are not one of our S3-compatible objects
+  // remain untouched. Known storage URLs are always refreshed in production.
+  if (!key) return /^https?:\/\//i.test(raw) ? raw : null;
+
   try {
-    return await signedUrl(value, expiresIn);
+    if (/^https?:\/\//i.test(raw) && !useSignedUrls()) return raw;
+    return await signedUrl(key, expiresIn);
   } catch (err) {
-    log.error(`❌ [storage] Failed to sign playback URL for key "${value}":`, err.message);
+    log.error("❌ [storage] Failed to sign playback URL for key \"" + key + "\":", err.message);
     return null;
   }
 }
