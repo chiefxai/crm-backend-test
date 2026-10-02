@@ -444,6 +444,11 @@ async function create(entity, orgId, apiObj) {
   assertEntity(entity);
   const { table } = ENTITIES[entity];
   const input = { ...(apiObj || {}) };
+
+  if (entity === "leads" && input.phone) {
+    input.phone = require("../lib/phone").normalizePhone(input.phone);
+  }
+
   // Enquiries are associated with a call and therefore inherit its canonical
   // contact relationship. Persist the lead_id once so every later read can
   // JOIN directly to Contact Directory.
@@ -461,7 +466,11 @@ async function create(entity, orgId, apiObj) {
 async function patch(entity, orgId, id, apiPatch) {
   assertEntity(entity);
   const { table } = ENTITIES[entity];
-  const row = toDbRow(entity, apiPatch);
+  const input = { ...(apiPatch || {}) };
+  if (entity === "leads" && input.phone) {
+    input.phone = require("../lib/phone").normalizePhone(input.phone);
+  }
+  const row = toDbRow(entity, input);
   const { data, error } = await supabase
     .from(table)
     .update(row)
@@ -1854,12 +1863,18 @@ async function isNumberAvailable(number, orgId) {
 // to greet them by name and skip re-asking for it.
 async function findLeadByPhone(orgId, phone) {
   if (!phone) return null;
-  const digits = String(phone).replace(/[^\d]/g, "");
-  if (!digits) return null;
-  const last10 = digits.slice(-10);
+  const { normalizePhone } = require("../lib/phone");
+  const normalizedTarget = normalizePhone(phone);
+  if (!normalizedTarget) return null;
+  const targetDigits = normalizedTarget.replace(/\D/g, "");
+  const last10 = targetDigits.slice(-10);
   const { data, error } = await supabase.from("leads").select("id, name, phone").eq("org_id", orgId);
   if (error) throw new Error(`[db.findLeadByPhone] ${error.message}`);
-  const match = (data || []).find((row) => String(row.phone || "").replace(/[^\d]/g, "").endsWith(last10));
+  const match = (data || []).find((row) => {
+    const rowNormalized = normalizePhone(row.phone);
+    return rowNormalized === normalizedTarget ||
+      rowNormalized.replace(/\D/g, "").endsWith(last10);
+  });
   return match ? { id: match.id, name: match.name || null } : null;
 }
 
