@@ -310,10 +310,12 @@ async function patchRecord(orgId, objectKey, recordId, body) {
   }
   const { stageKey, ...patch } = body;
 
-  // Apply the same canonical phone representation on updates.
+  // Apply the same canonical phone representation on updates. An explicitly
+  // cleared phone field gets the configured country prefix as its starting
+  // value; a bare prefix is not treated as a real phone identity.
   for (const field of object.fields) {
-    if (field.type === "phone" && patch[field.key]) {
-      patch[field.key] = normalizePhone(patch[field.key]);
+    if (field.type === "phone" && Object.prototype.hasOwnProperty.call(patch, field.key)) {
+      patch[field.key] = normalizePhoneInput(patch[field.key]);
     }
   }
 
