@@ -807,6 +807,3403 @@ async function runSchemaMigration(client) {
         if (!isExpectedAlreadyExistsError(err)) throw err;
       }
     }
+    // Canonical phone identity migration for existing Contact Directory data.
+    try {
+      await client.query(
+        "UPDATE leads SET phone = CASE" +
+        " WHEN REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9+]', '') REGEXP '^\\+91[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN REGEXP_REPLACE(phone, '[^0-9+]', '')" +
+        " WHEN REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9+]', '') REGEXP '^[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN CONCAT('+91', REGEXP_REPLACE(phone, '[^0-9+]', ''))" +
+        " WHEN REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9+]', '') REGEXP '^0[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN CONCAT('+91', SUBSTRING(REGEXP_REPLACE(phone, '[^0-9+]', ''), 2))" +
+        " WHEN REGEXP_REPLACE(COALESCE(phone, ''), '[^0-9+]', '') REGEXP '^91[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN CONCAT('+', REGEXP_REPLACE(phone, '[^0-9+]', ''))" +
+        " ELSE phone END WHERE phone IS NOT NULL AND phone <> ''"
+      );
+      const phoneFields = await client.query(
+        "SELECT DISTINCT object_id, `key` FROM object_fields WHERE type = 'phone' AND `key` IS NOT NULL"
+      );
+      for (const field of phoneFields.rows || []) {
+        const path = '$."' + String(field.key).replace(/"/g, '\\\"') + '"';
+        const sql =
+          "UPDATE object_records SET data = JSON_SET(data, ?, CASE " +
+          "WHEN REGEXP_REPLACE(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), ''), '[^0-9+]', '') REGEXP '^\\+91[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN REGEXP_REPLACE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), '[^0-9+]', '') " +
+          "WHEN REGEXP_REPLACE(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), ''), '[^0-9+]', '') REGEXP '^[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN CONCAT('+91', REGEXP_REPLACE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), '[^0-9+]', '')) " +
+          "WHEN REGEXP_REPLACE(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), ''), '[^0-9+]', '') REGEXP '^0[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN CONCAT('+91', SUBSTRING(REGEXP_REPLACE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), '[^0-9+]', ''), 2)) " +
+          "WHEN REGEXP_REPLACE(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), ''), '[^0-9+]', '') REGEXP '^91[6-9][0-9]{9}
+    // organization. We intentionally enforce the tenant boundary at the DB
+    // level, not just in application code. Existing orphan rows are rejected
+    // before the FK is created so a migration can never silently discard data.
+    const tenantTables = Object.entries(TABLES)
+      .filter(([table, def]) => table !== "organizations" && table !== "org_cost_archive" && def.columns.org_id)
+      .map(([table]) => table);
+
+    for (const table of tenantTables) {
+      const orphanResult = await client.query(
+        `SELECT COUNT(*) AS orphan_count
+           FROM \`${table}\` t
+           LEFT JOIN organizations o ON o.id = t.org_id
+          WHERE t.org_id IS NOT NULL AND o.id IS NULL`
+      );
+      const orphanCount = Number(orphanResult.rows?.[0]?.orphan_count || 0);
+      if (orphanCount > 0) {
+        throw new Error(`[mysqlClient] referential-integrity check failed: ${table}.org_id contains ${orphanCount} orphan row(s); repair them before startup`);
+      }
+
+      const fkResult = await client.query(
+        `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+           FROM information_schema.KEY_COLUMN_USAGE
+          WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = ?
+            AND COLUMN_NAME = 'org_id'
+            AND REFERENCED_TABLE_NAME IS NOT NULL` ,
+        [table]
+      );
+      const validFk = (fkResult.rows || []).some((r) =>
+        r.REFERENCED_TABLE_NAME === "organizations" && r.REFERENCED_COLUMN_NAME === "id"
+      );
+      if (!validFk) {
+        const constraint = assertIdentifier(`fk_${table}_org`, "foreign-key constraint");
+        await client.query(
+          `ALTER TABLE \`${table}\` ADD CONSTRAINT \`${constraint}\` FOREIGN KEY (org_id) REFERENCES organizations(id) ON UPDATE CASCADE ON DELETE CASCADE`
+        );
+      }
+    }
+
+    // Backfill the canonical contact relationship for legacy enquiries.
+    // New/updated rows are written with lead_id; older rows can be recovered
+    // from their call's lead_id without changing the historical name snapshot.
+    try {
+      await client.query(`
+        UPDATE enquiries e
+        INNER JOIN call_logs cl
+          ON cl.org_id = e.org_id AND cl.id = e.call_id
+        SET e.lead_id = cl.lead_id
+        WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
+      `);
+    } catch (err) {
+      throw new Error(`[mysqlClient] enquiry contact backfill failed: ${err.message}`, { cause: err });
+    }
+
+    for (const flagKey of ["leads", "pipeline"]) {
+      try {
+        await client.query(`UPDATE organizations SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+        await client.query(`UPDATE org_members SET feature_flags = JSON_ARRAY_APPEND(COALESCE(feature_flags, JSON_ARRAY()), '$', ?) WHERE JSON_CONTAINS(COALESCE(feature_flags, JSON_ARRAY()), JSON_QUOTE(?)) = 0`, [flagKey, flagKey]);
+      } catch (err) {
+        // Backfill is part of schema initialization. A failed write here can
+        // leave tenants with an inconsistent feature-flag shape, so fail
+        // startup instead of merely logging and continuing.
+        throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
+      }
+    }
+}
+const ready = createTables().catch((err) => {
+  log.error("[mysqlClient] failed to initialize schema:", err.message);
+  throw err;
+});
+
+function genId() {
+  return crypto.randomUUID();
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function serializeJsonValue(type, value) {
+  if (type === "array" && !Array.isArray(value)) {
+    throw new TypeError("[mysqlClient] JSON array column requires an array value");
+  }
+  try {
+    return JSON.stringify(value);
+  } catch (err) {
+    throw new TypeError(`[mysqlClient] Unable to serialize JSON value: ${err.message}`, { cause: err });
+  }
+}
+
+function serializeValue(type, value) {
+  if (value === undefined || value === null) return null;
+  if (type === "json" || type === "array") return serializeJsonValue(type, value);
+  return value;
+}
+
+function deserializeValue(type, value) {
+  if (value === null || value === undefined) return value;
+  if (type !== "json" && type !== "array") return value;
+  if (typeof value !== "string") return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (type === "array" && !Array.isArray(parsed)) {
+      throw new TypeError("stored JSON value is not an array");
+    }
+    return parsed;
+  } catch (err) {
+    throw new Error(`[mysqlClient] Invalid JSON in ${type} column: ${err.message}`, { cause: err });
+  }
+}
+
+function deserializeRow(table, row) {
+  if (!row) return row;
+  const def = TABLES[table];
+  const out = {};
+  for (const [col, type] of Object.entries(def.columns)) {
+    out[col] = deserializeValue(type, row[col]);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------
+// Query builder — preserves the existing chainable application surface
+// ------------------------------------------------------------
+
+class QueryBuilder {
+  constructor(table) {
+    this.table = table;
+    this.def = TABLES[table];
+    if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
+    this.op = null;
+    this.payload = null;
+    this.filters = [];
+    this.selectOpts = {};
+    this.selectCols = "*";
+    this.wantSelect = false;
+    this.orderCol = null;
+    this.orderAsc = true;
+    this.limitN = null;
+    this.rangeFrom = null;
+    this.rangeTo = null;
+    this.searchCol = null;
+    this.searchQuery = null;
+  }
+
+  select(cols = "*", opts = {}) {
+    this.selectCols = parseSelectColumns(this.table, cols);
+    this.selectOpts = opts;
+    this.wantSelect = true;
+    if (!this.op) this.op = "select";
+    return this;
+  }
+
+  eq(col, val)    { this.filters.push(["eq", assertColumn(this.table, col), val]); return this; }
+  neq(col, val)   { this.filters.push(["neq", assertColumn(this.table, col), val]); return this; }
+  is(col, val)    { this.filters.push(["is", assertColumn(this.table, col), val]); return this; }
+  in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
+  gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
+  gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
+  ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
+  match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
+  not(col, operator, val) { this.filters.push(["not", assertColumn(this.table, col), operator, val]); return this; }
+  filter(col, operator, val) { this.filters.push(["filter", assertColumn(this.table, col), operator, val]); return this; }
+  or(expression) { this.filters.push(["or", expression]); return this; }
+
+  order(col, { ascending = true } = {}) { this.orderCol = assertColumn(this.table, col); this.orderAsc = Boolean(ascending); return this; }
+  limit(n) { this.limitN = Number(n); if (!Number.isInteger(this.limitN) || this.limitN < 0) throw new Error("[mysqlClient] Invalid LIMIT"); return this; }
+  // Page-by-offset primitive — 0-indexed, inclusive on both
+  // ends (range(0, 24) = rows 1-25). Was entirely missing from this shim:
+  // every paginated read in the codebase (db.list's { page, limit } path
+  // in repository.js, auditLog.js's list()) called this unconditionally
+  // whenever pagination was requested, throwing "query.range is not a
+  // function" — silently swallowed by both callers into an empty
+  // result/500, which is why the Enquiries and Audit Log pages showed
+  // nothing despite real rows existing.
+  range(from, to) { this.rangeFrom = from; this.rangeTo = to; return this; }
+
+  textSearch(col, query) { this.searchCol = assertColumn(this.table, col); this.searchQuery = query; return this; }
+
+  insert(rows) { this.op = "insert"; this.payload = rows; return this; }
+  update(row) { this.op = "update"; this.payload = row; return this; }
+  upsert(row) { this.op = "upsert"; this.payload = row; return this; }
+  delete() { this.op = "delete"; return this; }
+
+  single() { return this._exec({ single: true }); }
+  maybeSingle() { return this._exec({ maybeSingle: true }); }
+
+  then(resolve, reject) { return this._exec({}).then(resolve, reject); }
+  catch(onReject) { return this._exec({}).catch(onReject); }
+
+  _buildWhere(startIdx = 1) {
+    const clauses = []; const params = [];
+    for (const [kind, col, val, extra] of this.filters) {
+      if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
+      else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
+      else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+      else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
+      else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
+      else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
+      else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
+      else if (kind === "not") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NOT NULL` : `${col} IS NULL`);
+        else if (operator === "eq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "in") { const vals = Array.isArray(value) ? value : []; if (!vals.length) clauses.push("1"); else { clauses.push(`${col} NOT IN (${vals.map(() => "?").join(",")})`); params.push(...vals); } }
+        else throw new Error(`Unsupported .not() operator: ${operator}`);
+      }
+      else if (kind === "filter") {
+        const operator = String(val || "eq").toLowerCase();
+        const value = extra;
+        if (operator === "eq") { clauses.push(`${col} = ?`); params.push(value); }
+        else if (operator === "neq") { clauses.push(`${col} != ?`); params.push(value); }
+        else if (operator === "gt") { clauses.push(`${col} > ?`); params.push(value); }
+        else if (operator === "gte") { clauses.push(`${col} >= ?`); params.push(value); }
+        else if (operator === "lt") { clauses.push(`${col} < ?`); params.push(value); }
+        else if (operator === "lte") { clauses.push(`${col} <= ?`); params.push(value); }
+        else if (operator === "like" || operator === "ilike") { clauses.push(`${col} LIKE ?`); params.push(value); }
+        else if (operator === "is") clauses.push(value === null || String(value).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
+        else throw new Error(`Unsupported .filter() operator: ${operator}`);
+      }
+      else if (kind === "or") {
+        const parts = String(col).split(",").map(part => part.trim()).filter(Boolean).map(part => {
+          const [field, operator, ...rawParts] = part.split(".");
+          const safeField = assertColumn(this.table, field);
+          const raw = rawParts.join(".");
+          if (!field || !operator) throw new Error(`Invalid .or() expression: ${part}`);
+          if (operator === "eq") { params.push(raw); return `${safeField} = ?`; }
+          if (operator === "neq") { params.push(raw); return `${safeField} != ?`; }
+          if (operator === "gt") { params.push(raw); return `${safeField} > ?`; }
+          if (operator === "gte") { params.push(raw); return `${safeField} >= ?`; }
+          if (operator === "lt") { params.push(raw); return `${safeField} < ?`; }
+          if (operator === "lte") { params.push(raw); return `${safeField} <= ?`; }
+          if (operator === "is") return String(raw).toLowerCase() === "null" ? `${safeField} IS NULL` : `${safeField} IS NOT NULL`;
+          if (operator === "like" || operator === "ilike") { params.push(raw); return `${safeField} LIKE ?`; }
+          throw new Error(`Unsupported .or() operator: ${operator}`);
+        });
+        if (parts.length) clauses.push(`(${parts.join(" OR ")})`);
+      }
+    }
+    if (this.searchCol && this.searchQuery) { clauses.push(`content LIKE ?`); params.push(`%${this.searchQuery}%`); }
+    return { where: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", params };
+  }
+
+  async _resolveEmbeds(cols, rows) {
+    const embedRe = /([a-zA-Z_]+)\(([^)]+)\)/g;
+    let match;
+    while ((match = embedRe.exec(cols))) {
+      const [, relTable, subcols] = match;
+      if (EMBED_FK[relTable]) {
+        const fk = relTable === "organizations" ? "org_id" : EMBED_FK[relTable];
+        for (const row of rows) {
+          const relId = row[fk];
+          if (!relId) { row[relTable] = null; continue; }
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
+        }
+      } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
+        const fk = EMBED_REVERSE_FK[relTable];
+        for (const row of rows) {
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          row[relTable] = [{ count: Number(countRows[0].c) }];
+        }
+      }
+    }
+    return rows;
+  }
+
+  async _exec(mode) {
+    try {
+      await ready;
+      return await this._execAsync(mode);
+    } catch (err) {
+      return { data: null, error: { message: err.message, code: err.code, errno: err.errno }, count: null };
+    }
+  }
+
+  async _execAsync(mode) {
+    const table = this.table; const def = this.def;
+    if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
+    if (this.op === "insert") {
+      const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
+      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+        const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+      } return this._finishWrite(inserted,mode);
+    }
+    if (this.op === "update") {
+      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
+      const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
+    }
+    if (this.op === "upsert") {
+      const row={...this.payload};
+      if(!row[def.pk]) row[def.pk]=genId();
+      const all=Object.keys(row).filter(c=>c in def.columns);
+      const cols=all.filter(c=>c!==def.pk);
+      const values=all.map(c=>serializeValue(def.columns[c],row[c]));
+      // Use MySQL's atomic duplicate-key handling. The previous implementation
+      // performed SELECT -> UPDATE/INSERT, which could race under concurrent
+      // requests.
+      const updateCols=cols.length ? cols : [def.pk];
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      await pool.query(
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        values
+      );
+
+      // If the insert collided with a non-PK unique key, the generated PK in
+      // `row` belongs to the attempted insert, not the existing record. Find
+      // the actual persisted row using a supplied unique key.
+      let saved;
+      const uniqueKeys=def.uniqueKeys || [[def.pk]];
+      for (const keyCols of uniqueKeys) {
+        if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        if (result.rows[0]) { saved=result.rows[0]; break; }
+      }
+      if (!saved) {
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        saved=result.rows[0];
+      }
+      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      return this._finishWrite([deserializeRow(table,saved)],mode);
+    }
+    if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }
+    const {where,params}=this._buildWhere(); let sql=`SELECT * FROM ${table} ${where}`; if(this.orderCol) sql+=` ORDER BY ${this.orderCol} ${this.orderAsc?"ASC":"DESC"}`; if(this.rangeFrom!=null&&this.rangeTo!=null) sql+=` LIMIT ${Number(this.rangeTo-this.rangeFrom+1)} OFFSET ${Number(this.rangeFrom)}`; else if(this.limitN) sql+=` LIMIT ${Number(this.limitN)}`;
+    const raw=await pool.query(sql,params); const rows=raw.rows.map(r=>deserializeRow(table,r)); await this._resolveEmbeds(this.selectCols,rows); let totalCount=null; if(this.selectOpts.count==="exact"){const c=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); totalCount=Number(c.rows[0].c);} return this._finishRead(rows,mode,totalCount);
+  }
+
+  _finishWrite(rows, mode) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No row returned" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
+  _finishRead(rows, mode, totalCount = null) {
+    if (mode.single) return { data: rows[0] || null, error: rows.length ? null : { message: "No rows found" } };
+    if (mode.maybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null, count: totalCount !== null ? totalCount : rows.length };
+  }
+}
+
+// ------------------------------------------------------------
+// Auth surface backed by the MySQL users table + JWT
+// ------------------------------------------------------------
+
+const auth = {
+  async getUser(token) {
+    try {
+      const payload = jwt.verify(token, AUTH_SECRET);
+      return { data: { user: { id: payload.sub, email: payload.email } }, error: null };
+    } catch (err) {
+      return { data: null, error: { message: "Invalid or expired session" } };
+    }
+  },
+
+  async signInWithPassword({ email, password }) {
+    await ready;
+    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [String(email).toLowerCase()]);
+    const row = rows[0];
+    if (!row) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const ok = bcrypt.compareSync(password, row.password_hash);
+    if (!ok) return { data: { session: null }, error: { message: "Invalid login credentials" } };
+    const accessToken = jwt.sign({ sub: row.id, email: row.email }, AUTH_SECRET, { expiresIn: AUTH_TOKEN_TTL });
+    return {
+      data: {
+        user: { id: row.id, email: row.email },
+        session: { access_token: accessToken, refresh_token: accessToken }
+      },
+      error: null
+    };
+  },
+
+  admin: {
+    async createUser({ email, password }) {
+      await ready;
+      const normalizedEmail = String(email).toLowerCase();
+      const { rows: existingRows } = await pool.query(`SELECT id FROM users WHERE email = $1`, [normalizedEmail]);
+      if (existingRows[0]) return { data: null, error: { message: "User already registered" } };
+      const id = genId();
+      const passwordHash = bcrypt.hashSync(password, 10);
+      await pool.query(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)`,
+        [id, normalizedEmail, passwordHash, nowIso()]
+      );
+      return { data: { user: { id, email: normalizedEmail } }, error: null };
+    },
+
+    async deleteUser(id) {
+      if (!id) return { data: null, error: null };
+      await ready;
+      await pool.query(`DELETE FROM users WHERE id = $1`, [id]);
+      return { data: null, error: null };
+    },
+
+    async listUsers() {
+      await ready;
+      const { rows } = await pool.query(`SELECT id, email, created_at FROM users`);
+      return {
+        data: { users: rows.map((r) => ({ id: r.id, email: r.email, created_at: r.created_at, last_sign_in_at: null })) },
+        error: null
+      };
+    }
+  }
+};
+
+const client = {
+  from(table) { return new QueryBuilder(table); },
+  auth,
+  ready, // resolves once CREATE TABLE / ALTER TABLE migrations have run
+  async close() { await ready; await closePool(); },
+  TABLES
+};
+
+module.exports = client;
+ THEN CONCAT('+', REGEXP_REPLACE(JSON_UNQUOTE(JSON_EXTRACT(data, ?)), '[^0-9+]', '')) " +
+          "ELSE JSON_UNQUOTE(JSON_EXTRACT(data, ?)) END) WHERE object_id = ? AND JSON_EXTRACT(data, ?) IS NOT NULL";
+        const params = [path, path, path, path, path, path, path, path, path, path, path, field.object_id, path];
+        await client.query(sql, params);
+      }
+      log.info(`[mysqlClient] canonical phone normalization completed (${phoneFields.rows?.length || 0} object phone fields)`);
+    } catch (err) {
+      throw new Error(`[mysqlClient] phone normalization migration failed: ${err.message}`, { cause: err });
+    }
     // Referential integrity: every tenant-owned table must point at a real
     // organization. We intentionally enforce the tenant boundary at the DB
     // level, not just in application code. Existing orphan rows are rejected
