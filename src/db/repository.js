@@ -350,70 +350,68 @@ async function getEnquiriesWithContacts(orgId, options = {}) {
 
 
 async function getDialerTasksWithContacts(orgId) {
-  // Resolve canonical contacts in application code so legacy/malformed
-  // lead_ids values cannot break the entire Dialer API.
-  const [{ rows: taskRows }, { rows: contactRows }] = await Promise.all([
-    _pool.query(
-      "SELECT * FROM dialer_tasks WHERE org_id = ? ORDER BY created_at DESC",
-      [orgId]
-    ),
-    _pool.query(
-      "SELECT id, name, phone FROM leads WHERE org_id = ?",
-      [orgId]
-    ),
+  const [tasks, contacts] = await Promise.all([
+    list("dialertasks", orgId),
+    list("leads", orgId),
   ]);
 
   const contactsById = new Map(
-    (contactRows || []).map((row) => [
-      String(row.id),
-      { id: row.id, name: row.name || null, phone: row.phone || null },
+    (contacts || []).map((contact) => [
+      String(contact.id),
+      {
+        id: contact.id,
+        name: contact.name || null,
+        phone: contact.phone || null,
+      },
     ])
   );
 
-  return (taskRows || []).map((row) => {
-    const task = fromDbRow("dialertasks", row);
-    let leadIds = [];
+  return (tasks || []).map((task) => {
+    let leadIds = Array.isArray(task.leadIds) ? task.leadIds : [];
 
-    if (Array.isArray(task.leadIds)) {
-      leadIds = task.leadIds;
-    } else if (typeof task.leadIds === "string") {
+    if (typeof task.leadIds === "string") {
       try {
         const parsed = JSON.parse(task.leadIds);
         if (Array.isArray(parsed)) leadIds = parsed;
-      } catch {
+      } catch (_) {
         leadIds = [];
       }
     }
 
-    const contacts = leadIds
+    const taskContacts = leadIds
       .map((leadId) => contactsById.get(String(leadId)))
       .filter(Boolean);
 
     const contactById = new Map(
-      contacts.map((contact) => [String(contact.id), contact])
+      taskContacts.map((contact) => [String(contact.id), contact])
     );
 
-    const callResults = task.callResults && typeof task.callResults === "object"
-      ? Object.fromEntries(
-          Object.entries(task.callResults).map(([leadId, result]) => {
-            const contact = contactById.get(String(leadId));
-            return [
-              leadId,
-              contact?.name
-                ? {
-                    ...result,
-                    leadName: contact.name,
-                    contactName: contact.name,
-                    contactId: contact.id,
-                    callerNumber: result?.callerNumber || contact.phone || null,
-                  }
-                : result,
-            ];
-          })
-        )
-      : task.callResults;
+    const callResults =
+      task.callResults && typeof task.callResults === "object"
+        ? Object.fromEntries(
+            Object.entries(task.callResults).map(([leadId, result]) => {
+              const contact = contactById.get(String(leadId));
+              if (!contact?.name) return [leadId, result];
 
-    return { ...task, contacts, callResults };
+              return [
+                leadId,
+                {
+                  ...result,
+                  leadName: contact.name,
+                  contactName: contact.name,
+                  contactId: contact.id,
+                  callerNumber: result?.callerNumber || contact.phone || null,
+                },
+              ];
+            })
+          )
+        : task.callResults;
+
+    return {
+      ...task,
+      contacts: taskContacts,
+      callResults,
+    };
   });
 }
 
