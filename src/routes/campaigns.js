@@ -144,31 +144,45 @@ router.get("/dialer-tasks", requireAuth, async (req, res) => {
 
 router.post("/dialer-tasks/sync", requireAuth, async (req, res) => {
   try {
-    // The browser periodically syncs its local task list, but server-side
-    // auto-dial runtime state is authoritative. Never let a stale React/
-    // localStorage snapshot turn auto-dial back on after the user pressed Stop.
     const incoming = Array.isArray(req.body) ? req.body : [];
     const existing = await db.list("dialertasks", req.orgId);
     const byId = new Map(existing.map((task) => [task.id, task]));
     const runtimeFields = [
       "autoDialEnabled", "autoDialStatus", "autoDialStartedAt", "nextDialAt",
-      "currentLeadId", "currentProviderCallSid", "currentProvider", "currentCallStartedAt", "autoDialRunId",
+      "currentLeadId", "currentProviderCallSid", "currentProvider",
+      "currentCallStartedAt", "autoDialRunId", "autoDialBlockedReason",
     ];
-    const merged = incoming.map((task) => {
+
+    const synced = [];
+    for (const task of incoming) {
+      if (!task?.id) continue;
       const current = byId.get(task.id);
-      const copy = { ...task };
-      copy.retryConfig = db.normalizeRetryPolicy(
+      const body = { ...task };
+      body.retryConfig = db.normalizeRetryPolicy(
         task.retryConfig || current?.retryConfig || db.DEFAULT_RETRY_POLICY
       );
+
+      // MySQL is the source of truth for live dialer state. A stale browser
+      // snapshot must never turn a stopped/running task back on.
       if (current) {
         for (const field of runtimeFields) {
-          if (Object.prototype.hasOwnProperty.call(current, field)) copy[field] = current[field];
+          if (Object.prototype.hasOwnProperty.call(current, field)) {
+            body[field] = current[field];
+          }
         }
+        const updated = await db.patch("dialertasks", req.orgId, task.id, body);
+        if (updated) synced.push(updated);
+      } else {
+        const created = await db.create("dialertasks", req.orgId, body);
+        synced.push(created);
       }
-      return copy;
-    });
-    res.json(await db.replaceAll("dialertasks", req.orgId, merged));
-  } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+    }
+
+    res.json(synced);
+  } catch (err) {
+    log.error("❌ /api/dialer-tasks/sync:", err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
 });
 
 // Per-task update — added alongside /sync so a single field (e.g. the
