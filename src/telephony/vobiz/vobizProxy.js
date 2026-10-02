@@ -1526,22 +1526,6 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     isActive = false;
     silenceWatchdog.stop();
     const duration = Math.round((Date.now() - startTime) / 1000);
-    if (!recordStreamClosed) {
-      const RECORD_FINISH_TIMEOUT_MS = 5000;
-      await Promise.race([
-        new Promise((resolve) => {
-          const onFinish = () => { cleanup(); resolve(); };
-          const onError = () => { cleanup(); resolve(); };
-          const cleanup = () => {
-            recordStream.off("finish", onFinish);
-            recordStream.off("error", onError);
-          };
-          recordStream.once("finish", onFinish);
-          recordStream.once("error", onError);
-        }),
-        new Promise((resolve) => setTimeout(resolve, RECORD_FINISH_TIMEOUT_MS)),
-      ]);
-    }
 
     // Retrieve caller phone number and resolved org (if any) from cache
     const rawCallerNumber = vobizCallNumbers.get(callId) || "Vobiz Call";
