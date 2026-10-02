@@ -32,6 +32,16 @@ function createCallRecorder({
   let finalized = false;
   const log = logger || console;
 
+  // Platform recordings are captured as two independent 16 kHz mono tracks.
+  // They are mixed only after the call ends. Writing both directions into one
+  // byte stream was the source of the audible recording flicker: caller and
+  // agent audio arrived on different timelines and were being concatenated.
+  const tracks = {
+    caller: [],
+    agent: [],
+  };
+  const recordingStartedAt = process.hrtime.bigint();
+
   function providerCanRecord() {
     return !!(
       providerAdapter &&
@@ -44,12 +54,8 @@ function createCallRecorder({
     if (stream || platformPath) return;
     fs.mkdirSync(tempDir, { recursive: true });
     platformPath = path.join(tempDir, String(callId) + ".pcm");
-    stream = fs.createWriteStream(platformPath);
-    stream.on("error", (err) => {
-      streamClosed = true;
-      if (log.error) log.error("[recording] platform stream error [" + callId + "]: " + err.message);
-    });
-    stream.on("finish", () => { streamClosed = true; });
+    // Keep the legacy path only as a marker. Actual audio is held per track
+    // until finalize so it can be timestamp-aligned and mixed correctly.
     activeMode = RECORDING_MODES.PLATFORM;
   }
 
@@ -78,18 +84,52 @@ function createCallRecorder({
     openPlatformRecorder();
   }
 
-  function write(buffer) {
+  function write(buffer, options = {}) {
     if (finalized || activeMode === RECORDING_MODES.DISABLED || !buffer || !buffer.length) return false;
     if (activeMode !== RECORDING_MODES.PLATFORM) return true;
-    if (!stream) openPlatformRecorder();
-    if (streamClosed || stream.destroyed || stream.writableEnded) return false;
-    try {
-      return stream.write(buffer);
-    } catch (err) {
-      streamClosed = true;
-      if (log.error) log.error("[recording] platform write failed [" + callId + "]: " + err.message);
-      return false;
+
+    const track = options?.track === "caller" ? "caller" : "agent";
+    const pcm = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    if (!pcm.length) return false;
+
+    // Timestamp is converted to the exact 16 kHz sample position. This lets
+    // us preserve real gaps/overlap between caller and agent instead of
+    // depending on Node event-loop arrival order.
+    const elapsedNs = process.hrtime.bigint() - recordingStartedAt;
+    const offsetSamples = Math.max(0, Number(elapsedNs / 1000000n) * 16);
+    tracks[track].push({ offsetSamples, pcm: Buffer.from(pcm) });
+    return true;
+  }
+
+  function buildMixedPcm() {
+    const all = [...tracks.caller, ...tracks.agent];
+    if (!all.length) return Buffer.alloc(0);
+
+    const endSample = all.reduce(
+      (max, item) => Math.max(max, item.offsetSamples + Math.floor(item.pcm.length / 2)),
+      0,
+    );
+    const mixed = new Float32Array(endSample);
+
+    for (const item of all) {
+      const samples = new Int16Array(
+        item.pcm.buffer,
+        item.pcm.byteOffset,
+        Math.floor(item.pcm.byteLength / 2),
+      );
+      for (let i = 0; i < samples.length; i++) {
+        const index = item.offsetSamples + i;
+        if (index >= mixed.length) break;
+        mixed[index] += samples[i] * 0.5;
+      }
     }
+
+    const out = Buffer.alloc(mixed.length * 2);
+    for (let i = 0; i < mixed.length; i++) {
+      const sample = Math.max(-32768, Math.min(32767, Math.round(mixed[i])));
+      out.writeInt16LE(sample, i * 2);
+    }
+    return out;
   }
 
   async function finalize() {
@@ -117,31 +157,19 @@ function createCallRecorder({
       }
     }
 
-    if (!platformPath) return { url: null, source: "platform", recordingId: null };
-
-    if (stream && !streamClosed && !stream.destroyed && !stream.writableEnded) {
-      try { stream.end(); } catch {}
+    const rawPcm = buildMixedPcm();
+    if (!rawPcm.length || typeof uploadPlatformRecording !== "function") {
+      return { url: null, source: "platform", recordingId: null };
     }
-
-    if (stream && !streamClosed) {
-      await new Promise((resolve) => {
-        const timer = setTimeout(resolve, 5000);
-        stream.once("finish", () => { clearTimeout(timer); resolve(); });
-      });
-    }
-
-    if (!fs.existsSync(platformPath)) return { url: null, source: "platform", recordingId: null };
 
     try {
-      const rawPcm = fs.readFileSync(platformPath);
-      if (!rawPcm.length || typeof uploadPlatformRecording !== "function") {
-        return { url: null, source: "platform", recordingId: null };
-      }
       const wavBuffer = Buffer.concat([createWavHeader(rawPcm.length), rawPcm]);
       const url = await uploadPlatformRecording(wavBuffer, callId);
       return { url: url || null, source: "platform", recordingId: null };
     } finally {
-      try { fs.unlinkSync(platformPath); } catch {}
+      tracks.caller.length = 0;
+      tracks.agent.length = 0;
+      try { if (platformPath) fs.unlinkSync(platformPath); } catch {}
     }
   }
 
