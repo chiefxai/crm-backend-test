@@ -7,7 +7,7 @@ const db = require("../db/repository");
 const lendingObjectsMirror = require("../crm/lendingObjectsMirror");
 
 router.get("/", requireAuth, async (req, res) => {
-  try { res.json(await db.list("loans", req.orgId)); }
+  try { res.json(await db.getLoansWithContacts(req.orgId)); }
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
