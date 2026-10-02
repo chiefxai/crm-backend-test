@@ -40,6 +40,10 @@ function createCallRecorder({
     caller: [],
     agent: [],
   };
+  const nextSampleByTrack = {
+    caller: 0,
+    agent: 0,
+  };
   const recordingStartedAt = process.hrtime.bigint();
 
   function providerCanRecord() {
@@ -92,11 +96,23 @@ function createCallRecorder({
     const pcm = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
     if (!pcm.length) return false;
 
-    // Timestamp is converted to the exact 16 kHz sample position. This lets
-    // us preserve real gaps/overlap between caller and agent instead of
-    // depending on Node event-loop arrival order.
+    // The live media transport is frame-based (Vobiz uses 20 ms frames).
+    // WebSocket delivery is allowed to bunch several frames together, so
+    // wall-clock arrival time MUST NOT determine where a frame belongs in
+    // the recording. If three 20 ms frames arrive in one event-loop tick,
+    // their arrival timestamps can be almost identical and the old recorder
+    // placed them on top of each other, producing the "many voices",
+    // flickering/garbled playback seen in recordings.
+    //
+    // Use arrival time only to preserve genuine silence/gaps, but never allow
+    // it to move a frame backwards or overlap the previous frame on the same
+    // track. The frame duration is the authoritative minimum cursor advance.
     const elapsedNs = process.hrtime.bigint() - recordingStartedAt;
-    const offsetSamples = Math.max(0, Number(elapsedNs / 1000000n) * 16);
+    const elapsedSamples = Math.max(0, Number(elapsedNs / 1000000n) * 16);
+    const frameSamples = Math.floor(pcm.length / 2);
+    const offsetSamples = Math.max(elapsedSamples, nextSampleByTrack[track]);
+    nextSampleByTrack[track] = offsetSamples + frameSamples;
+
     tracks[track].push({ offsetSamples, pcm: Buffer.from(pcm) });
     return true;
   }
@@ -110,6 +126,7 @@ function createCallRecorder({
       0,
     );
     const mixed = new Float32Array(endSample);
+    const contributors = new Uint8Array(endSample);
 
     for (const item of all) {
       const samples = new Int16Array(
@@ -120,13 +137,19 @@ function createCallRecorder({
       for (let i = 0; i < samples.length; i++) {
         const index = item.offsetSamples + i;
         if (index >= mixed.length) break;
-        mixed[index] += samples[i] * 0.5;
+        mixed[index] += samples[i];
+        if (contributors[index] < 255) contributors[index]++;
       }
     }
 
     const out = Buffer.alloc(mixed.length * 2);
     for (let i = 0; i < mixed.length; i++) {
-      const sample = Math.max(-32768, Math.min(32767, Math.round(mixed[i])));
+      // Average only the tracks that are actually present at this sample.
+      // A single-sided inbound call therefore keeps full volume instead of
+      // being unnecessarily attenuated, while overlapping caller/agent
+      // speech cannot clip the 16-bit output.
+      const count = contributors[i] || 1;
+      const sample = Math.max(-32768, Math.min(32767, Math.round(mixed[i] / count)));
       out.writeInt16LE(sample, i * 2);
     }
     return out;
