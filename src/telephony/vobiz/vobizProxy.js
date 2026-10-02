@@ -2129,7 +2129,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
 
               // Save to recording file without allowing a late Gemini frame
               // to crash the Node process after the call has already ended.
-              if (recordingSink.writeRecording) recordingSink.writeRecording(pcm16k, { track: "caller" });
+              if (recordingSink.writeRecording) recordingSink.writeRecording(pcm16k, { track: "agent" });
               else if (!recordStream.destroyed && !recordStream.writableEnded) recordStream.write(pcm16k);
             }
           }
