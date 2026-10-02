@@ -1005,6 +1005,18 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           aliasVobizCallState([callId, authorizedCallId]);
           log.info(`🚀 Vobiz Stream started: ${streamId} | CallId: ${callId} | Org: ${authorizedOrgId}`);
           vobizCallFinalizers.register(callId, finalizeCall);
+          if (String(callId) !== authorizedCallId) {
+            // The Hangup webhook uses the Answer/CallUUID while the media
+            // stream may use another provider call identifier. Register the
+            // same finalizer under both aliases so either event can finalize
+            // the real recording exactly once.
+            vobizCallFinalizers.register(authorizedCallId, finalizeCall);
+            if (!alternateCallIdsForFinalize.includes(authorizedCallId)) {
+              alternateCallIdsForFinalize.push(authorizedCallId);
+            }
+            vobizCallUuidToInternalId.set(authorizedCallId, generatedCallId);
+            setTimeout(() => vobizCallUuidToInternalId.delete(authorizedCallId), 1800000);
+          }
           vobizCallUuidToInternalId.set(callId, generatedCallId);
           setTimeout(() => vobizCallUuidToInternalId.delete(callId), 1800000);
 
@@ -1558,6 +1570,16 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     const direction = vobizCallDirection.get(callId) || "unknown";
     vobizCallDirection.delete(callId);
     vobizCallFinalizers.unregister(callId);
+    for (const aliasId of alternateCallIdsForFinalize) {
+      vobizCallFinalizers.unregister(aliasId);
+      vobizCallNumbers.delete(aliasId);
+      vobizCallCallee.delete(aliasId);
+      vobizCallOrgs.delete(aliasId);
+      vobizCallDirection.delete(aliasId);
+      vobizCallAttemptNumber.delete(aliasId);
+      vobizCallRetryContext.delete(aliasId);
+      vobizCallUuidToInternalId.delete(aliasId);
+    }
     // For an outbound call, vobizCallNumbers holds OUR OWN caller-ID
     // number, not the lead's (see vobizCallCallee's definition above) —
     // save the actual callee's number instead, so call_logs and the
