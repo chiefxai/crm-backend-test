@@ -11,7 +11,7 @@
  *   +919876543210   → +919876543210  (already correct)
  *   +14155552671    → +14155552671   (non-Indian, returned as-is after stripping spaces)
  */
-const DEFAULT_PHONE_COUNTRY = String(process.env.DEFAULT_PHONE_COUNTRY || "IN").toUpperCase();
+const DEFAULT_PHONE_COUNTRY = "IN";
 const COUNTRY_CODES = {
   IN: "+91",
   US: "+1",
