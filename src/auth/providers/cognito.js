@@ -6,7 +6,7 @@
 // tokens also carry a standard `cognito:groups` claim.
 //
 // Required IAM permissions for provisioning:
-//   cognito-idp:GetUser
+//   cognito-idp:ListUsers
 //   cognito-idp:AdminCreateUser
 //   cognito-idp:AdminSetUserPassword
 //   cognito-idp:AdminGetUser
@@ -17,7 +17,7 @@
 const { CognitoJwtVerifier } = require('aws-jwt-verify');
 const {
   CognitoIdentityProviderClient,
-  GetUserCommand,
+  ListUsersCommand,
   AdminCreateUserCommand,
   AdminSetUserPasswordCommand,
   AdminGetUserCommand,
@@ -89,7 +89,12 @@ async function resolveIdentity(token, payload = {}) {
   if (!token || !REGION) return payload;
 
   try {
-    const user = await getIdpClient().send(new GetUserCommand({ AccessToken: token }));
+    const users = await getIdpClient().send(new ListUsersCommand({
+      UserPoolId: USER_POOL_ID,
+      Filter: `sub = "${String(payload.sub).replace(/"/g, '\\"')}"`,
+      Limit: 1,
+    }));
+    const user = users?.Users?.[0];
     const email = getAttribute(user, 'email');
     const name = getAttribute(user, 'name');
     return {
