@@ -573,7 +573,7 @@ function scheduleInboundVobizPrewarm(callId, orgId, callerPhone, didNumber) {
   rememberMap(vobizPrewarmedSetup, callId, promise);
 }
 
-async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null, campaignId = null, retryPolicy = null } = {}) {
+async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null, campaignId = null, retryPolicy = null, autoDialRunId = null } = {}) {
   const channelsEngine = require("../../channels/engine");
   const billingEngine = require("../../crm/billingEngine");
   const rechargeBilling = require("../../crm/rechargeBilling");
@@ -720,7 +720,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
       direction: "outbound",
       attemptNumber,
       retryContext: {
-        questions, from, language, assignedContact, taskId, leadId,
+        questions, from, language, assignedContact, taskId, leadId, autoDialRunId,
         campaignId: campaignId || taskId || null,
         provider: "vobiz",
         retryPolicy: retryPolicy || null,
