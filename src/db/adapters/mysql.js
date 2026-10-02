@@ -352,7 +352,7 @@ const TABLES = {
   enquiries: {
     pk: "id",
     columns: {
-      id: "text", org_id: "text", call_id: "text", name: "text", phone: "text",
+      id: "text", org_id: "text", call_id: "text", lead_id: "text", name: "text", phone: "text",
       email: "text", location: "text", query_text: "text",
       assigned_team_member_id: "text", status: "text", created_at: "text"
     }
