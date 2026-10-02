@@ -443,8 +443,16 @@ async function list(entity, orgId, options = {}) {
 async function create(entity, orgId, apiObj) {
   assertEntity(entity);
   const { table } = ENTITIES[entity];
-  const row = { ...toDbRow(entity, apiObj), org_id: orgId };
-  if (!apiObj.id) delete row.id; // let MySQL generate the uuid
+  const input = { ...(apiObj || {}) };
+  // Enquiries are associated with a call and therefore inherit its canonical
+  // contact relationship. Persist the lead_id once so every later read can
+  // JOIN directly to Contact Directory.
+  if (entity === "enquiries" && !input.leadId && input.callId) {
+    const call = await getCallLogById(orgId, input.callId);
+    if (call?.leadId) input.leadId = call.leadId;
+  }
+  const row = { ...toDbRow(entity, input), org_id: orgId };
+  if (!input.id) delete row.id; // let MySQL generate the uuid
   const { data, error } = await supabase.from(table).insert(row).select().single();
   if (error) throw new Error(`[db.create:${entity}] ${error.message}`);
   return fromDbRow(entity, data);
