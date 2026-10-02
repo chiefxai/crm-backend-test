@@ -105,9 +105,6 @@ async function requireAuthIdentityOnly(req, res, next) {
   try {
     let payload = await resolvePayload(req, token);
     if (!payload?.sub) return res.status(401).json({ error: "Invalid token payload" });
-    if (!payload.email && !payload.preferred_username && typeof provider.resolveIdentity === "function") {
-      payload = await provider.resolveIdentity(token, payload);
-    }
     req.userId         = payload.sub;
     req.userEmail      = payload.email || payload.preferred_username || null;
     req.userName       = payload.name || null;
