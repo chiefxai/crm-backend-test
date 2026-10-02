@@ -859,7 +859,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     uploadPlatformRecording: (wavBuffer, id) => callFinalizer.uploadRecording("vobiz", id, wavBuffer),
     logger: log,
   });
-  const writeRecording = (buffer) => callRecorder.write(buffer);
+  const writeRecording = (buffer, options) => callRecorder.write(buffer, options);
   await callRecorder.start();
   const transcriptLines = [];
   /** Ring-time Live may save lead_responses under a temporary id before adopt. */
@@ -1163,7 +1163,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             deferLiveGreetingForPreparedOpening = true;
             livePlaybackGate.dropGeminiAudioUntilCallerSpeaks = true;
             outboundAudioPlayer.enqueuePcm(audio, { fastStart: true });
-            writeRecording(audio);
+            writeRecording(audio, { track: "agent" });
             if (!preparedOpeningText) {
               const dir = (vobizCallDirection.get(callId) || "unknown") === "outbound" ? "outbound" : "inbound";
               preparedOpeningText = buildOpeningGreetingText({
@@ -1478,7 +1478,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
             // Save to recording file without allowing a late Gemini frame
             // to crash the Node process after the call has already ended.
-            writeRecording(pcm16k);
+            writeRecording(pcm16k, { track: "caller" });
           }
           break;
 
@@ -2129,7 +2129,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
 
               // Save to recording file without allowing a late Gemini frame
               // to crash the Node process after the call has already ended.
-              if (recordingSink.writeRecording) recordingSink.writeRecording(pcm16k);
+              if (recordingSink.writeRecording) recordingSink.writeRecording(pcm16k, { track: "caller" });
               else if (!recordStream.destroyed && !recordStream.writableEnded) recordStream.write(pcm16k);
             }
           }
