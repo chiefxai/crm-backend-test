@@ -983,12 +983,17 @@ async function handleVobizSession(vobizWs, streamContext = null) {
         case "start":
           streamId = msg.start.streamId;
           callId = msg.start.callId;
+
+          // Vobiz can expose different identifiers in the Answer webhook
+          // (CallUUID) and the media Stream start frame (callId). The signed
+          // stream token remains the security boundary: it authenticates the
+          // call/org pair created by our webhook. Treat the media callId as a
+          // provider alias instead of rejecting the entire inbound session.
           if (String(callId) !== authorizedCallId) {
-            log.error(`🚫 Vobiz stream call mismatch: token=${authorizedCallId} start=${callId}`);
-            isActive = false;
-            try { vobizWs.close(1008, "Call authorization mismatch"); } catch {}
-            return;
+            log.warn(`⚠️ Vobiz media call-id differs from webhook CallUUID — treating as provider alias: token=${authorizedCallId} start=${callId} org=${authorizedOrgId}`);
+            aliasVobizCallState([callId, authorizedCallId]);
           }
+
           const cachedOrgId = vobizCallOrgs.get(callId);
           if (cachedOrgId && String(cachedOrgId) !== authorizedOrgId) {
             log.error(`🚫 Vobiz stream org mismatch: token=${authorizedOrgId} cache=${cachedOrgId} call=${callId}`);
