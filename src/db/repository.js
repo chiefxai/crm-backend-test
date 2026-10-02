@@ -372,6 +372,240 @@ async function remove(entity, orgId, id) {
   return true;
 }
 
+function parseJsonObject(value, fallback = {}) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return fallback;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+function normalizeIdList(value) {
+  const parsed = Array.isArray(value) ? value : parseJsonObject(value, []);
+  return [...new Set((Array.isArray(parsed) ? parsed : []).filter((id) => typeof id === "string" && id.trim()))];
+}
+
+async function getDialerTaskDeletionImpact(orgId, taskId) {
+  const { rows } = await _pool.query(
+    \`SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
+       FROM dialer_tasks
+      WHERE org_id = ? AND id = ?
+      LIMIT 1\`,
+    [orgId, taskId]
+  );
+  const task = rows?.[0];
+  if (!task) return null;
+
+  const leadIds = normalizeIdList(task.lead_ids);
+  const callResults = parseJsonObject(task.call_results, {});
+  const resultCallIds = Object.values(callResults)
+    .map((result) => result?.callId)
+    .filter((id) => typeof id === "string" && id.trim());
+
+  let callIds = [...new Set(resultCallIds)];
+  if (callIds.length) {
+    const placeholders = callIds.map(() => "?").join(",");
+    const result = await _pool.query(
+      \`SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (\${placeholders}))\`,
+      [orgId, taskId, ...callIds]
+    );
+    callIds = [...new Set((result.rows || []).map((row) => row.id).concat(callIds))];
+  } else {
+    const result = await _pool.query(
+      \`SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?\`,
+      [orgId, taskId]
+    );
+    callIds = [...new Set((result.rows || []).map((row) => row.id))];
+  }
+
+  const counts = { leads: 0, enquiries: 0, scheduledCallbacks: 0, pipeline: 0 };
+  if (leadIds.length) {
+    const placeholders = leadIds.map(() => "?").join(",");
+    const leadResult = await _pool.query(
+      \`SELECT COUNT(*) AS count, SUM(CASE WHEN pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact' THEN 1 ELSE 0 END) AS pipeline_count
+         FROM leads WHERE org_id = ? AND id IN (\${placeholders})\`,
+      [orgId, ...leadIds]
+    );
+    counts.leads = Number(leadResult.rows?.[0]?.count || 0);
+    counts.pipeline = Number(leadResult.rows?.[0]?.pipeline_count || 0);
+  }
+
+  if (callIds.length) {
+    const placeholders = callIds.map(() => "?").join(",");
+    const enquiryResult = await _pool.query(
+      \`SELECT COUNT(*) AS count FROM enquiries WHERE org_id = ? AND call_id IN (\${placeholders})\`,
+      [orgId, ...callIds]
+    );
+    counts.enquiries = Number(enquiryResult.rows?.[0]?.count || 0);
+
+    const callbackResult = await _pool.query(
+      \`SELECT COUNT(*) AS count
+         FROM call_logs
+        WHERE org_id = ? AND id IN (\${placeholders})
+          AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')\`,
+      [orgId, ...callIds]
+    );
+    counts.scheduledCallbacks = Number(callbackResult.rows?.[0]?.count || 0);
+  }
+
+  for (const result of Object.values(callResults)) {
+    const advisor = result?.advisorCallback;
+    if (advisor?.status === "pending" && advisor?.time && !Number.isNaN(new Date(advisor.time).getTime()) && new Date(advisor.time).getTime() > Date.now()) {
+      counts.scheduledCallbacks += 1;
+    }
+  }
+
+  return {
+    task: { id: task.id, name: task.name, autoDialEnabled: !!task.auto_dial_enabled, currentProviderCallSid: task.current_provider_call_sid || null },
+    counts,
+  };
+}
+
+async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
+  const deleteLeads = options.deleteLeads === true;
+  const deleteEnquiries = options.deleteEnquiries === true;
+  const deleteScheduledCallbacks = options.deleteScheduledCallbacks === true;
+  const removeFromPipeline = options.removeFromPipeline === true;
+
+  const client = await _pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const taskResult = await client.query(
+      \`SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
+         FROM dialer_tasks
+        WHERE org_id = ? AND id = ?
+        LIMIT 1
+        FOR UPDATE\`,
+      [orgId, taskId]
+    );
+    const task = taskResult.rows?.[0];
+    if (!task) {
+      const error = new Error("Dialer task not found");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (task.auto_dial_enabled || task.current_provider_call_sid) {
+      const error = new Error("Stop the campaign before deleting this task");
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const leadIds = normalizeIdList(task.lead_ids);
+    const callResults = parseJsonObject(task.call_results, {});
+    const resultCallIds = Object.values(callResults)
+      .map((result) => result?.callId)
+      .filter((id) => typeof id === "string" && id.trim());
+
+    let callIds = [...new Set(resultCallIds)];
+    if (callIds.length) {
+      const placeholders = callIds.map(() => "?").join(",");
+      const result = await client.query(
+        \`SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (\${placeholders}))\`,
+        [orgId, taskId, ...callIds]
+      );
+      callIds = [...new Set((result.rows || []).map((row) => row.id).concat(callIds))];
+    } else {
+      const result = await client.query(
+        \`SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?\`,
+        [orgId, taskId]
+      );
+      callIds = [...new Set((result.rows || []).map((row) => row.id))];
+    }
+
+    const counts = { task: 1, leads: 0, enquiries: 0, scheduledCallbacks: 0, pipeline: 0 };
+
+    if (callIds.length && deleteEnquiries) {
+      const placeholders = callIds.map(() => "?").join(",");
+      const result = await client.query(
+        \`DELETE FROM enquiries WHERE org_id = ? AND call_id IN (\${placeholders})\`,
+        [orgId, ...callIds]
+      );
+      counts.enquiries = Number(result.affectedRows || 0);
+    }
+
+    if (callIds.length && deleteScheduledCallbacks) {
+      const placeholders = callIds.map(() => "?").join(",");
+      const result = await client.query(
+        \`UPDATE call_logs
+            SET callback_time = NULL,
+                callback_reason = NULL,
+                callback_status = NULL,
+                retry_status = NULL,
+                next_retry_at = NULL,
+                retry_claimed_at = NULL,
+                status = CASE WHEN status = 'Callback Scheduled' THEN 'Completed' ELSE status END,
+                conversation_outcome = CASE WHEN conversation_outcome IN ('callback_scheduled', 'scheduled_callback') THEN 'completed' ELSE conversation_outcome END
+          WHERE org_id = ? AND id IN (\${placeholders})
+            AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')\`,
+        [orgId, ...callIds]
+      );
+      counts.scheduledCallbacks = Number(result.affectedRows || 0);
+
+      if (leadIds.length) {
+        const leadPlaceholders = leadIds.map(() => "?").join(",");
+        await client.query(
+          \`UPDATE leads l
+              SET callback_time = (
+                SELECT MAX(cl.callback_time)
+                  FROM call_logs cl
+                 WHERE cl.org_id = l.org_id
+                   AND cl.lead_id = l.id
+                   AND cl.callback_time IS NOT NULL
+                   AND (cl.status = 'Callback Scheduled' OR cl.retry_status = 'pending')
+              )
+            WHERE l.org_id = ? AND l.id IN (\${leadPlaceholders})\`,
+          [orgId, ...leadIds]
+        );
+      }
+    }
+
+    if (leadIds.length && removeFromPipeline && !deleteLeads) {
+      const placeholders = leadIds.map(() => "?").join(",");
+      const result = await client.query(
+        \`UPDATE leads SET pipeline_stage = 'contact'
+          WHERE org_id = ? AND id IN (\${placeholders})
+            AND pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact'\`,
+        [orgId, ...leadIds]
+      );
+      counts.pipeline = Number(result.affectedRows || 0);
+    }
+
+    if (leadIds.length && deleteLeads) {
+      const placeholders = leadIds.map(() => "?").join(",");
+      const result = await client.query(
+        \`DELETE FROM leads WHERE org_id = ? AND id IN (\${placeholders})\`,
+        [orgId, ...leadIds]
+      );
+      counts.leads = Number(result.affectedRows || 0);
+      counts.pipeline = counts.leads;
+    }
+
+    const taskDelete = await client.query(
+      "DELETE FROM dialer_tasks WHERE org_id = ? AND id = ?",
+      [orgId, taskId]
+    );
+    if (Number(taskDelete.affectedRows || 0) !== 1) throw new Error("Dialer task could not be deleted");
+
+    try {
+      await client.query(
+        \`INSERT INTO audit_log (id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\`,
+        [require("crypto").randomUUID(), orgId, actor.userId || null, actor.userEmail || null, "delete", "dialer_task", taskId,
+          JSON.stringify({ taskName: task.name, deleteLeads, deleteEnquiries, deleteScheduledCallbacks, removeFromPipeline }), new Date().toISOString()]
+      );
+    } catch (auditError) {
+      log.warn("⚠️ Failed to write dialer-task deletion audit log:", auditError.message);
+    }
+
+    await client.query("COMMIT");
+    return { taskId, taskName: task.name, counts, options: { deleteLeads, deleteEnquiries, deleteScheduledCallbacks, removeFromPipeline } };
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ------------------------------------------------------------
 // Transaction helper: DELETE all rows for orgId, then INSERT
 // replacements — all in a single BEGIN/COMMIT so a failed INSERT
@@ -2167,6 +2401,8 @@ module.exports = {
   create,
   patch,
   remove,
+  getDialerTaskDeletionImpact,
+  deleteDialerTaskData,
   replaceAll,
   replaceTeamMembers,
   createOrg,
