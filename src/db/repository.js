@@ -353,7 +353,10 @@ async function getDialerTasksWithContacts(orgId) {
   const { rows } = await _pool.query(
     "SELECT dt.*, jt.lead_id AS joined_lead_id, l.name AS contact_name, l.phone AS contact_phone " +
     "FROM dialer_tasks dt " +
-    "LEFT JOIN JSON_TABLE(CASE WHEN JSON_VALID(dt.lead_ids) THEN dt.lead_ids ELSE JSON_ARRAY() END, '$[*]' COLUMNS (lead_id VARCHAR(255) PATH ' +
+    "LEFT JOIN JSON_TABLE(" +
+      "CASE WHEN JSON_VALID(dt.lead_ids) THEN dt.lead_ids ELSE JSON_ARRAY() END, " +
+      "'$[*]' COLUMNS (lead_id VARCHAR(255) PATH '$')" +
+    ") AS jt ON TRUE " +
     "LEFT JOIN leads l ON l.org_id = dt.org_id AND l.id = jt.lead_id " +
     "WHERE dt.org_id = ? ORDER BY dt.created_at DESC",
     [orgId]
@@ -369,11 +372,7 @@ async function getDialerTasksWithContacts(orgId) {
       grouped.set(row.id, task);
     }
     if (row.joined_lead_id && !task._contactById.has(row.joined_lead_id)) {
-      const contact = {
-        id: row.joined_lead_id,
-        name: row.contact_name || null,
-        phone: row.contact_phone || null,
-      };
+      const contact = { id: row.joined_lead_id, name: row.contact_name || null, phone: row.contact_phone || null };
       task._contactById.set(row.joined_lead_id, contact);
       task.contacts.push(contact);
     }
@@ -392,7 +391,6 @@ async function getDialerTasksWithContacts(orgId) {
     return { ...task, callResults };
   });
 }
-
 async function getLoansWithContacts(orgId) {
   const { rows } = await _pool.query(`SELECT lo.*, l.name AS contact_name, l.phone AS contact_phone FROM loans lo LEFT JOIN leads l ON l.org_id = lo.org_id AND l.id = lo.lead_id WHERE lo.org_id = ? ORDER BY lo.created_at DESC`, [orgId]);
   return (rows || []).map((row) => {
