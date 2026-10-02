@@ -383,6 +383,15 @@ async function syncDialerProviderCallSid(providerCallSid) {
   const orgId = vobizCallOrgs.get(providerCallSid);
   if (!providerCallSid || !orgId || !retryContext?.taskId) return;
   try {
+    const tasks = await db.list("dialertasks", orgId);
+    const task = tasks.find((row) => row.id === retryContext.taskId);
+    // A Stop request clears currentProviderCallSid. A delayed provider
+    // webhook must never resurrect that lease and make the campaign appear
+    // active again.
+    if (!task || task.autoDialEnabled !== true || (retryContext.runId && task.autoDialRunId !== retryContext.runId)) {
+      log.info(`⏭️ Ignoring delayed provider CallUUID sync for stopped/inactive task ${retryContext.taskId}`);
+      return;
+    }
     await db.patch("dialertasks", orgId, retryContext.taskId, { currentProviderCallSid: providerCallSid });
   } catch (err) {
     log.error(`❌ Failed to sync dialer providerCallSid ${providerCallSid}:`, err.message);
