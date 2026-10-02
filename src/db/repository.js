@@ -350,47 +350,79 @@ async function getEnquiriesWithContacts(orgId, options = {}) {
 
 
 async function getDialerTasksWithContacts(orgId) {
-  const { rows } = await _pool.query(
-    "SELECT dt.*, jt.lead_id AS joined_lead_id, l.name AS contact_name, l.phone AS contact_phone " +
-    "FROM dialer_tasks dt " +
-    "LEFT JOIN JSON_TABLE(" +
-      "CASE WHEN JSON_VALID(dt.lead_ids) THEN dt.lead_ids ELSE JSON_ARRAY() END, " +
-      "'$[*]' COLUMNS (lead_id VARCHAR(255) PATH '$')" +
-    ") AS jt ON TRUE " +
-    "LEFT JOIN leads l ON l.org_id = dt.org_id AND l.id = jt.lead_id " +
-    "WHERE dt.org_id = ? ORDER BY dt.created_at DESC",
-    [orgId]
+  // Keep this provider/data-shape tolerant: older tasks may contain legacy
+  // or malformed lead_ids JSON, so resolve contacts in application code
+  // instead of relying on MySQL JSON_TABLE parsing.
+  const [{ rows: taskRows }, { rows: contactRows }] = await Promise.all([
+    _pool.query(
+      "SELECT * FROM dialer_tasks WHERE org_id = ? ORDER BY created_at DESC",
+      [orgId]
+    ),
+    _pool.query(
+      "SELECT id, name, phone FROM leads WHERE org_id = ?",
+      [orgId]
+    ),
+  ]);
+
+  const contactsById = new Map(
+    (contactRows || []).map((row) => [
+      String(row.id),
+      { id: row.id, name: row.name || null, phone: row.phone || null },
+    ])
   );
 
-  const grouped = new Map();
-  for (const row of rows || []) {
-    let task = grouped.get(row.id);
-    if (!task) {
-      task = fromDbRow("dialertasks", row);
-      task.contacts = [];
-      task._contactById = new Map();
-      grouped.set(row.id, task);
-    }
-    if (row.joined_lead_id && !task._contactById.has(row.joined_lead_id)) {
-      const contact = { id: row.joined_lead_id, name: row.contact_name || null, phone: row.contact_phone || null };
-      task._contactById.set(row.joined_lead_id, contact);
-      task.contacts.push(contact);
-    }
-  }
+  return (taskRows || []).map((row) => {
+    const task = fromDbRow("dialertasks", row);
+    const rawLeadIds = task.leadIds;
+    let leadIds = [];
 
-  return [...grouped.values()].map((task) => {
+    if (Array.isArray(rawLeadIds)) {
+      leadIds = rawLeadIds;
+    } else if (typeof rawLeadIds === "string") {
+      try {
+        const parsed = JSON.parse(rawLeadIds);
+        if (Array.isArray(parsed)) leadIds = parsed;
+      } catch {
+        leadIds = [];
+      }
+    }
+
+    const contacts = leadIds
+      .map((leadId) => contactsById.get(String(leadId)))
+      .filter(Boolean);
+
+    const contactById = new Map(
+      contacts.map((contact) => [String(contact.id), contact])
+    );
+
     const callResults = task.callResults && typeof task.callResults === "object"
-      ? Object.fromEntries(Object.entries(task.callResults).map(([leadId, result]) => {
-          const contact = task._contactById.get(leadId);
-          return [leadId, contact?.name
-            ? { ...result, leadName: contact.name, contactName: contact.name, contactId: contact.id, callerNumber: result?.callerNumber || contact.phone || null }
-            : result];
-        }))
+      ? Object.fromEntries(
+          Object.entries(task.callResults).map(([leadId, result]) => {
+            const contact = contactById.get(String(leadId));
+            return [
+              leadId,
+              contact?.name
+                ? {
+                    ...result,
+                    leadName: contact.name,
+                    contactName: contact.name,
+                    contactId: contact.id,
+                    callerNumber: result?.callerNumber || contact.phone || null,
+                  }
+                : result,
+            ];
+          })
+        )
       : task.callResults;
-    delete task._contactById;
-    return { ...task, callResults };
+
+    return {
+      ...task,
+      contacts,
+      callResults,
+    };
   });
 }
+
 async function getLoansWithContacts(orgId) {
   const { rows } = await _pool.query(`SELECT lo.*, l.name AS contact_name, l.phone AS contact_phone FROM loans lo LEFT JOIN leads l ON l.org_id = lo.org_id AND l.id = lo.lead_id WHERE lo.org_id = ? ORDER BY lo.created_at DESC`, [orgId]);
   return (rows || []).map((row) => {
