@@ -336,12 +336,12 @@ async function getEnquiriesWithContacts(orgId, options = {}) {
   if (callId) { where.push("e.call_id = ?"); params.push(callId); }
   const base = \`FROM enquiries e LEFT JOIN call_logs cl ON cl.org_id = e.org_id AND cl.id = e.call_id LEFT JOIN leads l ON l.org_id = e.org_id AND l.id = COALESCE(e.lead_id, cl.lead_id) WHERE \${where.join(" AND ")}\`;
   const countResult = page && limit ? await _pool.query(\`SELECT COUNT(*) AS total \${base}\`, params) : null;
-  let sql = \`SELECT e.*, l.name AS contact_name, l.phone AS contact_phone \${base} ORDER BY e.created_at DESC\`;
+  let sql = \`SELECT e.*, COALESCE(e.lead_id, cl.lead_id) AS contact_id, l.name AS contact_name, l.phone AS contact_phone \${base} ORDER BY e.created_at DESC\`;
   if (page && limit) { params.push((page - 1) * limit, limit); sql += " LIMIT ?, ?"; }
   const { rows } = await _pool.query(sql, params);
   const mapped = (rows || []).map((row) => {
     const api = fromDbRow("enquiries", row);
-    api.contactId = row.lead_id || null; api.contactName = row.contact_name || null; api.contactPhone = row.contact_phone || null;
+    api.contactId = row.contact_id || row.lead_id || row.cl_lead_id || null; api.contactName = row.contact_name || null; api.contactPhone = row.contact_phone || null;
     if (row.contact_name) { api.name = row.contact_name; api.phone = row.contact_phone || api.phone; }
     return api;
   });
