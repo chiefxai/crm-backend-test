@@ -385,10 +385,10 @@ function normalizeIdList(value) {
 
 async function getDialerTaskDeletionImpact(orgId, taskId) {
   const { rows } = await _pool.query(
-    \`SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
+    `SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
        FROM dialer_tasks
       WHERE org_id = ? AND id = ?
-      LIMIT 1\`,
+      LIMIT 1`,
     [orgId, taskId]
   );
   const task = rows?.[0];
@@ -404,13 +404,13 @@ async function getDialerTaskDeletionImpact(orgId, taskId) {
   if (callIds.length) {
     const placeholders = callIds.map(() => "?").join(",");
     const result = await _pool.query(
-      \`SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (\${placeholders}))\`,
+      `SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (${placeholders}))`,
       [orgId, taskId, ...callIds]
     );
     callIds = [...new Set((result.rows || []).map((row) => row.id).concat(callIds))];
   } else {
     const result = await _pool.query(
-      \`SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?\`,
+      `SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?`,
       [orgId, taskId]
     );
     callIds = [...new Set((result.rows || []).map((row) => row.id))];
@@ -420,8 +420,8 @@ async function getDialerTaskDeletionImpact(orgId, taskId) {
   if (leadIds.length) {
     const placeholders = leadIds.map(() => "?").join(",");
     const leadResult = await _pool.query(
-      \`SELECT COUNT(*) AS count, SUM(CASE WHEN pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact' THEN 1 ELSE 0 END) AS pipeline_count
-         FROM leads WHERE org_id = ? AND id IN (\${placeholders})\`,
+      `SELECT COUNT(*) AS count, SUM(CASE WHEN pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact' THEN 1 ELSE 0 END) AS pipeline_count
+         FROM leads WHERE org_id = ? AND id IN (${placeholders})`,
       [orgId, ...leadIds]
     );
     counts.leads = Number(leadResult.rows?.[0]?.count || 0);
@@ -431,16 +431,16 @@ async function getDialerTaskDeletionImpact(orgId, taskId) {
   if (callIds.length) {
     const placeholders = callIds.map(() => "?").join(",");
     const enquiryResult = await _pool.query(
-      \`SELECT COUNT(*) AS count FROM enquiries WHERE org_id = ? AND call_id IN (\${placeholders})\`,
+      `SELECT COUNT(*) AS count FROM enquiries WHERE org_id = ? AND call_id IN (${placeholders})`,
       [orgId, ...callIds]
     );
     counts.enquiries = Number(enquiryResult.rows?.[0]?.count || 0);
 
     const callbackResult = await _pool.query(
-      \`SELECT COUNT(*) AS count
+      `SELECT COUNT(*) AS count
          FROM call_logs
-        WHERE org_id = ? AND id IN (\${placeholders})
-          AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')\`,
+        WHERE org_id = ? AND id IN (${placeholders})
+          AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')`,
       [orgId, ...callIds]
     );
     counts.scheduledCallbacks = Number(callbackResult.rows?.[0]?.count || 0);
@@ -470,11 +470,11 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     await client.query("BEGIN");
 
     const taskResult = await client.query(
-      \`SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
+      `SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
          FROM dialer_tasks
         WHERE org_id = ? AND id = ?
         LIMIT 1
-        FOR UPDATE\`,
+        FOR UPDATE`,
       [orgId, taskId]
     );
     const task = taskResult.rows?.[0];
@@ -499,13 +499,13 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (callIds.length) {
       const placeholders = callIds.map(() => "?").join(",");
       const result = await client.query(
-        \`SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (\${placeholders}))\`,
+        `SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (${placeholders}))`,
         [orgId, taskId, ...callIds]
       );
       callIds = [...new Set((result.rows || []).map((row) => row.id).concat(callIds))];
     } else {
       const result = await client.query(
-        \`SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?\`,
+        `SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?`,
         [orgId, taskId]
       );
       callIds = [...new Set((result.rows || []).map((row) => row.id))];
@@ -516,7 +516,7 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (callIds.length && deleteEnquiries) {
       const placeholders = callIds.map(() => "?").join(",");
       const result = await client.query(
-        \`DELETE FROM enquiries WHERE org_id = ? AND call_id IN (\${placeholders})\`,
+        `DELETE FROM enquiries WHERE org_id = ? AND call_id IN (${placeholders})`,
         [orgId, ...callIds]
       );
       counts.enquiries = Number(result.affectedRows || 0);
@@ -525,7 +525,7 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (callIds.length && deleteScheduledCallbacks) {
       const placeholders = callIds.map(() => "?").join(",");
       const result = await client.query(
-        \`UPDATE call_logs
+        `UPDATE call_logs
             SET callback_time = NULL,
                 callback_reason = NULL,
                 callback_status = NULL,
@@ -534,8 +534,8 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
                 retry_claimed_at = NULL,
                 status = CASE WHEN status = 'Callback Scheduled' THEN 'Completed' ELSE status END,
                 conversation_outcome = CASE WHEN conversation_outcome IN ('callback_scheduled', 'scheduled_callback') THEN 'completed' ELSE conversation_outcome END
-          WHERE org_id = ? AND id IN (\${placeholders})
-            AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')\`,
+          WHERE org_id = ? AND id IN (${placeholders})
+            AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')`,
         [orgId, ...callIds]
       );
       counts.scheduledCallbacks = Number(result.affectedRows || 0);
@@ -543,7 +543,7 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
       if (leadIds.length) {
         const leadPlaceholders = leadIds.map(() => "?").join(",");
         await client.query(
-          \`UPDATE leads l
+          `UPDATE leads l
               SET callback_time = (
                 SELECT MAX(cl.callback_time)
                   FROM call_logs cl
@@ -552,7 +552,7 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
                    AND cl.callback_time IS NOT NULL
                    AND (cl.status = 'Callback Scheduled' OR cl.retry_status = 'pending')
               )
-            WHERE l.org_id = ? AND l.id IN (\${leadPlaceholders})\`,
+            WHERE l.org_id = ? AND l.id IN (${leadPlaceholders})`,
           [orgId, ...leadIds]
         );
       }
@@ -561,9 +561,9 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (leadIds.length && removeFromPipeline && !deleteLeads) {
       const placeholders = leadIds.map(() => "?").join(",");
       const result = await client.query(
-        \`UPDATE leads SET pipeline_stage = 'contact'
-          WHERE org_id = ? AND id IN (\${placeholders})
-            AND pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact'\`,
+        `UPDATE leads SET pipeline_stage = 'contact'
+          WHERE org_id = ? AND id IN (${placeholders})
+            AND pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact'`,
         [orgId, ...leadIds]
       );
       counts.pipeline = Number(result.affectedRows || 0);
@@ -572,7 +572,7 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (leadIds.length && deleteLeads) {
       const placeholders = leadIds.map(() => "?").join(",");
       const result = await client.query(
-        \`DELETE FROM leads WHERE org_id = ? AND id IN (\${placeholders})\`,
+        `DELETE FROM leads WHERE org_id = ? AND id IN (${placeholders})`,
         [orgId, ...leadIds]
       );
       counts.leads = Number(result.affectedRows || 0);
@@ -587,8 +587,8 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
 
     try {
       await client.query(
-        \`INSERT INTO audit_log (id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\`,
+        `INSERT INTO audit_log (id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [require("crypto").randomUUID(), orgId, actor.userId || null, actor.userEmail || null, "delete", "dialer_task", taskId,
           JSON.stringify({ taskName: task.name, deleteLeads, deleteEnquiries, deleteScheduledCallbacks, removeFromPipeline }), new Date().toISOString()]
       );
@@ -2306,7 +2306,7 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
       const archiveRow = costArchiveRowFromSnapshot(archiveSnapshot, deletedByEmail);
       if (!archiveRow.id) archiveRow.id = require("crypto").randomUUID();
       await client.query(
-        `INSERT INTO \`org_cost_archive\` (id, org_id, org_name, workspace_name, industry, org_created_at, deleted_by_email, billing_period_end, ai_minutes_used, cost_per_minute_inr, ai_minutes_cost_inr, phone_charges, phone_cost_per_minute, call_provider_key, call_provider_label, ai_total_tokens, ai_input_tokens, ai_output_tokens, ai_call_count, ai_session_count, ai_token_provider_key, ai_token_provider_label, ai_token_rate_per_1k, ai_token_unit, ai_token_tax_percent, ai_token_base_cost_inr, ai_token_tax_amount_inr, ai_token_total_cost_inr, snapshot, created_at)
+        `INSERT INTO `org_cost_archive` (id, org_id, org_name, workspace_name, industry, org_created_at, deleted_by_email, billing_period_end, ai_minutes_used, cost_per_minute_inr, ai_minutes_cost_inr, phone_charges, phone_cost_per_minute, call_provider_key, call_provider_label, ai_total_tokens, ai_input_tokens, ai_output_tokens, ai_call_count, ai_session_count, ai_token_provider_key, ai_token_provider_label, ai_token_rate_per_1k, ai_token_unit, ai_token_tax_percent, ai_token_base_cost_inr, ai_token_tax_amount_inr, ai_token_total_cost_inr, snapshot, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            org_name=VALUES(org_name), workspace_name=VALUES(workspace_name), industry=VALUES(industry),
@@ -2359,7 +2359,7 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
     ];
 
     for (const table of ordered) {
-      await client.query(`DELETE FROM \`${table}\` WHERE org_id = ?`, [orgId]);
+      await client.query(`DELETE FROM `${table}` WHERE org_id = ?`, [orgId]);
     }
 
     // Cloud-project metadata uses organization_id rather than org_id.
