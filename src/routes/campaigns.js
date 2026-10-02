@@ -2,7 +2,7 @@
 
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
-const { requireAuth } = require("../middleware/auth");
+const { requireAuth, requireRole } = require("../middleware/auth");
 const db = require("../db/repository");
 const workflowEngine = require("../crm/workflowEngine");
 const storage = require("../storage");
@@ -253,6 +253,51 @@ router.post("/dialer-tasks/:id/auto-dial/start", requireAuth, async (req, res) =
 
     res.json(updated);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+});
+
+// ── Campaign task deletion ────────────────────────────────────────────────
+// Deletion is deliberately restricted to the customer Organization Admin.
+// The endpoint never cascades silently: the caller must explicitly choose
+// which related CRM data should also be removed/reset.
+const requireOrganizationAdmin = requireRole(["Organization Admin"]);
+
+router.get("/dialer-tasks/:id/delete-impact", requireAuth, requireOrganizationAdmin, async (req, res) => {
+  try {
+    const impact = await db.getDialerTaskDeletionImpact(req.orgId, req.params.id);
+    if (!impact) return res.status(404).json({ error: "Dialer task not found" });
+    res.json(impact);
+  } catch (err) {
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+router.delete("/dialer-tasks/:id", requireAuth, requireOrganizationAdmin, async (req, res) => {
+  try {
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({ error: "Deletion confirmation is required" });
+    }
+
+    const result = await db.deleteDialerTaskData(req.orgId, req.params.id, {
+      deleteLeads: req.body?.deleteLeads === true,
+      deleteEnquiries: req.body?.deleteEnquiries === true,
+      deleteScheduledCallbacks: req.body?.deleteScheduledCallbacks === true,
+      removeFromPipeline: req.body?.removeFromPipeline === true,
+    }, {
+      userId: req.userId,
+      userEmail: req.userEmail,
+    });
+
+    global.broadcastLog(\`🗑️ Deleted campaign task: \${result.taskName}\`, {
+      type: "campaign-task-deleted",
+      taskId: result.taskId,
+      orgId: req.orgId,
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    const status = Number(err.statusCode) || 500;
+    if (status >= 500) log.error("❌ /api/dialer-tasks/:id DELETE:", err.message);
+    res.status(status).json({ error: safeErrorMessage(err) });
+  }
 });
 
 // Stops the server-side loop from placing any further calls for this
