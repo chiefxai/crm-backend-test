@@ -316,6 +316,14 @@ router.post("/dialer-tasks/:id/auto-dial/stop", requireAuth, async (req, res) =>
       autoDialEnabled: false,
       autoDialStatus: "paused",
       autoDialRunId: null,
+      // Stop must clear the server-side active-call markers as well. Keeping
+      // currentProviderCallSid after the call has already ended makes the
+      // delete guard believe a live call still exists and permanently return 409.
+      currentLeadId: null,
+      currentProviderCallSid: null,
+      currentProvider: null,
+      currentCallStartedAt: null,
+      nextDialAt: null,
     });
 
     if (task.currentProviderCallSid) {
