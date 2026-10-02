@@ -138,28 +138,9 @@ router.post("/calls/:id/analyze", requireAuth, async (req, res) => {
 router.get("/call-logs", requireAuth, async (req, res) => {
   try {
     const pagination = parsePagination(req.query);
-    const result = await db.list("calllogs", req.orgId, pagination || {});
+    const result = await db.getCallLogsWithContacts(req.orgId, pagination || {});
     const logs = pagination ? result.rows : result;
-
-    // Build a phone → name map from contacts so logs created before a
-    // contact was added still resolve to the contact's name.
-    let phoneToName = {};
-    try {
-      const leads = await db.list("leads", req.orgId);
-      for (const l of leads) {
-        if (l.name && l.phone) {
-          const key = normalizePhone(l.phone);
-          if (key) phoneToName[key] = l.name;
-        }
-      }
-    } catch (_) { /* non-fatal — fall through with stored leadName */ }
-    const enriched = logs.map(log => {
-      // callerNumber is the E.164 phone stored separately from leadName;
-      // old rows without it fall back to trying leadName as a phone.
-      const key = normalizePhone(log.callerNumber || log.leadName);
-      const contactName = key && phoneToName[key];
-      return contactName ? { ...log, leadName: contactName } : log;
-    });
+    const enriched = logs;
     // Turns a bare object key (STORAGE_USE_SIGNED_URLS=true) into a fresh
     // playable link; a no-op passthrough for a row that already holds a
     // real URL (default public-bucket mode, or any pre-existing row) —
