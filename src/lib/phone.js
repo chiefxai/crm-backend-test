@@ -1,6 +1,7 @@
 // Phone number normalization — E.164 storage, readable display.
 // Handles Indian numbers (the primary use-case) and falls back gracefully
-// for any other format so nothing is lost.
+// for any other format so nothing is lost. The canonical stored identity is
+// E.164 (+91XXXXXXXXXX for Indian mobile numbers).
 
 /**
  * Normalize to E.164. Examples:
