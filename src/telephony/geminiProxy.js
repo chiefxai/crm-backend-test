@@ -94,12 +94,21 @@ function send(ws, obj) {
 // ──────────═════════════════════
 async function handleBrowserSession(browserWs, sessionContext = null) {
   const orgId = sessionContext?.orgId ? String(sessionContext.orgId) : null;
+  const provider = sessionContext?.provider ? String(sessionContext.provider) : "gemini";
+  const providerCallSid = sessionContext?.providerCallSid ? String(sessionContext.providerCallSid) : null;
+  const callerNumber = sessionContext?.callerNumber ? String(sessionContext.callerNumber) : null;
+  const calleeNumber = sessionContext?.calleeNumber ? String(sessionContext.calleeNumber) : null;
+  const direction = sessionContext?.direction ? String(sessionContext.direction) : "unknown";
+  const campaignId = sessionContext?.campaignId ? String(sessionContext.campaignId) : null;
+  const taskId = sessionContext?.taskId ? String(sessionContext.taskId) : null;
+  const leadId = sessionContext?.leadId ? String(sessionContext.leadId) : null;
+  const agentId = sessionContext?.agentId ? String(sessionContext.agentId) : null;
   if (!orgId) throw new Error("Authenticated organization context is required for browser voice sessions");
   let geminiSession = null;
   let isActive = true;
   const startTime = Date.now();
 
-  const callId = `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const callId = providerCallSid || `call_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const toolCallDeduper = createToolCallDeduper({ ttlMs: 6000 });
   const tempDir = path.join(__dirname, "../../temp");
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
@@ -225,7 +234,7 @@ Never call 'save_question_response' unless the caller has actually, verbally ans
     if (global.broadcastLog) {
       global.broadcastLog(`🛑 Call completed | Duration: ${duration}s | Total Tokens: ${liveInputTokens + liveOutputTokens}`, { type: "system", duration, inputTokens: liveInputTokens, outputTokens: liveOutputTokens });
     }
-    processPostCallData(callId, tempPcmPath, duration, transcriptLines, activeConfig, liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes, orgId)
+    processPostCallData(callId, tempPcmPath, duration, transcriptLines, activeConfig, liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes, orgId, { provider, providerCallSid, callerNumber, calleeNumber, direction, campaignId, taskId, leadId, agentId })
       .catch(err => log.error("❌ Post-call error:", err.message));
   }
 
@@ -429,7 +438,7 @@ async function openGeminiSession(browserWs, voiceName, systemPrompt, recordStrea
               result = await handleSearchPolicyKnowledgeBase(call.args.query);
             } else if (call.name === "save_question_response") {
               const activeConfig = getConfig();
-              const phone = activeConfig.activePhone || "Web Call";
+              const phone = callerNumber || calleeNumber || activeConfig.activePhone || "Web Call";
               result = await handleSaveQuestionResponse(orgId, "web_call", phone, call.args.question, call.args.answer, normalizedQuestions);
             } else if (call.name === "save_enquiry") {
               result = await handleSaveEnquiry(orgId, "web_call", call.args);
@@ -570,7 +579,7 @@ async function openGeminiSession(browserWs, voiceName, systemPrompt, recordStrea
 // ──────────═════════════════════
 // POST CALL: Upload + Sentiment + Supabase save
 // ──────────═════════════════════
-async function processPostCallData(callId, tempPcmPath, durationSeconds, transcriptLines, activeConfig, liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes, orgId) {
+async function processPostCallData(callId, tempPcmPath, durationSeconds, transcriptLines, activeConfig, liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes, orgId, callContext = {}) {
   if (!orgId) throw new Error("orgId is required for post-call processing");
   if (!fs.existsSync(tempPcmPath)) return;
 
@@ -658,7 +667,8 @@ async function processPostCallData(callId, tempPcmPath, durationSeconds, transcr
   }
 
   db.create("calllogs", orgId, {
-    leadName: "Web Call",
+    leadName: callContext.callerNumber || callContext.calleeNumber || "Web Call",
+    callerNumber: callContext.callerNumber || callContext.calleeNumber || null,
     duration: durationSeconds,
     status: "Completed",
     sentiment,
@@ -666,7 +676,13 @@ async function processPostCallData(callId, tempPcmPath, durationSeconds, transcr
     transcript: transcriptForUi,
     summary: aiSummary,
     recordingUrl,
-    direction: "unknown",
+    direction: callContext.direction || "unknown",
+    provider: callContext.provider || "gemini",
+    providerCallSid: callContext.providerCallSid || null,
+    campaignId: callContext.campaignId || null,
+    taskId: callContext.taskId || null,
+    leadId: callContext.leadId || null,
+    agentId: callContext.agentId || null,
     createdAt: new Date().toISOString()
   }).then((savedLog) => {
     if (global.broadcastLog) {
