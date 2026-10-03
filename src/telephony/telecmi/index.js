@@ -193,7 +193,9 @@ async function incoming(req, res) {
 
   const token = makeTicket(context);
   remember(streamTickets, token, context, TICKET_TTL_MS);
-  return res.json({ streamUrl: `${process.env.TELECMI_PUBLIC_WS_URL || ""}/telecmi/stream?stream_token=${encodeURIComponent(token)}` });
+  const publicWs = String(process.env.TELECMI_PUBLIC_WS_URL || process.env.PUBLIC_WS_URL || (process.env.DOMAIN ? `wss://${process.env.DOMAIN}` : "")).replace(/\/$/, "");
+  if (!publicWs) return res.status(503).json({ error: "TELECMI_PUBLIC_WS_URL (or PUBLIC_WS_URL/DOMAIN) is not configured" });
+  return res.json({ streamUrl: `${publicWs}/telecmi/stream?stream_token=${encodeURIComponent(token)}` });
 }
 
 const wss = new WebSocketServer({ noServer: true });
