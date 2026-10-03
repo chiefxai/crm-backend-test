@@ -187,6 +187,37 @@ async function incoming(req, res) {
     if (stream) stream.end();
     activeStreams.delete(callId);
     pendingCalls.delete(callId);
+
+    // Calls that never reached a media WebSocket (busy/no-answer/early
+    // provider failure) still need a CRM call_logs row so the dialer can
+    // release its currentProviderCallSid and advance/retry normally.
+    const fallbackWaitMs = status === "completed" ? 25000 : 1500;
+    setTimeout(async () => {
+      try {
+        if (await db.findCallLogByProviderCallSid(context.orgId, callId)) return;
+        const row = await db.create("calllogs", context.orgId, {
+          id: `call_telecmi_fallback_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          leadName: context.calleeNumber || context.callerNumber || "TeleCMI Call",
+          callerNumber: context.callerNumber || context.calleeNumber || null,
+          duration: Number(body.Duration) || 0,
+          status: "No Answer",
+          direction: context.direction || "unknown",
+          provider: "telecmi",
+          providerCallSid: callId,
+          campaignId: context.campaignId || null,
+          taskId: context.taskId || null,
+          leadId: context.leadId || null,
+          agentId: context.agentId || null,
+          createdAt: new Date().toISOString(),
+        });
+        global.broadcastLog?.(`📞 TeleCMI call ended without a media session`, {
+          type: "call_completed", orgId: context.orgId, callLog: row, providerCallSid: callId,
+        });
+      } catch (err) {
+        log.error(`[telecmi] Fallback call log failed for ${callId}:`, err.message);
+      }
+    }, fallbackWaitMs);
+
     return res.json({ ok: true });
   }
   if (event !== "startapp") return res.json({ streamUrl: "" });
