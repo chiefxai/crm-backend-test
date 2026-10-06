@@ -16,6 +16,7 @@ const log = getLogger("routes.settings");
 const { isDuplicateKeyError } = require("../lib/dbErrors");
 const telephony = require("../telephony/registry");
 const channelsEngine = require("../channels/engine");
+const { getIndustryDefinition } = require("../platform/industry");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
@@ -98,6 +99,26 @@ router.post("/vobiz-inbound-webhook/sync", requireAuth, requireRole(ADMIN_ROLES)
     });
   } catch (err) {
     log.error("POST /api/settings/vobiz-inbound-webhook/sync failed:", err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+// ── Industry configuration ──
+// Read-only, org-scoped semantic configuration. Persistence remains in the
+// organization row; generic domain records remain in the objects engine.
+router.get("/industry", requireAuth, async (req, res) => {
+  try {
+    const org = await db.getOrg(req.orgId);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const config = getIndustryDefinition(org.industry);
+    res.json({
+      ...config,
+      industry: config.key,
+      businessType: org.businessType || org.business_type || null,
+      organizationId: req.orgId,
+    });
+  } catch (err) {
+    log.error("GET /api/settings/industry failed:", err.message);
     res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
