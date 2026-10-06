@@ -45,7 +45,9 @@ function getIndustryDefinition(industryKey) {
         terminal: stage.key === "client" || stage.key === "converted" || stage.key === "sold" || stage.key === "enrolled" || stage.key === "discharged" || stage.key === "policy_issued" || stage.key === "settled" || stage.key === "completed" || stage.key === "delivered" || stage.key === "won" ? "won" : stage.key === "lost" || stage.key === "rejected" || stage.key === "returned" || stage.key === "cancelled" ? "lost" : undefined,
       })),
     },
-    modules: (known === "automotive"
+    modules: (known === "lending"
+      ? [["loan_lifecycle", "Loan Lifecycle", "/loans", "loans", "layers"]]
+      : known === "automotive"
       ? [
           ["vehicle_inventory", "Vehicle Inventory", "/vehicles"],
           ["test_drives", "Test Drives", "/test-drives"],
@@ -54,7 +56,7 @@ function getIndustryDefinition(industryKey) {
           ["vehicle_sales", "Vehicle Sales", "/vehicle-sales"],
         ]
       : domainObjects.map((object) => [object.key, object.pluralLabel, `/${object.key}`])
-    ).map(([key, label, route]) => ({ key, label, route, domainSpecific: true })),
+    ).map(([key, label, route, tabId, iconKey]) => ({ key, label, route, ...(tabId ? { tabId } : {}), ...(iconKey ? { iconKey } : {}), domainSpecific: true })),
   };
 }
 
