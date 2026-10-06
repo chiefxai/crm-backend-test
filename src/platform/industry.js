@@ -36,8 +36,21 @@ function getIndustryDefinition(industryKey) {
     label: industryPacks.listIndustries().find((item) => item.key === known)?.label || known,
     labels,
     domainObjects,
-    pipeline: industryPacks.getPipelineStageLabels(known),
-    modules: domainObjects.map((object) => ({ key: object.key, label: object.pluralLabel, domainSpecific: true })),
+    pipeline: {
+      key: known,
+      label: labels.pipeline.plural,
+      stages: industryPacks.getPipelineStageLabels(known).map((stage, index, stages) => ({
+        ...stage,
+        order: (index + 1) * 10,
+        terminal: stage.key === "client" || stage.key === "converted" || stage.key === "sold" || stage.key === "enrolled" || stage.key === "discharged" || stage.key === "policy_issued" || stage.key === "settled" || stage.key === "completed" || stage.key === "delivered" || stage.key === "won" ? "won" : stage.key === "lost" || stage.key === "rejected" || stage.key === "returned" || stage.key === "cancelled" ? "lost" : undefined,
+      })),
+    },
+    modules: domainObjects.map((object) => ({
+      key: object.key,
+      label: object.pluralLabel,
+      route: `/${object.key}`,
+      domainSpecific: true,
+    })),
   };
 }
 
