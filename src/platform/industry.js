@@ -5,6 +5,42 @@
 // and pipelines belong to it. Feature flags and user permissions stay separate.
 const industryPacks = require("../seed/industryPacks");
 
+const CORE_DOMAIN_OBJECTS = [
+  { key: "contact", label: "Contact", pluralLabel: "Contacts", searchable: true, auditable: true, primary: true, fields: [
+    { key: "name", label: "Name", type: "text", required: true },
+    { key: "phone", label: "Phone", type: "phone" },
+    { key: "email", label: "Email", type: "email" },
+  ] },
+  { key: "campaign", label: "Campaign", pluralLabel: "Campaigns", auditable: true, fields: [
+    { key: "name", label: "Name", type: "text", required: true },
+    { key: "status", label: "Status", type: "select" },
+  ] },
+  { key: "call", label: "Call", pluralLabel: "Calls", auditable: true, fields: [
+    { key: "direction", label: "Direction", type: "select", options: ["inbound", "outbound"] },
+    { key: "duration", label: "Duration", type: "number" },
+  ] },
+];
+const CORE_DOMAIN_RELATIONSHIPS = [
+  { from: "campaign", to: "contact", type: "many_to_many", label: "targets" },
+  { from: "call", to: "contact", type: "many_to_one", label: "contact" },
+];
+function normalizeField(field) {
+  const type = field.type === "textarea" ? "text" : field.type;
+  const allowed = new Set(["text", "number", "boolean", "date", "datetime", "currency", "phone", "email", "select", "relation"]);
+  return { key: field.key, label: field.label, type: allowed.has(type) ? type : "text", ...(field.required ? { required: true } : {}), ...(Array.isArray(field.options) ? { options: field.options } : {}), ...(field.relationObjectKey ? { relationObjectKey: field.relationObjectKey } : {}) };
+}
+function buildDomainModel(packObjects) {
+  const industryObjects = packObjects.map((object, index) => ({
+    key: object.key, label: object.label.replace(/s$/, ""), pluralLabel: object.label, position: index,
+    description: object.description || undefined, icon: object.icon || undefined,
+    fields: (object.fields || []).map(normalizeField), searchable: true, auditable: true,
+  }));
+  return {
+    objects: [...CORE_DOMAIN_OBJECTS, ...industryObjects.filter((object) => !CORE_DOMAIN_OBJECTS.some((core) => core.key === object.key))],
+    relationships: [...CORE_DOMAIN_RELATIONSHIPS],
+  };
+}
+
 const LABELS = {
   lending: { workspace: ["Workspace", "Workspace"], lead: ["Lead", "Leads"], contact: ["Contact", "Contacts"], campaign: ["Campaign", "Campaigns"], pipeline: ["Pipeline", "Pipeline"], appointment: ["Appointment", "Appointments"], agent: ["Loan Agent", "Loan Agents"], enquiry: ["Enquiry", "Enquiries"], deal: ["Loan", "Loans"] },
   automotive: { workspace: ["Dealership", "Dealership"], lead: ["Vehicle Enquiry", "Vehicle Enquiries"], contact: ["Customer", "Customers"], campaign: ["Sales Campaign", "Sales Campaigns"], pipeline: ["Sales Pipeline", "Sales Pipeline"], appointment: ["Test Drive", "Test Drives"], agent: ["Sales Executive", "Sales Executives"], enquiry: ["Vehicle Enquiry", "Vehicle Enquiries"], deal: ["Vehicle Sale", "Vehicle Sales"] },
@@ -20,22 +56,15 @@ function getIndustryDefinition(industryKey) {
   const known = LABELS[key] ? key : "lending";
   const pack = industryPacks.getPack(known) || [];
   const labels = Object.fromEntries(Object.entries(LABELS[known]).map(([name, value]) => [name, pair(value)]));
-  const domainObjects = pack.map((object, index) => ({
-    key: object.key,
-    label: object.label.replace(/s$/, ""),
-    pluralLabel: object.label,
-    position: index,
-    description: object.description || null,
-    hasPipeline: Boolean(object.hasPipeline),
-    fields: object.fields || [],
-    stages: object.stages || [],
-  }));
+  const domainModel = buildDomainModel(pack);
+  const domainObjects = domainModel.objects;
 
   return {
     key: known,
     label: industryPacks.listIndustries().find((item) => item.key === known)?.label || known,
     labels,
     domainObjects,
+    domainModel,
     pipeline: {
       key: known,
       label: labels.pipeline.plural,
