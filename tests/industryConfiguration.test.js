@@ -6,7 +6,8 @@ describe("industry configuration", () => {
     expect(config.key).toBe("automotive");
     expect(config.labels.contact.plural).toBe("Customers");
     expect(config.domainObjects.some((object) => object.key === "test_drive")).toBe(true);
-    expect(config.pipeline.some((stage) => stage.key === "client")).toBe(true);
+    expect(config.pipeline.stages.some((stage) => stage.key === "client")).toBe(true);
+    expect(config.domainModel.objects.some((object) => object.key === "contact")).toBe(true);
   });
 
   test("falls back safely for unknown industries", () => {
