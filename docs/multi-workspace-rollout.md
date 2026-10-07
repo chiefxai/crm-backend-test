@@ -223,6 +223,19 @@ additional workspaces are enabled.
 
 ## Deploy on the existing VM
 
+After deploying the audit script, run this read-only database check inside the
+API container before provisioning child workspaces:
+
+```bash
+cd ~/crm-backend-test && docker compose --env-file .env -f docker-compose.yml -f docker-compose.caddy.yml exec -T app node scripts/audit-workspace-rollout.js
+```
+
+It checks required migration rows, one initial workspace per organization,
+operational rows that reference a missing workspace, legacy NULL workspace
+counts, and the three rollout gate states. It does not change database rows or
+verify bucket policies, HTTP authorization, telephony callbacks, or sharing
+behavior; those still require separate VM validation.
+
 ```bash
 cd ~/crm-backend-test && git pull --ff-only origin main && ./deploy.sh --prod --pull --build --application-services --backup-db --migrate --trace
 ```
