@@ -107,7 +107,15 @@ function getIndustryDefinition(industryKey) {
       ? [
           ["automotive_records", "Vehicle Operations", "/objects", "objects", "layers", "objects"],
         ]
-      : domainObjects.map((object) => [object.key, object.pluralLabel, `/${object.key}`])
+      : [[`${known}_records`, {
+          real_estate: "Property Records",
+          healthcare: "Patient Records",
+          insurance: "Policy & Claims",
+          education: "Admissions",
+          ecommerce: "Orders",
+          field_services: "Service Jobs",
+          it_sales: "Sales Opportunities",
+        }[known] || `${INDUSTRY_CONFIG[known]?.label || known} Records`, "/objects", "objects", "layers", "objects"]]
     ).map(([key, label, route, tabId, iconKey, featureFlag]) => ({ key, label, route, ...(tabId ? { tabId } : {}), ...(iconKey ? { iconKey } : {}), ...(featureFlag ? { featureFlag } : {}), domainSpecific: true })),
   };
 }
