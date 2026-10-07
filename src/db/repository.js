@@ -1998,6 +1998,49 @@ async function getResponsesForPhone(orgId, phone) {
     .map((row) => ({ label: row.label || row.question, question: row.question, answer: row.answer, callId: row.call_id, createdAt: row.created_at }));
 }
 
+// List every organization membership for an authenticated user.
+// This is the source for the workspace switcher; unlike findMembershipForUser,
+// it deliberately does not assume a user belongs to only one organization.
+async function listMembershipsForUser(userId, email) {
+  const { data, error } = await supabase
+    .from("org_members")
+    .select("id, org_id, role, name, feature_flags, email")
+    .eq("user_id", userId);
+  if (error) throw new Error(`[db.listMembershipsForUser] ${error.message}`);
+
+  let rows = data || [];
+  if (!rows.length && email) {
+    const { data: byEmail, error: emailErr } = await supabase
+      .from("org_members")
+      .select("id, org_id, role, name, feature_flags, email")
+      .ilike("email", email.toLowerCase())
+      .is("user_id", null);
+    if (emailErr) throw new Error(`[db.listMembershipsForUser email] ${emailErr.message}`);
+    rows = byEmail || [];
+  }
+
+  const memberships = await Promise.all(rows.map(async (row) => {
+    const org = await organizationRepository.get(row.org_id);
+    if (!org) return null;
+    return {
+      membershipId: row.id,
+      orgId: row.org_id,
+      role: row.role,
+      name: row.name,
+      featureFlags: row.feature_flags || [],
+      organization: {
+        id: org.id,
+        name: org.name,
+        workspaceName: org.workspaceName,
+        industry: org.industry,
+        status: org.status,
+      },
+    };
+  }));
+
+  return memberships.filter(Boolean);
+}
+
 // Given an application auth user id, find the org they belong to.
 // Returns null if not configured (dev fallback) or no membership found.
 async function findOrgIdForUser(userId) {
@@ -2007,16 +2050,19 @@ async function findOrgIdForUser(userId) {
 
 // Same lookup but also returns the member's role, so request middleware
 // can do role-based access checks without a second round trip.
-async function findMembershipForUser(userId, email) {
+async function findMembershipForUser(userId, email, requestedOrgId = null) {
   // First try: match by Keycloak sub (user_id column)
   const { data, error } = await supabase
     .from("org_members")
     .select("id, org_id, role, name, feature_flags")
-    .eq("user_id", userId)
-    .limit(1)
-    .maybeSingle();
+    .eq("user_id", userId);
   if (error) throw new Error(`[db.findMembershipForUser] ${error.message}`);
-  if (data) return { orgId: data.org_id, role: data.role, name: data.name, featureFlags: data.feature_flags || [] };
+  const memberships = data || [];
+  const selected = requestedOrgId
+    ? memberships.find((row) => row.org_id === requestedOrgId)
+    : memberships[0];
+  if (selected) return { orgId: selected.org_id, role: selected.role, name: selected.name, featureFlags: selected.feature_flags || [] };
+  if (requestedOrgId && memberships.length) return null;
 
   // Fallback: match by email for members added before auth was set up.
   // Auto-link their row to the auth sub so future lookups hit the fast path.
@@ -2026,11 +2072,13 @@ async function findMembershipForUser(userId, email) {
     .select("id, org_id, role, name, feature_flags")
     .ilike("email", email.toLowerCase())
     .is("user_id", null)
-    .limit(1)
-    .maybeSingle();
-  log.info(`🔍 findMembershipForUser email lookup — email:${email} found:${!!byEmail} error:${emailErr?.message}`);
   if (emailErr) throw new Error(`[db.findMembershipForUser email] ${emailErr.message}`);
-  if (!byEmail) return null;
+  const byEmailRows = byEmail || [];
+  const byEmailSelected = requestedOrgId
+    ? byEmailRows.find((row) => row.org_id === requestedOrgId)
+    : byEmailRows[0];
+  if (!byEmailSelected) return null;
+  const byEmail = byEmailSelected;
 
   // Claim the legacy email-only membership atomically. The NULL predicate is
   // essential: two concurrent logins must not both believe they linked the row.
@@ -2592,6 +2640,7 @@ module.exports = {
   DEFAULT_RETRY_POLICY,
   MAX_RETRY_ATTEMPTS,
   addOrgMember,
+  listMembershipsForUser,
   findOrgMemberByEmail,
   updateOrgMemberUserId,
   findOrgIdForUser,
