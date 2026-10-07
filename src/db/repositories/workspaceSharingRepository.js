@@ -88,7 +88,7 @@ async function listSharedRecords(grant, cursor, pageSize=50) {
   const records=selected.map(row=>{
     const source=parseJson(row.data,{}), data={};
     for (const key of fields) if (Object.hasOwn(source,key)) data[key]=source[key];
-    return { id:row.id,stageId:row.stage_id,createdAt:row.created_at,data };
+    return { data };
   });
   const last=selected[selected.length-1];
   return { records,nextCursor:more&&last?Buffer.from(JSON.stringify({createdAt:last.created_at,id:last.id})).toString('base64url'):null };

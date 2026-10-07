@@ -114,7 +114,9 @@ Admin assignment and industry seed objects in one transaction. Sharing grants
 are read-only, limited to an explicit field allowlist, expire within at most one
 year, and can be revoked by a Workspace Admin of the source workspace. The
 target can read projected records only while the grant is active; it cannot
-edit source data. The sharing UI/API remains disabled unless all three gates
+edit source data. Record IDs, stages, timestamps, and fields outside the
+allowlist are not included in the shared response; the shared list uses bounded
+keyset pagination. The sharing UI/API remains disabled unless all three gates
 are enabled. Full MySQL and VM behavior still needs to be verified before
 turning on either gate.
 
