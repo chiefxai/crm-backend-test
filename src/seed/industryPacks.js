@@ -136,7 +136,7 @@ const PACKS = {
         { key: "sold", label: "Sold", color: "#22c55e" },
         { key: "lost", label: "Lost", color: "#ef4444" }
       ]
-    },
+    },
     {
       key: "vehicle", label: "Vehicles", icon: "Car", description: "Vehicle inventory available for sale", fields: [
         { key: "vin", label: "VIN", type: "text" }, { key: "make", label: "Make", type: "text" }, { key: "model", label: "Model", type: "text" },
