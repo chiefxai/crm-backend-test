@@ -191,10 +191,9 @@ function objectKeyFromStoredValue(value) {
         return pathname.startsWith(prefix) ? pathname.slice(prefix.length) : pathname;
       }
     }
-
-    if (url.searchParams.has("X-Amz-Signature") && pathname) {
-      return pathname.startsWith(bucket + "/") ? pathname.slice(bucket.length + 1) : pathname;
-    }
+    // Do not infer ownership from a query parameter such as
+    // X-Amz-Signature: any external URL can include one. Only configured
+    // storage hosts above are allowed to become keys in our bucket.
   } catch (err) {
     log.warn("⚠️ [storage] Could not parse stored playback URL: " + err.message);
   }
