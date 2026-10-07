@@ -157,8 +157,20 @@ function stageRowToApi(row) {
 // Records
 // ------------------------------------------------------------
 
-function recordRowToApi(row) {
-  return { id: row.id, objectId: row.object_id, stageId: row.stage_id, createdAt: row.created_at, updatedAt: row.updated_at, ...row.data };
+function recordRowToApi(row, object) {
+  const stage = object?.stages?.find((candidate) => candidate.id === row.stage_id) || null;
+  const values = { ...(row.data || {}) };
+  return {
+    id: row.id,
+    objectId: row.object_id,
+    objectKey: object?.key || null,
+    stageId: row.stage_id,
+    stageKey: stage?.key || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    values,
+    ...values,
+  };
 }
 
 // Basic validation: every required field must be present and non-empty.
@@ -194,7 +206,7 @@ async function listRecords(orgId, objectKey, options = {}) {
   }
   const { data, error, count } = await query;
   if (error) throw new Error(`[objectsEngine.listRecords] ${error.message}`);
-  const rows = (data || []).map(recordRowToApi);
+  const rows = (data || []).map((row) => recordRowToApi(row, object));
   return paginate ? { rows, total: count ?? rows.length } : rows;
 }
 
@@ -287,7 +299,12 @@ async function createRecord(orgId, objectKey, body) {
   let stageId = null;
   if (stageKey) {
     const stage = object.stages.find((s) => s.key === stageKey);
-    stageId = stage ? stage.id : null;
+    if (!stage) {
+      const err = new Error('Stage "' + stageKey + '" not found on object "' + objectKey + '"');
+      err.statusCode = 400;
+      throw err;
+    }
+    stageId = stage.id;
   } else if (object.stages.length) {
     stageId = object.stages[0].id; // default to first stage
   }
@@ -298,7 +315,7 @@ async function createRecord(orgId, objectKey, body) {
     .select()
     .single();
   if (error) throw new Error(`[objectsEngine.createRecord] ${error.message}`);
-  return recordRowToApi(row);
+  return recordRowToApi(row, object);
 }
 
 async function patchRecord(orgId, objectKey, recordId, body) {
@@ -329,11 +346,21 @@ async function patchRecord(orgId, objectKey, recordId, body) {
   if (!existing) return null;
 
   const mergedData = { ...existing.data, ...patch };
+  validateAgainstFields(object.fields, mergedData);
 
   const updatePayload = { data: mergedData, updated_at: new Date().toISOString() };
-  if (stageKey) {
-    const stage = object.stages.find((s) => s.key === stageKey);
-    if (stage) updatePayload.stage_id = stage.id;
+  if (stageKey !== undefined) {
+    if (stageKey === null || stageKey === "") {
+      updatePayload.stage_id = null;
+    } else {
+      const stage = object.stages.find((s) => s.key === stageKey);
+      if (!stage) {
+        const err = new Error('Stage "' + stageKey + '" not found on object "' + objectKey + '"');
+        err.statusCode = 400;
+        throw err;
+      }
+      updatePayload.stage_id = stage.id;
+    }
   }
 
   const { data: row, error } = await db.supabase
@@ -344,14 +371,20 @@ async function patchRecord(orgId, objectKey, recordId, body) {
     .select()
     .single();
   if (error) throw new Error(`[objectsEngine.patchRecord] ${error.message}`);
-  return recordRowToApi(row);
+  return recordRowToApi(row, object);
 }
 
 async function removeRecord(orgId, objectKey, recordId) {
   requireDb();
-  const { error } = await db.supabase.from("object_records").delete().eq("id", recordId).eq("org_id", orgId);
+  const { data: deleted, error } = await db.supabase
+    .from("object_records")
+    .delete()
+    .eq("id", recordId)
+    .eq("org_id", orgId)
+    .select("id")
+    .maybeSingle();
   if (error) throw new Error(`[objectsEngine.removeRecord] ${error.message}`);
-  return true;
+  return Boolean(deleted);
 }
 
 // ------------------------------------------------------------
