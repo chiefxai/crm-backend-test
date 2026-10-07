@@ -222,6 +222,9 @@ async function resolvePlaybackUrl(value, expiresIn = SIGNED_URL_TTL_SECONDS) {
 
 // Delete an object by key.
 async function remove(key) {
+  if (!recordingKeyBelongsToScope(key, getScope())) {
+    throw new Error("Recording object does not belong to the active workspace");
+  }
   const cmd = new DeleteObjectCommand({ Bucket: BUCKET(), Key: key });
   await getClient().send(cmd);
 }

@@ -327,6 +327,28 @@ those checks pass.
 The additive foundation can coexist with the old application. Once independent
 workspace data exists, rollback to an organization-only backend is forbidden.
 
+### Data-access audit follow-up (2026-10-08)
+
+- Reviewed raw operational SQL joins, task deletion/cleanup, campaign claims,
+  callback claims, sharing transactions, workspace membership changes, and
+  platform-owned cross-workspace reads. Customer operational queries bind both
+  `org_id` and `workspace_id`; intentional platform/scheduler reads remain
+  separately identified.
+- Durable callback jobs now resolve one callback row, restore its recorded
+  workspace scope, and process only that row. The periodic scheduler retains
+  the cross-workspace scan for reconciliation. Stale-claim recovery is a
+  narrowly constrained repository maintenance update; the query adapter now
+  rejects unscoped writes to workspace tables.
+- The legacy enquiry/contact backfill matches calls within the same workspace.
+- Organization setup now lets the globally unique provider-number constraint
+  reject a concurrent duplicate claim instead of overwriting the first
+  organization's credentials; the API returns a conflict response.
+- Recording deletion checks the active workspace in the storage helper as well
+  as the retention caller.
+- Static review cannot confirm bucket policy, live MySQL state, provider
+  callback behavior, or cross-workspace denial on the deployed VM. Those remain
+  rollout gates; keep the workspace and sharing flags disabled until they pass.
+
 ## Recovering from an occupied VM API port
 
 `Bind for 0.0.0.0:3000 failed: port is already allocated` means another
