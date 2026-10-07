@@ -1998,6 +1998,8 @@ async function getResponsesForPhone(orgId, phone) {
     .map((row) => ({ label: row.label || row.question, question: row.question, answer: row.answer, callId: row.call_id, createdAt: row.created_at }));
 }
 
+// Given an application auth user id, find the org they belong to.
+// Returns null if not configured (dev fallback) or no membership found.
 // List every organization membership for an authenticated user.
 // This is the source for the workspace switcher; unlike findMembershipForUser,
 // it deliberately does not assume a user belongs to only one organization.
@@ -2006,37 +2008,46 @@ async function listMembershipsForUser(userId, email) {
     .from("org_members")
     .select("id, org_id, role, name, feature_flags, email")
     .eq("user_id", userId);
+
   if (error) throw new Error(`[db.listMembershipsForUser] ${error.message}`);
 
   let rows = data || [];
+
   if (!rows.length && email) {
     const { data: byEmail, error: emailErr } = await supabase
       .from("org_members")
       .select("id, org_id, role, name, feature_flags, email")
       .ilike("email", email.toLowerCase())
       .is("user_id", null);
-    if (emailErr) throw new Error(`[db.listMembershipsForUser email] ${emailErr.message}`);
+
+    if (emailErr) {
+      throw new Error(`[db.listMembershipsForUser email] ${emailErr.message}`);
+    }
+
     rows = byEmail || [];
   }
 
-  const memberships = await Promise.all(rows.map(async (row) => {
-    const org = await organizationRepository.get(row.org_id);
-    if (!org) return null;
-    return {
-      membershipId: row.id,
-      orgId: row.org_id,
-      role: row.role,
-      name: row.name,
-      featureFlags: row.feature_flags || [],
-      organization: {
-        id: org.id,
-        name: org.name,
-        workspaceName: org.workspaceName,
-        industry: org.industry,
-        status: org.status,
-      },
-    };
-  }));
+  const memberships = await Promise.all(
+    rows.map(async (row) => {
+      const org = await organizationRepository.get(row.org_id);
+      if (!org) return null;
+
+      return {
+        membershipId: row.id,
+        orgId: row.org_id,
+        role: row.role,
+        name: row.name,
+        featureFlags: row.feature_flags || [],
+        organization: {
+          id: org.id,
+          name: org.name,
+          workspaceName: org.workspaceName,
+          industry: org.industry,
+          status: org.status,
+        },
+      };
+    })
+  );
 
   return memberships.filter(Boolean);
 }
@@ -2050,37 +2061,132 @@ async function findOrgIdForUser(userId) {
 
 // Same lookup but also returns the member's role, so request middleware
 // can do role-based access checks without a second round trip.
-  return membership ? membership.orgId : null;
-}
-
-// Same lookup but also returns the member's role, so request middleware
-// can do role-based access checks without a second round trip.
 async function findMembershipForUser(userId, email, requestedOrgId = null) {
   // First try: match by Keycloak sub (user_id column)
   const { data, error } = await supabase
     .from("org_members")
     .select("id, org_id, role, name, feature_flags")
     .eq("user_id", userId);
+
   if (error) throw new Error(`[db.findMembershipForUser] ${error.message}`);
+
   const memberships = data || [];
+
   const selected = requestedOrgId
     ? memberships.find((row) => row.org_id === requestedOrgId)
     : memberships[0];
-  if (selected) return { orgId: selected.org_id, role: selected.role, name: selected.name, featureFlags: selected.feature_flags || [] };
+
+  if (selected) {
+    return {
+      orgId: selected.org_id,
+      role: selected.role,
+      name: selected.name,
+      featureFlags: selected.feature_flags || [],
+    };
+  }
+
+  // If this authenticated user already has memberships, do not allow
+  // an arbitrary requested workspace through the email fallback.
   if (requestedOrgId && memberships.length) return null;
 
-  // Fallback: match by email for members added before auth was set up.
-  // Auto-link their row to the auth sub so future lookups hit the fast path.
+  // Fallback for legacy email-only memberships.
   if (!email) return null;
+
   const { data: byEmail, error: emailErr } = await supabase
     .from("org_members")
     .select("id, org_id, role, name, feature_flags")
     .ilike("email", email.toLowerCase())
     .is("user_id", null);
-  if (emailErr) throw new Error(`[db.findMembershipForUser email] ${emailErr.message}`);
+
+  if (emailErr) {
+    throw new Error(`[db.findMembershipForUser email] ${emailErr.message}`);
+  }
+
   const byEmailRows = byEmail || [];
+
   const byEmailSelected = requestedOrgId
-    ? byEmailRows.find((row) => row.org_id === requestedOrgId)// ------------------------------------------------------------
+    ? byEmailRows.find((row) => row.org_id === requestedOrgId)
+    : byEmailRows[0];
+
+  if (!byEmailSelected) return null;
+
+  // Claim the legacy email-only membership.
+  const { data: linkedRows, error: linkErr } = await supabase
+    .from("org_members")
+    .update({ user_id: userId })
+    .eq("id", byEmailSelected.id)
+    .is("user_id", null)
+    .select("id, org_id, role, name, feature_flags")
+    .limit(1);
+
+  if (linkErr) {
+    const { data: existing, error: existingErr } = await supabase
+      .from("org_members")
+      .select("id, org_id, role, name, feature_flags")
+      .eq("user_id", userId)
+      .limit(2);
+
+    if (existingErr) {
+      throw new Error(`[db.findMembershipForUser existing] ${existingErr.message}`);
+    }
+
+    if (existing?.length > 1) {
+      throw new Error(
+        "[db.findMembershipForUser] auth user has multiple organization memberships"
+      );
+    }
+
+    if (existing?.[0]) {
+      return {
+        orgId: existing[0].org_id,
+        role: existing[0].role,
+        name: existing[0].name,
+        featureFlags: existing[0].feature_flags || [],
+      };
+    }
+
+    return null;
+  }
+
+  const linked = linkedRows?.[0];
+
+  if (linked) {
+    return {
+      orgId: linked.org_id,
+      role: linked.role,
+      name: linked.name,
+      featureFlags: linked.feature_flags || [],
+    };
+  }
+
+  // Another request won the race. Re-read by immutable auth subject.
+  const { data: existing, error: existingErr } = await supabase
+    .from("org_members")
+    .select("id, org_id, role, name, feature_flags")
+    .eq("user_id", userId)
+    .limit(2);
+
+  if (existingErr) {
+    throw new Error(`[db.findMembershipForUser existing] ${existingErr.message}`);
+  }
+
+  if (existing?.length > 1) {
+    throw new Error(
+      "[db.findMembershipForUser] auth user has multiple organization memberships"
+    );
+  }
+
+  if (!existing?.[0]) return null;
+
+  return {
+    orgId: existing[0].org_id,
+    role: existing[0].role,
+    name: existing[0].name,
+    featureFlags: existing[0].feature_flags || [],
+  };
+}
+
+// ------------------------------------------------------------
 // Questionnaire (singleton per org) — the voice-agent's list of
 // lead-qualification questions for the insurance/lending vertical
 // ------------------------------------------------------------
@@ -2596,9 +2702,9 @@ module.exports = {
   DEFAULT_RETRY_POLICY,
   MAX_RETRY_ATTEMPTS,
   addOrgMember,
-  listMembershipsForUser,
   findOrgMemberByEmail,
   updateOrgMemberUserId,
+  listMembershipsForUser,
   findOrgIdForUser,
   findMembershipForUser,
   findOrgIdForNumber,
