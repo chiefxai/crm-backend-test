@@ -241,4 +241,78 @@ async function reviewProposal(orgId,sourceWorkspaceId,proposalId,decision,review
   } finally { client.release(); }
 }
 
-module.exports={list,create,revoke,readActiveSharedRecords,createProposal,listProposals,reviewProposal};
+const FIELD_TYPE_GROUPS={
+  text:new Set(['text','textarea','email','phone','url','select','multiselect','date','datetime']),
+  number:new Set(['number','currency','percent']),
+  boolean:new Set(['boolean','checkbox']),
+};
+function compatibleFieldTypes(source,target) {
+  const a=String(source||'text').toLowerCase(), b=String(target||'text').toLowerCase();
+  return a===b||Object.values(FIELD_TYPE_GROUPS).some(group=>group.has(a)&&group.has(b));
+}
+async function copySharedRecord(orgId,targetWorkspaceId,grantId,recordRef,targetObjectKey,fieldMapping,memberId) {
+  await db.ready;
+  if (!targetObjectKey||typeof targetObjectKey!=='string'||!fieldMapping||typeof fieldMapping!=='object'||Array.isArray(fieldMapping)||Object.keys(fieldMapping).length>100)
+    throw Object.assign(new Error('Choose a target object and provide a valid field mapping'),{statusCode:400});
+  const reference=decodeRecordRef(recordRef);
+  if(reference.grantId!==grantId) throw Object.assign(new Error('Record reference does not match this share'),{statusCode:400});
+  const client=await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const now=new Date().toISOString();
+    const {rows:grants}=await client.query(`SELECT g.* FROM workspace_share_grants g
+      INNER JOIN workspaces sw ON sw.org_id=g.org_id AND sw.id=g.source_workspace_id AND sw.status='Active'
+      INNER JOIN workspaces tw ON tw.org_id=g.org_id AND tw.id=g.target_workspace_id AND tw.status='Active'
+      WHERE g.id=? AND g.org_id=? AND g.target_workspace_id=? AND g.revoked_at IS NULL
+        AND (g.expires_at IS NULL OR g.expires_at>?) FOR SHARE`,[grantId,orgId,targetWorkspaceId,now]);
+    const grant=grants[0];
+    if(!grant) throw Object.assign(new Error('Active incoming share was not found'),{statusCode:404});
+    const allowed=new Set(parseJson(grant.allowed_fields,[]));
+    const mappings=Object.entries(fieldMapping);
+    if(!mappings.length||mappings.some(([source,target])=>!allowed.has(source)||typeof target!=='string'||!target.trim())||new Set(mappings.map(([,target])=>target)).size!==mappings.length)
+      throw Object.assign(new Error('Map each selected shared field to a unique target field'),{statusCode:400});
+    const {rows:records}=await client.query(`SELECT id,data,updated_at FROM object_records
+      WHERE org_id=? AND workspace_id=? AND object_id=? AND id=? FOR UPDATE`,[orgId,grant.source_workspace_id,grant.object_id,reference.recordId]);
+    const sourceRecord=records[0];
+    if(!sourceRecord) throw Object.assign(new Error('Shared record is no longer available'),{statusCode:404});
+    if(recordVersion(sourceRecord)!==reference.baseVersion) throw Object.assign(new Error('Shared record changed; reload it before copying'),{statusCode:409});
+    const {rows:targetObjects}=await client.query(`SELECT id FROM objects WHERE org_id=? AND workspace_id=? AND \`key\`=? LIMIT 1`,[orgId,targetWorkspaceId,targetObjectKey]);
+    if(!targetObjects[0]) throw Object.assign(new Error('Target object was not found in this workspace'),{statusCode:404});
+    const {rows:sourceFields}=await client.query('SELECT `key`,type FROM object_fields WHERE org_id=? AND workspace_id=? AND object_id=?',[orgId,grant.source_workspace_id,grant.object_id]);
+    const {rows:targetFields}=await client.query('SELECT `key`,type,label,required FROM object_fields WHERE org_id=? AND workspace_id=? AND object_id=?',[orgId,targetWorkspaceId,targetObjects[0].id]);
+    const sourceByKey=new Map(sourceFields.map(field=>[field.key,field])), targetByKey=new Map(targetFields.map(field=>[field.key,field]));
+    const sourceData=parseJson(sourceRecord.data,{}), copiedData={};
+    for(const [sourceKey,targetKey] of mappings) {
+      const sourceField=sourceByKey.get(sourceKey), targetField=targetByKey.get(targetKey.trim());
+      if(!sourceField||!targetField) throw Object.assign(new Error('A mapped field no longer exists'),{statusCode:400});
+      if(!compatibleFieldTypes(sourceField.type,targetField.type)) throw Object.assign(new Error(`Field types are incompatible for "${targetField.label}"`),{statusCode:400});
+      if(Object.hasOwn(sourceData,sourceKey)) copiedData[targetField.key]=sourceData[sourceKey];
+    }
+    const missing=targetFields.find(field=>field.required&&(copiedData[field.key]===undefined||copiedData[field.key]===null||copiedData[field.key]===''));
+    if(missing) throw Object.assign(new Error(`Map a value for required target field "${missing.label}"`),{statusCode:400});
+    const sourceFingerprint=crypto.createHmac('sha256',shareSecret()).update(`${grantId}:${reference.recordId}`).digest('hex');
+    const {rows:existing}=await client.query(`SELECT target_record_id FROM workspace_share_imports
+      WHERE org_id=? AND grant_id=? AND source_fingerprint=? AND target_workspace_id=? FOR UPDATE`,[orgId,grantId,sourceFingerprint,targetWorkspaceId]);
+    if(existing[0]) { await client.query('COMMIT'); return {status:'already_copied'}; }
+    const {rows:stages}=await client.query(`SELECT id FROM object_stages WHERE org_id=? AND workspace_id=? AND object_id=? ORDER BY position,id LIMIT 1`,[orgId,targetWorkspaceId,targetObjects[0].id]);
+    const targetRecordId=crypto.randomUUID(), stageId=stages[0]?.id||null;
+    await client.query(`INSERT INTO object_records (id,org_id,workspace_id,object_id,stage_id,data,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`,[targetRecordId,orgId,targetWorkspaceId,targetObjects[0].id,stageId,JSON.stringify(copiedData),now,now]);
+    try {
+      await client.query(`INSERT INTO workspace_share_imports
+        (id,org_id,grant_id,target_workspace_id,source_fingerprint,target_object_id,target_record_id,copied_by_member_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`,[crypto.randomUUID(),orgId,grantId,targetWorkspaceId,sourceFingerprint,targetObjects[0].id,targetRecordId,memberId,now]);
+    } catch(error) {
+      if(error.code!=='ER_DUP_ENTRY') throw error;
+      await client.query('ROLLBACK');
+      return {status:'already_copied'};
+    }
+    await client.query('COMMIT');
+    return {status:'copied'};
+  } catch(error) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw error;
+  } finally { client.release(); }
+}
+
+module.exports={list,create,revoke,readActiveSharedRecords,createProposal,listProposals,reviewProposal,copySharedRecord};

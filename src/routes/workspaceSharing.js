@@ -69,6 +69,21 @@ router.post('/records/:grantId/proposals',requirePermission('workspace.share.pro
   } catch(error) { res.status(error.statusCode||500).json({error:error.statusCode?error.message:'Could not submit edit proposal'}); }
 });
 
+router.post('/records/:grantId/copies',requirePermission('workspace.share.copy'),async(req,res)=>{
+  const recordRef=String(req.body?.recordRef||'');
+  const targetObjectKey=String(req.body?.targetObjectKey||'').trim();
+  const fieldMapping=req.body?.fieldMapping;
+  if(!recordRef||!targetObjectKey||!fieldMapping||typeof fieldMapping!=='object'||Array.isArray(fieldMapping))
+    return res.status(400).json({error:'Shared record reference, target object, and field mapping are required'});
+  try {
+    const membership=await db.findMembershipForUser(req.userId,req.userEmail,req.orgId);
+    if(!membership?.memberId) return res.status(403).json({error:'Active organization membership required'});
+    const result=await workspaceSharing.copySharedRecord(req.orgId,req.workspaceId,req.params.grantId,recordRef,targetObjectKey,fieldMapping,membership.memberId);
+    await auditLog.record(req.orgId,req,`workspace.share.copy.${result.status}`,'workspace_share',req.params.grantId,{targetObjectKey,fieldMapping:Object.keys(fieldMapping).map(sourceKey=>({sourceKey,targetKey:fieldMapping[sourceKey]}))});
+    res.status(result.status==='copied'?201:200).json(result);
+  } catch(error) { res.status(error.statusCode||500).json({error:error.statusCode?error.message:'Could not copy shared record'}); }
+});
+
 router.post('/proposals/:id/review',requirePermission('workspace.settings.manage'),requireWorkspaceAdmin,async(req,res)=>{
   const decision=String(req.body?.decision||'').trim();
   if (!['approved','rejected'].includes(decision)) return res.status(400).json({error:'Choose approve or reject'});
