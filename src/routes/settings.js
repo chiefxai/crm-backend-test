@@ -386,7 +386,8 @@ router.get("/org/profile-config", requireAuth, async (req, res) => {
 router.get("/pipeline-stages", requireAuth, async (req, res) => {
   try {
     const org = await db.getOrg(req.orgId);
-    res.json({ stages: industryPacks.getPipelineStageLabels(org && org.industry) });
+    const config = getIndustryDefinition(org && org.industry);
+    res.json(config.pipeline);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
