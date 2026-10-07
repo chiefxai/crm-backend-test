@@ -1,3 +1,4 @@
+jest.mock('../src/db/repositories/workspaceRepository', () => ({ getDefault: jest.fn(async orgId => ({ id: orgId, orgId, isDefault: true })) }));
 jest.mock("../src/db/repository", () => ({
   findMembershipForUser: jest.fn(), getOrg: jest.fn(), listMembershipsForUser: jest.fn(),
 }));
@@ -40,7 +41,7 @@ describe("workspace and platform authorization", () => {
 
   test("ordinary authenticated users receive only their own memberships", async () => {
     const res = await request(app).get("/api/auth/workspaces").set("Authorization", "Bearer valid").expect(200);
-    expect(res.body).toEqual([{ orgId: "org-a", role: "Agent" }]);
+    expect(res.body).toEqual([{ orgId: "org-a", role: "Agent", workspaceId: "org-a", workspace: { id: "org-a", orgId: "org-a", isDefault: true } }]);
     expect(platform.listOrganizations).not.toHaveBeenCalled();
   });
   test("ordinary users cannot select another organization", async () => {

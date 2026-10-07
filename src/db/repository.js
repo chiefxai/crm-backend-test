@@ -864,6 +864,7 @@ async function replaceTeamMembers(orgId, apiArray) {
     .eq("org_id", orgId);
   if (existingErr) throw new Error(`[db.replaceTeamMembers] read existing: ${existingErr.message}`);
 
+  const memberIdByEmail = new Map((existing || []).filter(r => r.email).map(r => [r.email.toLowerCase(), r.id]));
   const userIdById = new Map((existing || []).filter((r) => r.user_id).map((r) => [r.id, r.user_id]));
   const userIdByEmail = new Map((existing || []).filter((r) => r.user_id && r.email).map((r) => [r.email.toLowerCase(), r.user_id]));
   // Preserve feature_flags that were set via the dedicated /team POST — the frontend
@@ -883,6 +884,7 @@ async function replaceTeamMembers(orgId, apiArray) {
 
   const rows = apiArray.map((o) => {
     const row = { ...toDbRow("team", o), org_id: orgId };
+    row.id = memberIdByEmail.get((o.email || "").toLowerCase()) || row.id || require("crypto").randomUUID();
     const preservedUserId = userIdById.get(o.id) || userIdByEmail.get((o.email || "").toLowerCase()) || null;
     if (preservedUserId) row.user_id = preservedUserId;
     // Always preserve feature_flags from DB — never let the sync overwrite them with null.
@@ -890,7 +892,45 @@ async function replaceTeamMembers(orgId, apiArray) {
     row.feature_flags = preservedFlags;
     return row;
   });
-  return _txReplaceRows("org_members", orgId, rows, (row) => fromDbRow("team", row), "[db.replaceTeamMembers]");
+  // Preserve row identities and child workspace assignments. Deleting every
+  // member before reinserting would cascade away all workspace memberships.
+  const client = await _pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT id FROM organizations WHERE id=? FOR UPDATE", [orgId]);
+    const workspaceRepository = require("./repositories/workspaceRepository");
+    await workspaceRepository.ensureDefault(orgId, client);
+    const result = [];
+    for (const row of rows) {
+      const conflicts = await client.query("SELECT id,org_id FROM org_members WHERE id=? OR email=? OR user_id=? FOR UPDATE", [row.id,row.email,row.user_id || null]);
+      if (conflicts.rows.some(member => member.org_id !== orgId || member.id !== row.id)) {
+        throw new Error("Member identity conflicts with an existing account");
+      }
+      const columns = Object.keys(row).filter(key => key in supabase.TABLES.org_members.columns);
+      const serialize = key => {
+        const value = row[key];
+        if (value == null) return null;
+        return ["json", "array"].includes(supabase.TABLES.org_members.columns[key]) ? JSON.stringify(value) : value;
+      };
+      if (conflicts.rows.length) {
+        const mutable = columns.filter(key => !["id", "org_id", "created_at"].includes(key));
+        await client.query(`UPDATE org_members SET ${mutable.map(key => `\`${key}\`=?`).join(",")} WHERE org_id=? AND id=?`, [...mutable.map(serialize),orgId,row.id]);
+      } else {
+        row.created_at ||= new Date().toISOString();
+        if (!columns.includes("created_at")) columns.push("created_at");
+        await client.query(`INSERT INTO org_members (${columns.map(key => `\`${key}\``).join(",")}) VALUES (${columns.map(() => "?").join(",")})`, columns.map(serialize));
+      }
+      await workspaceRepository.ensureDefaultMembership(orgId, row.id, client);
+      const saved = await client.query("SELECT * FROM org_members WHERE org_id=? AND id=?", [orgId,row.id]);
+      result.push(fromDbRow("team", saved.rows[0]));
+    }
+    await client.query(`DELETE FROM org_members WHERE org_id=? AND id NOT IN (${rows.map(() => "?").join(",")})`, [orgId,...rows.map(row => row.id)]);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch { /* retain original failure */ }
+    throw new Error(`[db.replaceTeamMembers] transaction failed: ${error.message}`);
+  } finally { client.release(); }
 }
 
 const AUTO_DIAL_RUNTIME_COLUMNS = [
@@ -2006,7 +2046,7 @@ async function getResponsesForPhone(orgId, phone) {
 async function listMembershipsForUser(userId, email) {
   const { data, error } = await supabase
     .from("org_members")
-    .select("id, org_id, role, name, feature_flags, email")
+    .select("id, org_id, role, name, feature_flags, email, status")
     .eq("user_id", userId);
 
   if (error) throw new Error(`[db.listMembershipsForUser] ${error.message}`);
@@ -2016,7 +2056,7 @@ async function listMembershipsForUser(userId, email) {
   if (!rows.length && email) {
     const { data: byEmail, error: emailErr } = await supabase
       .from("org_members")
-      .select("id, org_id, role, name, feature_flags, email")
+      .select("id, org_id, role, name, feature_flags, email, status")
       .ilike("email", email.toLowerCase())
       .is("user_id", null);
 
@@ -2029,8 +2069,9 @@ async function listMembershipsForUser(userId, email) {
 
   const memberships = await Promise.all(
     rows.map(async (row) => {
+      if (row.status && String(row.status).toLowerCase() !== "active") return null;
       const org = await organizationRepository.get(row.org_id);
-      if (!org) return null;
+      if (!org || org.status === "Suspended") return null;
 
       return {
         membershipId: row.id,
@@ -2062,10 +2103,15 @@ async function findOrgIdForUser(userId) {
 // Same lookup but also returns the member's role, so request middleware
 // can do role-based access checks without a second round trip.
 async function findMembershipForUser(userId, email, requestedOrgId = null) {
+  const toMembership = row => {
+    if (!row || (requestedOrgId && row.org_id !== requestedOrgId)) return null;
+    if (row.status && String(row.status).toLowerCase() !== "active") return null;
+    return { memberId: row.id, orgId: row.org_id, role: row.role, name: row.name, featureFlags: row.feature_flags || [] };
+  };
   // First try: match by Keycloak sub (user_id column)
   const { data, error } = await supabase
     .from("org_members")
-    .select("id, org_id, role, name, feature_flags")
+    .select("id, org_id, role, name, feature_flags, status")
     .eq("user_id", userId);
 
   if (error) throw new Error(`[db.findMembershipForUser] ${error.message}`);
@@ -2077,12 +2123,7 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
     : memberships[0];
 
   if (selected) {
-    return {
-      orgId: selected.org_id,
-      role: selected.role,
-      name: selected.name,
-      featureFlags: selected.feature_flags || [],
-    };
+    return toMembership(selected);
   }
 
   // If this authenticated user already has memberships, do not allow
@@ -2094,7 +2135,7 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
 
   const { data: byEmail, error: emailErr } = await supabase
     .from("org_members")
-    .select("id, org_id, role, name, feature_flags")
+    .select("id, org_id, role, name, feature_flags, status")
     .ilike("email", email.toLowerCase())
     .is("user_id", null);
 
@@ -2108,7 +2149,7 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
     ? byEmailRows.find((row) => row.org_id === requestedOrgId)
     : byEmailRows[0];
 
-  if (!byEmailSelected) return null;
+  if (!toMembership(byEmailSelected)) return null;
 
   // Claim the legacy email-only membership.
   const { data: linkedRows, error: linkErr } = await supabase
@@ -2116,13 +2157,13 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
     .update({ user_id: userId })
     .eq("id", byEmailSelected.id)
     .is("user_id", null)
-    .select("id, org_id, role, name, feature_flags")
+    .select("id, org_id, role, name, feature_flags, status")
     .limit(1);
 
   if (linkErr) {
     const { data: existing, error: existingErr } = await supabase
       .from("org_members")
-      .select("id, org_id, role, name, feature_flags")
+      .select("id, org_id, role, name, feature_flags, status")
       .eq("user_id", userId)
       .limit(2);
 
@@ -2137,12 +2178,7 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
     }
 
     if (existing?.[0]) {
-      return {
-        orgId: existing[0].org_id,
-        role: existing[0].role,
-        name: existing[0].name,
-        featureFlags: existing[0].feature_flags || [],
-      };
+      return toMembership(existing[0]);
     }
 
     return null;
@@ -2151,18 +2187,13 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
   const linked = linkedRows?.[0];
 
   if (linked) {
-    return {
-      orgId: linked.org_id,
-      role: linked.role,
-      name: linked.name,
-      featureFlags: linked.feature_flags || [],
-    };
+    return toMembership(linked);
   }
 
   // Another request won the race. Re-read by immutable auth subject.
   const { data: existing, error: existingErr } = await supabase
     .from("org_members")
-    .select("id, org_id, role, name, feature_flags")
+    .select("id, org_id, role, name, feature_flags, status")
     .eq("user_id", userId)
     .limit(2);
 
@@ -2178,12 +2209,7 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
 
   if (!existing?.[0]) return null;
 
-  return {
-    orgId: existing[0].org_id,
-    role: existing[0].role,
-    name: existing[0].name,
-    featureFlags: existing[0].feature_flags || [],
-  };
+  return toMembership(existing[0]);
 }
 
 // ------------------------------------------------------------

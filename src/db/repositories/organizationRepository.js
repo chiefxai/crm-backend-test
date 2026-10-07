@@ -41,6 +41,7 @@ async function createOrganizationSetup({
   billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
   dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
 }) {
+  await supabase.ready;
   const client = await pool.connect(); const orgId = crypto.randomUUID();
   const cloudProjectId = `orgcloud_${orgId}_vertex_ai`; const memberId = adminEmail ? crypto.randomUUID() : null; const now = new Date().toISOString();
   try {
@@ -57,6 +58,7 @@ async function createOrganizationSetup({
       ...(backup && typeof backup === "object" ? { dataBackup: backup } : {}),
     };
     await client.query(`INSERT INTO organizations (id,name,workspace_name,industry,subscription_plan,feature_flags,billing_method,charge_scope,recharge_balance_inr,recharge_reserved_inr,settings,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [orgId,name,workspaceName,industry||"lending",subscriptionPlan||"Starter",JSON.stringify(featureFlags||[]),normalizedBillingMethod,normalizedChargeScope,initialBalance,0,JSON.stringify(orgSettings),now]);
+    await require("./workspaceRepository").ensureDefault(orgId, client);
     await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
     if (callProvider) {
       await client.query(`INSERT INTO channels (id,org_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,'connected',$7) ON DUPLICATE KEY UPDATE external_id=VALUES(external_id),config=VALUES(config),credentials_encrypted=VALUES(credentials_encrypted),status=VALUES(status)`, [crypto.randomUUID(),orgId,callProvider.provider,callProvider.phoneNumber,JSON.stringify({phoneNumber:callProvider.phoneNumber}),encryptJson({authId:callProvider.authId,authToken:callProvider.authToken}),now]);
@@ -70,6 +72,7 @@ async function createOrganizationSetup({
       await client.query(`INSERT INTO virtual_numbers (id,org_id,number,provider,status,friendly_name,routing_url,incoming_call_count,outgoing_call_count,created_at) VALUES ($1,$2,$3,$4,'Active',$5,$6,0,0,$7)`, [crypto.randomUUID(),orgId,callProvider.phoneNumber,providerLabel,`${providerLabel} Line`,"https://api.chiefxai.com/voice/webhook-dynamic",now]);
     }
     if (adminEmail) await client.query(`INSERT INTO org_members (id,org_id,user_id,email,name,role,feature_flags,created_at) VALUES ($1,$2,NULL,$3,$4,'Organization Admin',$5,$6)`, [memberId,orgId,adminEmail.toLowerCase(),adminName||adminEmail,JSON.stringify(featureFlags||[]),now]);
+    if (memberId) await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,created_at) VALUES (?,?,?,'Workspace Admin','Active',?)`, [orgId,orgId,memberId,now]);
     await client.query("COMMIT");
     const orgResult=await client.query(`SELECT * FROM organizations WHERE id = $1`,[orgId]); const cloudResult=await client.query(`SELECT * FROM organization_cloud_projects WHERE id = $1`,[cloudProjectId]);
     return {org:toApi(orgResult.rows[0]),cloudProject:toApiCloudProject(cloudResult.rows[0]),memberId};

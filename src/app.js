@@ -32,6 +32,7 @@ app.use((req, res, next) => {
       statusCode: res.statusCode,
       durationMs: Date.now() - startedAt,
       orgId: req.orgId,
+      workspaceId: req.workspaceId,
     });
   });
 
@@ -84,7 +85,7 @@ app.use("/public", express.static(path.join(__dirname, "../public")));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.get("/ready", async (_req, res) => {
+app.get("/ready", async (req, res) => {
   try {
     const db = require("./db/repository");
     const { getQueueHealth } = require("./queue");

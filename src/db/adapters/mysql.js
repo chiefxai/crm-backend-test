@@ -674,7 +674,18 @@ async function createTables() {
       );
     }
     try {
-      await runSchemaMigration(client);
+      const { ensureJournal, runVersionedMigrations } = require("../migrations");
+      await ensureJournal(client);
+      // Import the legacy bootstrap once. Subsequent releases must add an
+      // explicit migration; workers no longer repeat hundreds of ALTERs and
+      // feature-grant backfills on every restart.
+      const baselineId = "2026100700_legacy_baseline";
+      const baseline = await client.query("SELECT id FROM schema_migrations WHERE id=?", [baselineId]);
+      if (!baseline.rows.length) {
+        await runSchemaMigration(client);
+        await client.query("INSERT INTO schema_migrations (id,checksum,applied_at) VALUES (?,?,?)", [baselineId, "legacy-bootstrap-v1", new Date().toISOString()]);
+      }
+      await runVersionedMigrations(client);
     } finally {
       // Always attempt release, including when runSchemaMigration threw —
       // an unreleased advisory lock would otherwise wedge every future

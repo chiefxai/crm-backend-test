@@ -10,6 +10,7 @@ const express = require("express");
 const db = require("../db/repository");
 const { requireAuth, requireAuthIdentityOnly, isPlatformAdminIdentity } = require("../middleware/auth");
 const industryPacks = require("../seed/industryPacks");
+const workspaceRepository = require("../db/repositories/workspaceRepository");
 const platformAdmin = require("../platform/admin");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.auth");
@@ -67,6 +68,8 @@ router.get("/workspaces", requireAuthIdentityOnly, async (req, res) => {
       return res.json((organizations || []).map((org) => ({
         membershipId: null,
         orgId: org.id,
+        workspaceId: org.id,
+        workspace: { id: org.id, orgId: org.id, name: org.workspaceName || org.name, industry: org.industry, isDefault: true },
         role: "Super Admin",
         name: req.userName || req.userEmail || "Platform Admin",
         featureFlags: org.featureFlags || [],
@@ -81,7 +84,11 @@ router.get("/workspaces", requireAuthIdentityOnly, async (req, res) => {
     }
 
     const workspaces = await db.listMembershipsForUser(req.userId, req.userEmail);
-    res.json(workspaces);
+    res.json(await Promise.all(workspaces.map(async (membership) => {
+      const workspace = await workspaceRepository.getDefault(membership.orgId);
+      if (membership.membershipId) await workspaceRepository.ensureDefaultMembership(membership.orgId, membership.membershipId);
+      return { ...membership, workspaceId: membership.orgId, workspace };
+    })));
   } catch (err) {
     log.error("❌ /api/auth/workspaces:", err.message);
     res.status(500).json({ error: "Failed to load workspaces" });
@@ -95,6 +102,8 @@ router.get("/me", requireAuth, async (req, res) => {
     res.json({
       user: { id: req.userId, email: req.userEmail, name: req.userName, role: req.userRole },
       org,
+      workspace: await workspaceRepository.getDefault(req.orgId),
+      workspaceCapabilities: { multipleWorkspaces: false, sharing: false },
     });
   } catch (err) {
     log.error("❌ /api/auth/me:", err.message);

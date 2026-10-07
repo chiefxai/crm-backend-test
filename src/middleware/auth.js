@@ -62,7 +62,7 @@ async function requireAuth(req, res, next) {
 
   if (isDevMode()) {
     req.userId = DEV_USER_ID; req.userEmail = "dev@localhost";
-    req.userName = "Dev User"; req.orgId = DEV_ORG_ID; req.userRole = "Organization Admin";
+    req.userName = "Dev User"; req.orgId = DEV_ORG_ID; req.workspaceId = DEV_ORG_ID; req.userRole = "Organization Admin";
     return next();
   }
 
@@ -101,6 +101,14 @@ async function requireAuth(req, res, next) {
       return res.status(403).json({ error: "This organization has been suspended. Contact support for details." });
     }
 
+    // During the expansion phase only the migrated default workspace is
+    // routable. Reject child IDs explicitly rather than silently serving
+    // organization-wide data under a different workspace label.
+    const requestedWorkspaceId = String(req.get("X-Workspace-Id") || "").trim();
+    if (requestedWorkspaceId && requestedWorkspaceId !== membership.orgId) {
+      return res.status(403).json({ error: "Workspace is unavailable during the isolation migration" });
+    }
+    req.workspaceId = membership.orgId;
     req.userId    = userId;
     req.userEmail = userEmail;
     req.userName  = payload.name || membership.name || null;
