@@ -155,7 +155,9 @@ async function createProposal(orgId,targetWorkspaceId,grantId,recordRef,patch,me
     const grant=grants[0];
     if (!grant) throw Object.assign(new Error('Active incoming share was not found'),{statusCode:404});
     const allowed=new Set(parseJson(grant.allowed_fields,[]));
-    if (Object.keys(patch).some(key=>!allowed.has(key))) throw Object.assign(new Error('A proposed field is outside the share allowlist'),{statusCode:403});
+    const {rows:sourceFields}=await client.query('SELECT `key` FROM object_fields WHERE org_id=? AND workspace_id=? AND object_id=?',[orgId,grant.source_workspace_id,grant.object_id]);
+    const currentFieldKeys=new Set(sourceFields.map(field=>field.key));
+    if (Object.keys(patch).some(key=>!allowed.has(key)||!currentFieldKeys.has(key))) throw Object.assign(new Error('A proposed field is outside the current share allowlist'),{statusCode:403});
     const {rows:records}=await client.query(`SELECT id,data,updated_at FROM object_records
       WHERE org_id=? AND workspace_id=? AND object_id=? AND id=? FOR UPDATE`,[orgId,grant.source_workspace_id,grant.object_id,reference.recordId]);
     if (!records[0]) throw Object.assign(new Error('Shared record is no longer available'),{statusCode:404});
@@ -183,7 +185,7 @@ async function listProposals(orgId,sourceWorkspaceId) {
     LEFT JOIN org_members pm ON pm.org_id=p.org_id AND pm.id=p.proposed_by_member_id
     WHERE p.org_id=? AND p.source_workspace_id=? ORDER BY p.created_at DESC,p.id DESC LIMIT 100`,[orgId,sourceWorkspaceId]);
   return rows.map(row=>({id:row.id,grantId:row.grant_id,objectKey:row.object_key,objectLabel:row.object_label,
-    sourceWorkspaceName:row.source_workspace_name,targetWorkspaceName:row.target_workspace_name,recordId:row.record_id,
+    sourceWorkspaceName:row.source_workspace_name,targetWorkspaceName:row.target_workspace_name,
     baseVersion:row.base_version,patch:parseJson(row.proposed_patch,{}),previousData:parseJson(row.previous_data,null),
     status:row.status,proposerName:row.proposer_name,proposedByMemberId:row.proposed_by_member_id,
     reviewedByMemberId:row.reviewed_by_member_id,createdAt:row.created_at,reviewedAt:row.reviewed_at}));
@@ -215,24 +217,40 @@ async function reviewProposal(orgId,sourceWorkspaceId,proposalId,decision,review
       await client.query('COMMIT');
       return {status:'share_inactive'};
     }
+    const {rows:proposalGrant}=await client.query(`SELECT allowed_fields FROM workspace_share_grants
+      WHERE id=? AND org_id=? AND source_workspace_id=? AND target_workspace_id=? FOR SHARE`,[proposal.grant_id,orgId,sourceWorkspaceId,proposal.target_workspace_id]);
+    const allowed=new Set(parseJson(proposalGrant[0]?.allowed_fields,[]));
+    const {rows:sourceFields}=await client.query('SELECT `key` FROM object_fields WHERE org_id=? AND workspace_id=? AND object_id=?',[orgId,sourceWorkspaceId,proposal.object_id]);
+    const currentFieldKeys=new Set(sourceFields.map(field=>field.key));
+    const patch=parseJson(proposal.proposed_patch,{});
+    if(Object.keys(patch).some(key=>!allowed.has(key)||!currentFieldKeys.has(key))) {
+      await client.query(`UPDATE workspace_share_proposals SET status='stale',reviewed_by_member_id=?,reviewed_at=? WHERE id=?`,[reviewerMemberId,now,proposalId]);
+      await client.query('COMMIT');
+      return {status:'stale'};
+    }
     const {rows:records}=await client.query(`SELECT id,data,updated_at FROM object_records
       WHERE org_id=? AND workspace_id=? AND object_id=? AND id=? FOR UPDATE`,[orgId,sourceWorkspaceId,proposal.object_id,proposal.record_id]);
     const current=records[0];
-    if (!current) throw Object.assign(new Error('Source record no longer exists'),{statusCode:404});
+    if (!current) {
+      await client.query(`UPDATE workspace_share_proposals SET status='stale',reviewed_by_member_id=?,reviewed_at=? WHERE id=?`,[reviewerMemberId,now,proposalId]);
+      await client.query('COMMIT');
+      return {status:'stale'};
+    }
     if (recordVersion(current)!==proposal.base_version) {
       await client.query(`UPDATE workspace_share_proposals SET status='stale',reviewed_by_member_id=?,reviewed_at=? WHERE id=?`,[reviewerMemberId,now,proposalId]);
       await client.query('COMMIT');
       return {status:'stale'};
     }
-    const previousData=parseJson(current.data,{}), nextData={...previousData,...parseJson(proposal.proposed_patch,{})};
+    const previousData=parseJson(current.data,{}), nextData={...previousData,...patch};
     const {rows:requiredFields}=await client.query(`SELECT \`key\`,label FROM object_fields
       WHERE org_id=? AND workspace_id=? AND object_id=? AND required=1`,[orgId,sourceWorkspaceId,proposal.object_id]);
     const missing=requiredFields.find(field=>nextData[field.key]===undefined||nextData[field.key]===null||nextData[field.key]==='');
     if (missing) throw Object.assign(new Error(`The change would leave required field "${missing.label}" empty`),{statusCode:400});
     await client.query(`UPDATE object_records SET data=?,updated_at=? WHERE org_id=? AND workspace_id=? AND object_id=? AND id=?`,
       [JSON.stringify(nextData),now,orgId,sourceWorkspaceId,proposal.object_id,proposal.record_id]);
+    const previousPatch=Object.fromEntries(Object.keys(patch).filter(key=>Object.hasOwn(previousData,key)).map(key=>[key,previousData[key]]));
     await client.query(`UPDATE workspace_share_proposals SET status='approved',previous_data=?,reviewed_by_member_id=?,reviewed_at=? WHERE id=?`,
-      [JSON.stringify(previousData),reviewerMemberId,now,proposalId]);
+      [JSON.stringify(previousPatch),reviewerMemberId,now,proposalId]);
     await client.query('COMMIT');
     return {status:'approved'};
   } catch(error) {
