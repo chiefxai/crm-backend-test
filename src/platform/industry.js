@@ -29,49 +29,34 @@ function normalizeField(field) {
   const allowed = new Set(["text", "number", "boolean", "date", "datetime", "currency", "phone", "email", "select", "relation"]);
   return { key: field.key, label: field.label, type: allowed.has(type) ? type : "text", ...(field.required ? { required: true } : {}), ...(Array.isArray(field.options) ? { options: field.options } : {}), ...(field.relationObjectKey ? { relationObjectKey: field.relationObjectKey } : {}) };
 }
-const INDUSTRY_DOMAIN_EXTRAS = {
-  automotive: {
-    objects: [
-      { key: "vehicle", label: "Vehicle", pluralLabel: "Vehicles", searchable: true, auditable: true, fields: [
-        { key: "vin", label: "VIN", type: "text" }, { key: "make", label: "Make", type: "text" },
-        { key: "model", label: "Model", type: "text" }, { key: "year", label: "Year", type: "number" },
-        { key: "price", label: "Price", type: "currency" }, { key: "status", label: "Status", type: "select", options: ["available", "reserved", "sold"] },
-      ] },
-      { key: "vehicle_quotation", label: "Quotation", pluralLabel: "Quotations", auditable: true, fields: [
-        { key: "vehicleId", label: "Vehicle", type: "relation", relationObjectKey: "vehicle" },
-        { key: "amount", label: "Amount", type: "currency" },
-      ] },
-      { key: "vehicle_booking", label: "Booking", pluralLabel: "Bookings", auditable: true, fields: [
-        { key: "vehicleId", label: "Vehicle", type: "relation", relationObjectKey: "vehicle" },
-        { key: "contactId", label: "Customer", type: "relation", relationObjectKey: "contact" },
-      ] },
-      { key: "vehicle_sale", label: "Vehicle Sale", pluralLabel: "Vehicle Sales", auditable: true, fields: [
-        { key: "vehicleId", label: "Vehicle", type: "relation", relationObjectKey: "vehicle" },
-        { key: "contactId", label: "Customer", type: "relation", relationObjectKey: "contact" },
-        { key: "amount", label: "Sale Amount", type: "currency" },
-      ] },
-    ],
-    relationships: [
-      { from: "test_drive", to: "vehicle", type: "many_to_one" },
-      { from: "test_drive", to: "contact", type: "many_to_one" },
-      { from: "vehicle_quotation", to: "vehicle", type: "many_to_one" },
-      { from: "vehicle_booking", to: "vehicle", type: "many_to_one" },
-      { from: "vehicle_booking", to: "contact", type: "many_to_one" },
-      { from: "vehicle_sale", to: "vehicle", type: "many_to_one" },
-      { from: "vehicle_sale", to: "contact", type: "many_to_one" },
-    ],
-  },
-};
-
-function buildDomainModel(packObjects, industryKey) {
+function buildDomainModel(packObjects) {
   const industryObjects = packObjects.map((object, index) => ({
-    key: object.key, label: object.label.replace(/s$/, ""), pluralLabel: object.label, position: index,
-    description: object.description || undefined, icon: object.icon || undefined,
-    fields: (object.fields || []).map(normalizeField), searchable: true, auditable: true,
+    key: object.key,
+    label: object.label.replace(/s$/, ""),
+    pluralLabel: object.label,
+    position: index,
+    description: object.description || undefined,
+    icon: object.icon || undefined,
+    fields: (object.fields || []).map(normalizeField),
+    searchable: true,
+    auditable: true,
   }));
+  const packRelationships = packObjects.flatMap((object) =>
+    (object.fields || [])
+      .filter((field) => field.type === "relation" && field.relationObjectKey)
+      .map((field) => ({
+        from: object.key,
+        to: field.relationObjectKey,
+        type: "many_to_one",
+        label: field.key,
+      }))
+  );
   return {
-    objects: [...CORE_DOMAIN_OBJECTS, ...industryObjects.filter((object) => !CORE_DOMAIN_OBJECTS.some((core) => core.key === object.key))],
-    relationships: [...CORE_DOMAIN_RELATIONSHIPS],
+    objects: [
+      ...CORE_DOMAIN_OBJECTS,
+      ...industryObjects.filter((object) => !CORE_DOMAIN_OBJECTS.some((core) => core.key === object.key)),
+    ],
+    relationships: [...CORE_DOMAIN_RELATIONSHIPS, ...packRelationships],
   };
 }
 
@@ -86,7 +71,7 @@ function getIndustryDefinition(industryKey) {
   const known = INDUSTRY_CONFIG[key] ? key : "lending";
   const pack = industryPacks.getPack(known) || [];
   const labels = normalizeLabels(INDUSTRY_CONFIG[known]?.labels);
-  const domainModel = buildDomainModel(pack, known);
+  const domainModel = buildDomainModel(pack);
   const domainObjects = domainModel.objects;
 
   return {
