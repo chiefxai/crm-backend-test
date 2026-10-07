@@ -76,41 +76,43 @@ async function handleIncomingMessage(parsedMessage) {
     return;
   }
 
-  const conversation = await channelsEngine.findOrCreateConversation(
-    channel.org_id, channel, parsedMessage.from, parsedMessage.contactName
-  );
+  return channelsEngine.withChannelScope(channel, async () => {
+    const conversation = await channelsEngine.findOrCreateConversation(
+      channel.org_id, channel, parsedMessage.from, parsedMessage.contactName
+    );
 
-  await channelsEngine.addMessage(channel.org_id, conversation.id, {
-    direction: "inbound",
-    sender: "contact",
-    body: parsedMessage.text,
-    messageType: parsedMessage.type === "text" ? "text" : parsedMessage.type,
-    externalMessageId: parsedMessage.messageId
-  });
-
-  if (!channel.config.aiAutoReply || !parsedMessage.text) return;
-
-  try {
-    const history = await channelsEngine.listMessages(channel.org_id, conversation.id);
-    const customObjects = await objectsEngine.listObjects(channel.org_id).catch(() => []);
-    const { promptSection } = buildCustomObjectTools(customObjects);
-    const replyText = await aiTextReply.generateReply({
-      orgId: channel.org_id,
-      history: history.map((m) => ({ direction: m.direction, body: m.body })),
-      customObjectsPromptSection: promptSection
-    });
-    if (!replyText) return;
-
-    await sendTextMessage(channel, parsedMessage.from, replyText);
     await channelsEngine.addMessage(channel.org_id, conversation.id, {
-      direction: "outbound",
-      sender: "ai",
-      body: replyText,
-      messageType: "text"
+      direction: "inbound",
+      sender: "contact",
+      body: parsedMessage.text,
+      messageType: parsedMessage.type === "text" ? "text" : parsedMessage.type,
+      externalMessageId: parsedMessage.messageId
     });
-  } catch (err) {
-    log.error("❌ WhatsApp AI auto-reply failed:", err.message);
-  }
+
+    if (!channel.config.aiAutoReply || !parsedMessage.text) return;
+
+    try {
+      const history = await channelsEngine.listMessages(channel.org_id, conversation.id);
+      const customObjects = await objectsEngine.listObjects(channel.org_id).catch(() => []);
+      const { promptSection } = buildCustomObjectTools(customObjects);
+      const replyText = await aiTextReply.generateReply({
+        orgId: channel.org_id,
+        history: history.map((m) => ({ direction: m.direction, body: m.body })),
+        customObjectsPromptSection: promptSection
+      });
+      if (!replyText) return;
+
+      await sendTextMessage(channel, parsedMessage.from, replyText);
+      await channelsEngine.addMessage(channel.org_id, conversation.id, {
+        direction: "outbound",
+        sender: "ai",
+        body: replyText,
+        messageType: "text"
+      });
+    } catch (err) {
+      log.error("❌ WhatsApp AI auto-reply failed:", err.message);
+    }
+  });
 }
 
 module.exports = { sendTextMessage, parseInboundWebhook, handleIncomingMessage };

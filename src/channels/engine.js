@@ -1,4 +1,4 @@
-const { scopeForOrg } = require("../workspaces/scope");
+const { scopeForOrg, runWithScope } = require("../workspaces/scope");
 // ============================================================
 // services/channelsEngine.js
 //
@@ -161,7 +161,9 @@ async function upsertChannel(orgId, type, externalId, config = {}) {
 async function getChannelByExternalId(externalId, type = null) {
   requireDb();
   if (!externalId) return null;
-  let query = db.supabase.from("channels").select("*").eq("external_id", externalId);
+  let query = db.supabase.from("channels").select("*")
+    .systemReadOnly("Resolve inbound provider callback to its configured channel")
+    .eq("external_id", externalId);
   if (type) query = query.eq("type", type);
   const { data, error } = await query.maybeSingle();
   if (error) throw new Error(`[channelsEngine.getChannelByExternalId] ${error.message}`);
@@ -200,7 +202,9 @@ async function findVobizChannelByPhone(phoneNumber) {
 /** Unique auth tokens for signature verification (webhook auth fallback). */
 async function listVobizAuthTokens() {
   requireDb();
-  const { data, error } = await db.supabase.from("channels").select("*").eq("type", "vobiz");
+  const { data, error } = await db.supabase.from("channels").select("*")
+    .systemReadOnly("Verify Vobiz webhook against registered channel credentials")
+    .eq("type", "vobiz");
   if (error) throw new Error(`[channelsEngine.listVobizAuthTokens] ${error.message}`);
   const tokens = new Set();
   for (const row of data || []) {
@@ -209,6 +213,11 @@ async function listVobizAuthTokens() {
     if (token) tokens.add(String(token));
   }
   return [...tokens];
+}
+
+function withChannelScope(channel, operation) {
+  if (!channel?.org_id || typeof operation !== "function") throw new Error("A configured channel and operation are required");
+  return runWithScope({ orgId: channel.org_id, workspaceId: channel.workspace_id || channel.org_id }, operation);
 }
 
 async function removeChannel(orgId, type) {
@@ -335,6 +344,7 @@ module.exports = {
   getChannel,
   findVobizChannelByPhone,
   listVobizAuthTokens,
+  withChannelScope,
   removeChannel,
   listConversations,
   listMessages,
