@@ -263,6 +263,34 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
 7. Add restricted editing with versions, mapped copies/transfers, recruitment
    workflows and scaling improvements (outbox/idempotency/pagination).
 
+### Data-access audit snapshot (2026-10-07)
+
+This inventory is the gate before child workspace provisioning. The MySQL query
+builder applies the captured request scope to operational-table reads, writes,
+upserts, relationship checks and returned-row lookups. It rejects operational
+reads without a scope unless the caller opts into an explicitly named,
+read-only system scan. Raw SQL bypasses that builder and must therefore remain
+limited to one of the categories below:
+
+| Access path | Classification | Provisioning gate |
+| --- | --- | --- |
+| `src/db/repository.js` generic CRUD and `src/db/adapters/mysql.js` query builder | Workspace-scoped operational access; NULL workspace fallback is restricted to rows belonging to the default workspace | Keep scoped predicates and same-workspace relationship checks; audit any new direct SQL against `WORKSPACE_TABLES` |
+| `systemReadOnly(reason)` calls in repository/channel/platform code | Explicit global ownership checks, platform aggregates, or background-job scans | Review each new reason; system mode is select-only and must never be used to mutate tenant data |
+| `src/db/repositories/organizationRepository.js` | Organization metadata and organization bootstrap transaction; bootstrap creates exactly one default workspace | Organization-wide fields stay here; child workspace settings belong in `workspaceRepository` |
+| `src/db/repositories/workspaceRepository.js` | Workspace directory, settings, assignments and authorization state, keyed by both organization and workspace | Provisioning must use one transaction for workspace creation plus initial admin assignment and audit event |
+| `src/platform/dataRetention.js` retention | Iterates every workspace under organization policy and restores that workspace scope for each retention pass | Preserve per-workspace scope; destructive operations must remain within the active loop's workspace |
+| `src/platform/dataRetention.js` backup | Intentional organization-wide export under a repeatable-read snapshot; row queries constrain `org_id` and recordings preserve workspace ownership | Keep separate from customer workspace reads; validate private storage and paged snapshot behavior before enabling child workspaces |
+| `src/db/repositories/aiUsageRepository.js` and `src/crm/rechargeBilling.js` | Organization-level billing/usage aggregation | Decide product billing allocation before child workspaces can independently incur or view usage |
+| `src/db/repository.js` telephony number and provider ownership lookups | Pre-authentication global lookup needed to resolve callback ownership; ambiguous ownership fails closed | Child-workspace calls remain blocked until every provider callback carries/resolves `{orgId, workspaceId}` end to end |
+
+Remaining concrete audit work is to check every raw SQL statement touching an
+operational table for `org_id` plus workspace ownership, check storage bucket
+and signed-URL policy, and review every provider callback and worker entry point
+for restored async scope. This inventory is not runtime proof: MySQL migrations,
+full-stack cross-workspace isolation, provider callbacks, and storage policy
+still need deployment-environment validation. Do not enable provisioning until
+those checks pass.
+
 The additive foundation can coexist with the old application. Once independent
 workspace data exists, rollback to an organization-only backend is forbidden.
 
