@@ -88,6 +88,7 @@ function getIndustryDefinition(industryKey) {
   }));
 
   return {
+    schemaVersion: 1,
     key: known,
     tagline: INDUSTRY_CONFIG[known]?.tagline || "AI-powered customer conversations and workflow automation.",
     businessTypes: INDUSTRY_CONFIG[known]?.businessTypes || {},
