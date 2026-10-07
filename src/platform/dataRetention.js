@@ -316,6 +316,48 @@ async function downloadObjectToFile(key, filePath) {
   });
 }
 
+const BACKUP_PAGE_SIZE = 500;
+
+async function writeOrgTableBackup(client, table, orgId, filePath) {
+  if (!/^[a-zA-Z0-9_]+$/.test(table)) throw new Error("Invalid backup table name");
+  const { rows: keyRows } = await client.query(
+    `SELECT COLUMN_NAME AS column_name FROM information_schema.KEY_COLUMN_USAGE
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'
+     ORDER BY ORDINAL_POSITION`, [table]);
+  const primaryKey = (keyRows || []).map(row => String(row.column_name || ""));
+  if (!primaryKey.length || primaryKey.some(column => !/^[a-zA-Z0-9_]+$/.test(column))) {
+    throw new Error(`Table ${table} has no usable primary key for a consistent paged backup`);
+  }
+
+  const orderBy = primaryKey.map(column => `\`${column}\``).join(", ");
+  const cursorPredicate = primaryKey.length === 1
+    ? `\`${primaryKey[0]}\` > ?`
+    : `(${orderBy}) > (${primaryKey.map(() => "?").join(", ")})`;
+  let cursor = null;
+  let rowCount = 0;
+  let first = true;
+  await fsp.writeFile(filePath, "[", "utf8");
+
+  while (true) {
+    const sql = cursor
+      ? `SELECT * FROM \`${table}\` WHERE org_id = ? AND ${cursorPredicate} ORDER BY ${orderBy} LIMIT ?`
+      : `SELECT * FROM \`${table}\` WHERE org_id = ? ORDER BY ${orderBy} LIMIT ?`;
+    const params = cursor ? [orgId, ...cursor, BACKUP_PAGE_SIZE] : [orgId, BACKUP_PAGE_SIZE];
+    const { rows } = await client.query(sql, params);
+    if (!rows?.length) break;
+
+    const serialized = rows.map(row => JSON.stringify(row));
+    await fsp.appendFile(filePath, `${first ? "" : ","}${serialized.join(",")}`, "utf8");
+    first = false;
+    rowCount += rows.length;
+    cursor = primaryKey.map(column => rows[rows.length - 1][column]);
+    if (rows.length < BACKUP_PAGE_SIZE) break;
+  }
+
+  await fsp.appendFile(filePath, "]", "utf8");
+  return rowCount;
+}
+
 async function exportOrgBackup(orgId, orgName, backupConfig) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), `crm-backup-${orgId}-`));
   const dataDir = path.join(root, "data");
@@ -335,33 +377,52 @@ async function exportOrgBackup(orgId, orgName, backupConfig) {
     };
     await writeJsonFile(path.join(root, "manifest.json"), manifest);
 
-    const { rows: tableResult } = await db.pool.query(
-      "SELECT DISTINCT TABLE_NAME AS table_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'org_id'"
-    );
-
     const exportedTables = [];
-    for (const row of tableResult || []) {
-      const table = String(row.table_name || "");
-      if (!/^[a-zA-Z0-9_]+$/.test(table)) continue;
-      try {
-        const { rows } = await db.pool.query(`SELECT * FROM \`${table}\` WHERE org_id = ?`, [orgId]);
-        await writeJsonFile(path.join(dataDir, `${table}.json`), rows || []);
-        exportedTables.push({ table, rows: rows?.length || 0 });
-      } catch (err) {
-        throw new Error(`Backup of ${table} failed: ${err.message}`);
+    let recordings = [];
+    const snapshotClient = await db.pool.connect();
+    try {
+      await snapshotClient.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+      await snapshotClient.query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
+      const { rows: tableResult } = await snapshotClient.query(
+        "SELECT DISTINCT TABLE_NAME AS table_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'org_id' ORDER BY TABLE_NAME"
+      );
+
+      for (const row of tableResult || []) {
+        const table = String(row.table_name || "");
+        if (!/^[a-zA-Z0-9_]+$/.test(table)) continue;
+        try {
+          const count = await writeOrgTableBackup(snapshotClient, table, orgId, path.join(dataDir, `${table}.json`));
+          exportedTables.push({ table, rows: count });
+        } catch (err) {
+          throw new Error(`Backup of ${table} failed: ${err.message}`);
+        }
       }
+
+      const { rows: cloudProjects } = await snapshotClient.query(
+        "SELECT * FROM organization_cloud_projects WHERE organization_id = ?", [orgId]);
+      await writeJsonFile(path.join(dataDir, "organization_cloud_projects.json"), cloudProjects || []);
+      exportedTables.push({ table: "organization_cloud_projects", rows: cloudProjects?.length || 0 });
+
+      const { rows: orgRows } = await snapshotClient.query("SELECT * FROM organizations WHERE id = ?", [orgId]);
+      await writeJsonFile(path.join(dataDir, "organization.json"), orgRows?.[0] || null);
+
+      // This is deliberately organization-wide, including suspended workspaces.
+      // The recording manifest is read from the same consistent snapshot as
+      // the exported tables before storage objects are downloaded.
+      const recordingResult = await snapshotClient.query(`SELECT id,recording_url,created_at,
+        COALESCE(workspace_id,org_id) AS workspace_id FROM call_logs
+        WHERE org_id=? AND recording_url IS NOT NULL ORDER BY id`, [orgId]);
+      recordings = recordingResult.rows || [];
+      await snapshotClient.query("COMMIT");
+    } catch (err) {
+      try { await snapshotClient.query("ROLLBACK"); } catch (_) {}
+      throw err;
+    } finally {
+      snapshotClient.release();
     }
 
-    const { data: org } = await db.supabase.from("organizations").select("*").eq("id", orgId).maybeSingle();
-    await writeJsonFile(path.join(dataDir, "organization.json"), org || null);
-
-    // This is deliberately organization-wide, including suspended workspaces.
-    // Request-local operational scope must not silently truncate an org backup.
-    const { rows: recordings } = await db.pool.query(`SELECT id,recording_url,created_at,
-      COALESCE(workspace_id,org_id) AS workspace_id FROM call_logs
-      WHERE org_id=? AND recording_url IS NOT NULL`, [orgId]);
     const recordingManifest = [];
-    for (const row of recordings || []) {
+    for (const row of recordings) {
       const key = storage.recordingObjectKey(row.recording_url, { orgId, workspaceId: row.workspace_id || orgId });
       if (!key) continue;
       const workspaceName = String(row.workspace_id || orgId).replace(/[^a-zA-Z0-9_-]/g, "_");

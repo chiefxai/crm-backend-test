@@ -98,8 +98,11 @@ production build. No MySQL migration or end-to-end VM execution was performed.
   including suspended workspaces, and returns per-workspace plus aggregate counts.
   Fixed missing `.lt()` support in the database adapter.
 - Organization backups include every workspace and assignment table, explicit
-  workspace metadata and recording ownership. Fixed pool result handling, fail
-  on table export errors and clean up temporary ZIP archives.
+  workspace metadata and recording ownership. Table rows are exported in
+  primary-key pages from one repeatable-read snapshot, bounding memory and
+  keeping database records mutually consistent. Cloud-project metadata is
+  included explicitly. Export failures stop the backup and temporary ZIP files
+  are cleaned up.
 
 Syntax/diff checks and the frontend production build are used for this release.
 MySQL migrations, live telephony and VM runtime execution are not verified here.
