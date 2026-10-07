@@ -10,11 +10,11 @@ TRACE=false
 FORCE_RECREATE=false
 ALL_LOGS=false
 FOLLOW_LOGS=false
-SERVICE=""
+SERVICE="app"
 ALWAYS_BUILD=false
 
 usage() {
-  echo "Usage: $0 [--dev|--uat|--prod] [--pull] [--build] [--service NAME] [--force-recreate] [--always-build] [--trace] [--all-logs] [--follow-logs] [--foreground] [--dry-run]"
+  echo "Usage: $0 [--dev|--uat|--prod] [--pull] [--build] [--service NAME|--all-services] [--force-recreate] [--always-build] [--trace] [--all-logs] [--follow-logs] [--foreground] [--dry-run]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +31,7 @@ while [[ $# -gt 0 ]]; do
     --all-logs) ALL_LOGS=true; shift ;;
     --follow-logs) FOLLOW_LOGS=true; shift ;;
     --always-build) ALWAYS_BUILD=true; shift ;;
+    --all-services) SERVICE=""; shift ;;
     --service)
       [[ $# -ge 2 && -n "$2" ]] || { echo "ERROR: --service requires a Compose service name."; usage; exit 1; }
       SERVICE="$2"
