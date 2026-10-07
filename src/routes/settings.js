@@ -18,6 +18,7 @@ const { isDuplicateKeyError } = require("../lib/dbErrors");
 const telephony = require("../telephony/registry");
 const channelsEngine = require("../channels/engine");
 const { getIndustryDefinition } = require("../platform/industry");
+const { WORKSPACE_ROLES } = require("../authorization/policy");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
@@ -230,6 +231,31 @@ router.post("/numbers/sync", requireAuth, requirePermission("workspace.settings.
 });
 
 // ── Team members ──
+router.get("/workspace/members", requireAuth, requirePermission("workspace.members.manage"), async (req, res) => {
+  try { res.json(await workspaceRepository.listMembers(req.orgId,req.workspaceId)); }
+  catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
+});
+
+router.put("/workspace/members/:memberId", requireAuth, requirePermission("workspace.members.manage"), async (req, res) => {
+  const role = String(req.body?.role || "").trim();
+  if (!WORKSPACE_ROLES.includes(role)) return res.status(400).json({ error: "A valid workspace role is required" });
+  try {
+    const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,role);
+    auditLog.record(req.orgId,req,"workspace.member.assign","workspace_member",req.params.memberId,{ workspaceId:req.workspaceId,role });
+    res.json(assignment);
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
+});
+
+router.delete("/workspace/members/:memberId", requireAuth, requirePermission("workspace.members.manage"), async (req, res) => {
+  try {
+    const existing = await workspaceRepository.getAssignment(req.orgId,req.workspaceId,req.params.memberId);
+    if (!existing || existing.status !== "Active") return res.status(404).json({ error: "Workspace member assignment not found" });
+    const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,existing.role,"Inactive");
+    auditLog.record(req.orgId,req,"workspace.member.revoke","workspace_member",req.params.memberId,{ workspaceId:req.workspaceId,role:existing.role });
+    res.json(assignment);
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
+});
+
 // Returns the logged-in user's own membership info including granted feature flags.
 router.get("/me", requireAuth, async (req, res) => {
   try {

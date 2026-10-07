@@ -88,6 +88,67 @@ async function getAssignment(orgId,workspaceId,memberId) {
     AND COALESCE(NULLIF(m.status,''),'Active')='Active'`,[orgId,workspaceId,memberId]);
   return rows[0] || null;
 }
+async function listMembers(orgId,workspaceId) {
+  await db.ready;
+  const { rows } = await pool.query(`SELECT m.id AS member_id,m.name,m.email,m.role AS organization_role,
+    m.status AS member_status,wm.role AS workspace_role,wm.status AS assignment_status,
+    wm.role_source,wm.created_at AS assigned_at
+    FROM org_members m LEFT JOIN workspace_members wm
+      ON wm.org_id=m.org_id AND wm.workspace_id=? AND wm.member_id=m.id
+    WHERE m.org_id=? ORDER BY m.name,m.email,m.id`,[workspaceId,orgId]);
+  return rows.map(row => ({ memberId: row.member_id,name: row.name,email: row.email,
+    organizationRole: row.organization_role,memberStatus: row.member_status || 'Active',
+    workspaceRole: row.workspace_role || null,assignmentStatus: row.assignment_status || null,
+    roleSource: row.role_source || null,assignedAt: row.assigned_at || null }));
+}
+async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Active') {
+  await db.ready;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: workspaces } = await client.query(
+      'SELECT id FROM workspaces WHERE org_id=? AND id=? FOR UPDATE',[orgId,workspaceId]);
+    if (!workspaces[0]) throw Object.assign(new Error('Workspace not found'),{ statusCode:404 });
+    const { rows: members } = await client.query(
+      'SELECT id,role,status FROM org_members WHERE org_id=? AND id=? FOR UPDATE',[orgId,memberId]);
+    if (!members[0] || String(members[0].status || 'Active').toLowerCase() !== 'active') {
+      throw Object.assign(new Error('An active organization member is required'),{ statusCode:404 });
+    }
+    const { rows: currentRows } = await client.query(
+      'SELECT role,status,role_source FROM workspace_members WHERE org_id=? AND workspace_id=? AND member_id=? FOR UPDATE',
+      [orgId,workspaceId,memberId]);
+    const current = currentRows[0] || null;
+    const remainsAdmin = status === 'Active' && role === 'Workspace Admin';
+    const wasAdmin = current?.status === 'Active' && (current.role_source === 'legacy'
+      ? ['Owner','Organization Admin','Super Admin','Workspace Admin'].includes(members[0].role)
+      : current.role === 'Workspace Admin');
+    if (wasAdmin && !remainsAdmin) {
+      const { rows: countRows } = await client.query(`SELECT COUNT(*) AS admin_count FROM workspace_members wm
+        INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
+        WHERE wm.org_id=? AND wm.workspace_id=? AND wm.member_id<>? AND wm.status='Active'
+        AND COALESCE(NULLIF(m.status,''),'Active')='Active'
+        AND ((wm.role_source='legacy' AND m.role IN ('Owner','Organization Admin','Super Admin','Workspace Admin'))
+          OR (wm.role_source<>'legacy' AND wm.role='Workspace Admin'))`,[orgId,workspaceId,memberId]);
+      if (Number(countRows[0]?.admin_count || 0) < 1) {
+        throw Object.assign(new Error('Assign another active Workspace Admin before removing the last one'),{ statusCode:409 });
+      }
+    }
+    if (current) {
+      await client.query(`UPDATE workspace_members SET role=?,status=?,role_source='manual'
+        WHERE org_id=? AND workspace_id=? AND member_id=?`,[role,status,orgId,workspaceId,memberId]);
+    } else if (status === 'Active') {
+      await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,role_source,created_at)
+        VALUES (?,?,?,?,?,'manual',?)`,[workspaceId,orgId,memberId,role,status,new Date().toISOString()]);
+    } else {
+      throw Object.assign(new Error('Member has no workspace assignment'),{ statusCode:404 });
+    }
+    await client.query('COMMIT');
+    return { memberId,role,status,roleSource:'manual' };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw error;
+  } finally { client.release(); }
+}
 async function getAuthorizationState(orgId,workspaceId,memberId) {
   await db.ready;
   const { rows } = await pool.query(`SELECT w.status AS workspace_status,o.status AS organization_status,
@@ -97,4 +158,4 @@ async function getAuthorizationState(orgId,workspaceId,memberId) {
     WHERE w.org_id=? AND w.id=?`,[memberId || null,orgId,workspaceId]);
   return rows[0] || null;
 }
-module.exports = { getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, updateSettings, getProfile, getAssignment, getAuthorizationState };
+module.exports = { getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };

@@ -158,6 +158,11 @@ remain a separate check; a feature flag is never an authorization grant.
   and already-dispatched telephony work can finish; this is not cancellation of
   all queued jobs. Trusted internal-service authentication is separate and its
   workspace scope audit remains in the rollout checklist.
+- Workspace Admins can view organization members and assign, change, or revoke
+  their current workspace roles. Changes are transactional, use `role_source`
+  `manual`, preserve organization roles separately, reject invalid/inactive
+  members, protect the last active Workspace Admin and write audit events.
+  The settings UI exposes workspace role assignments separately from org roles.
 - Frontend navigation, page access, privileged actions and automatic sync use
   server permissions; Viewers receive a read-only notice and cannot submit
   writes through the API client or server. Billing-only users reach the billing
@@ -169,7 +174,8 @@ Validation: JavaScript syntax, diff checks and Vite production build. The local
 frontend has no TypeScript compiler executable. No automated tests were run;
 MySQL migration and role behavior need runtime verification on the full stack.
 Multiple workspace creation and sharing remain disabled. Role assignment CRUD
-and its UI are part of the upcoming workspace management stage.
+and its UI are implemented; full-stack validation remains required before
+additional workspaces are enabled.
 
 ## Migration rules
 
@@ -242,10 +248,10 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
    context, workspace voice settings and per-workspace retention are implemented.
 3. Confirm the migration and cross-workspace behavior against MySQL and the full
    application stack before allowing independent workspace data.
-4. Organization/workspace permission enforcement is implemented. Add explicit
-   workspace role assignment CRUD and UI, owner handoff safeguards and audit
-   details as part of workspace management. Verify revocation and role boundaries
-   against the full stack before enabling additional workspaces.
+4. Organization/workspace permission enforcement and workspace role assignment
+   CRUD/UI are implemented. Verify revocation and role boundaries against the
+   full stack before enabling additional workspaces; add owner handoff safeguards
+   as part of workspace management.
 5. Add workspace provisioning/settings/member management and workspace industry
    configuration to both backend and frontend. Enable additional workspaces only
    after the operational-scope audit is complete.
