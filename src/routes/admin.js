@@ -2,14 +2,14 @@
 
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
-const { requireAuth, requireSseTicket, createSseTicket, createWebSocketTicket, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requireSseTicket, createSseTicket, createWebSocketTicket, requirePermission, resolveAuthorization } = require("../middleware/auth");
 const auditLog = require("../platform/auditLog");
 const billingEngine = require("../crm/billingEngine");
 const { readAll } = require("../db/store");
 const { addLogClient, removeLogClient, getActiveSessionsCount } = require("../shared");
 const { parsePagination } = require("../lib/pagination");
 
-router.get("/audit-log", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.get("/audit-log", requireAuth, requirePermission("workspace.audit.read"), async (req, res) => {
   try {
     const pagination = parsePagination(req.query);
     res.json(await auditLog.list(req.orgId, pagination || {}));
@@ -17,7 +17,7 @@ router.get("/audit-log", requireAuth, requireRole(ADMIN_ROLES), async (req, res)
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.get("/billing", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.get("/billing", requireAuth, requirePermission("billing.read"), async (req, res) => {
   try {
     const info = await billingEngine.getBillingInfo(req.orgId);
     if (!info) return res.status(404).json({ error: "Organization not found" });
@@ -25,7 +25,7 @@ router.get("/billing", requireAuth, requireRole(ADMIN_ROLES), async (req, res) =
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.get("/billing/console", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.get("/billing/console", requireAuth, requirePermission("billing.read"), async (req, res) => {
   try {
     const billingConsole = require("../billing/billingConsole");
     const data = await billingConsole.getOrganizationBillingConsole(req.orgId);
@@ -35,7 +35,7 @@ router.get("/billing/console", requireAuth, requireRole(ADMIN_ROLES), async (req
 });
 
 // Legacy metrics from flat-file store — used by the demo kirana dashboard.
-router.get("/metrics", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.get("/metrics", requireAuth, requirePermission("platform.manage"), async (req, res) => {
   // Legacy/demo metrics are global flat-file data, not tenant-scoped CRM data.
   // Keep this endpoint restricted to organization administrators until the
   // legacy dashboard is removed; do not expose these aggregate files to
@@ -74,18 +74,32 @@ router.get("/logs-stream", requireSseTicket, (req, res) => {
   res.write(`data: ${JSON.stringify({ timestamp: new Date().toISOString(), message: "Live event stream connected" })}\n\n`);
   const client = { res, orgId: req.orgId, workspaceId: req.workspaceId };
   addLogClient(client);
-  req.on("close", () => removeLogClient(client));
+  // Recheck membership on a bounded timer; a revoked assignment must not
+  // keep receiving live CRM events for the lifetime of an open connection.
+  let checking = false;
+  const timer = setInterval(async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      const access = await resolveAuthorization({ userId: req.userId,email: req.userEmail,
+        orgId: req.orgId,workspaceId: req.workspaceId,platformAdmin: req.isPlatformAdmin });
+      if (!access.permissions.includes('workspace.read')) res.end();
+    } catch { res.end(); }
+    finally { checking = false; }
+  },30000);
+  timer.unref();
+  req.on("close", () => { clearInterval(timer); removeLogClient(client); });
 });
 
 // Stub for WhatsApp template broadcasts.
-router.post("/broadcast", requireAuth, requireRole(ADMIN_ROLES), (req, res) => {
+router.post("/broadcast", requireAuth, requirePermission("workspace.settings.manage"), (req, res) => {
   const { audiencePhones, templateName } = req.body;
   global.broadcastLog(`📢 WhatsApp Broadcast (${templateName}) to ${audiencePhones?.length || 0} customers`, { type: "broadcast" });
   res.json({ sent: audiencePhones?.length || 0, failed: 0 });
 });
 
 // Lists Gemini models supporting bidiGenerateContent (live audio).
-router.get("/list-models", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.get("/list-models", requireAuth, requirePermission("platform.manage"), async (req, res) => {
   const apiKey = process.env.GEMINI_API_KEY;
   // This endpoint uses the AI Studio REST API which requires an API key.
   // On Vertex AI (ADC) there is no API key, so return a descriptive response.

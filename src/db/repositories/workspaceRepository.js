@@ -28,12 +28,15 @@ async function getDefault(orgId) {
 async function ensureDefaultMembership(orgId, memberId, client = pool) {
   await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,created_at)
     SELECT m.org_id,m.org_id,m.id,
-    CASE WHEN m.role IN ('Organization Admin','Super Admin') THEN 'Workspace Admin'
-      WHEN m.role='Manager' THEN 'Manager' WHEN m.role='Viewer' THEN 'Viewer' ELSE 'Member' END,
-    COALESCE(NULLIF(m.status,''),'Active'),COALESCE(m.created_at,?)
+    CASE WHEN m.role IN ('Owner','Organization Admin','Super Admin','Workspace Admin') THEN 'Workspace Admin'
+      WHEN m.role IN ('Manager','Sales Manager') THEN 'Manager' WHEN m.role IN ('Viewer','Customer') THEN 'Viewer' ELSE 'Member' END,
+    CASE WHEN m.role='Billing Admin' THEN 'Inactive' ELSE COALESCE(NULLIF(m.status,''),'Active') END,COALESCE(m.created_at,?)
     FROM org_members m INNER JOIN workspaces w ON w.org_id=m.org_id AND w.id=m.org_id
-    WHERE m.org_id=? AND m.id=? ON DUPLICATE KEY UPDATE member_id=workspace_members.member_id`,
+    WHERE m.org_id=? AND m.id=? AND m.workspace_assignments_initialized=0 ON DUPLICATE KEY UPDATE member_id=workspace_members.member_id`,
     [new Date().toISOString(),orgId,memberId]);
+  await client.query(`UPDATE org_members m SET workspace_assignments_initialized=1
+    WHERE m.org_id=? AND m.id=? AND EXISTS (SELECT 1 FROM workspace_members wm
+      WHERE wm.org_id=m.org_id AND wm.member_id=m.id)`,[orgId,memberId]);
 }
 async function getActive(orgId, workspaceId) {
   await db.ready;
@@ -77,4 +80,21 @@ async function getProfile(orgId, workspaceId) {
   return { ...profile,...workspace.settings,id: org.id,organizationId: org.id,
     workspaceId: workspace.id,workspaceName: workspace.name,industry: workspace.industry };
 }
-module.exports = { getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, updateSettings, getProfile };
+async function getAssignment(orgId,workspaceId,memberId) {
+  await db.ready;
+  const { rows } = await pool.query(`SELECT wm.role,wm.status,wm.role_source FROM workspace_members wm
+    INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
+    WHERE wm.org_id=? AND wm.workspace_id=? AND wm.member_id=?
+    AND COALESCE(NULLIF(m.status,''),'Active')='Active'`,[orgId,workspaceId,memberId]);
+  return rows[0] || null;
+}
+async function getAuthorizationState(orgId,workspaceId,memberId) {
+  await db.ready;
+  const { rows } = await pool.query(`SELECT w.status AS workspace_status,o.status AS organization_status,
+    wm.role,wm.status,wm.role_source FROM workspaces w
+    INNER JOIN organizations o ON o.id=w.org_id
+    LEFT JOIN workspace_members wm ON wm.org_id=w.org_id AND wm.workspace_id=w.id AND wm.member_id=?
+    WHERE w.org_id=? AND w.id=?`,[memberId || null,orgId,workspaceId]);
+  return rows[0] || null;
+}
+module.exports = { getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, updateSettings, getProfile, getAssignment, getAuthorizationState };

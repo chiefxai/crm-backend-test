@@ -1,7 +1,7 @@
 // src/routes/agents.js — /api/agents CRUD
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const db = require("../db/repository");
 const auditLog = require("../platform/auditLog");
 const knowledgeBase = require("../ai/knowledgeBase");
@@ -45,7 +45,7 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 // POST /api/agents — create a new agent
-router.post("/", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const {
       name, systemPrompt, activeVoice, emotion, speed, friendliness, language,
@@ -137,7 +137,7 @@ router.get("/system", requireAuth, async (req, res) => {
 
 // PUT /api/agents/system/:id — saves (or, given a blank/default-matching
 // value, clears) this org's override for one system agent's prompt.
-router.put("/system/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.put("/system/:id", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   const { setPromptOverride } = require("../ai/systemAgents");
   try {
     const updated = await setPromptOverride(req.orgId, req.params.id, req.body?.systemPrompt);
@@ -160,7 +160,7 @@ router.get("/:id", requireAuth, async (req, res) => {
 });
 
 // PUT /api/agents/:id — update agent settings
-router.put("/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.put("/:id", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const agent = await db.getAgent(req.params.id, req.orgId);
     if (!agent) return res.status(404).json({ error: "Agent not found" });
@@ -179,7 +179,7 @@ router.put("/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
 // body: { active: boolean }
 // Disabled agents are skipped by inbound call routing and hidden from
 // outbound agent pickers (Voice Simulator wizard).
-router.patch("/:id/active", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.patch("/:id/active", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { active } = req.body || {};
     if (typeof active !== "boolean") return res.status(400).json({ error: "active (boolean) is required" });
@@ -195,7 +195,7 @@ router.patch("/:id/active", requireAuth, requireRole(ADMIN_ROLES), async (req, r
 });
 
 // DELETE /api/agents/:id
-router.delete("/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.delete("/:id", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const agent = await db.getAgent(req.params.id, req.orgId);
     if (!agent) return res.status(404).json({ error: "Agent not found" });
@@ -211,7 +211,7 @@ router.delete("/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) =>
 // PUT /api/agents/:id/assign-outbound-number
 // body: { numberId: "uuid" | null }
 // Many agents may share the same outbound number — no exclusivity enforced.
-router.put("/:id/assign-outbound-number", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.put("/:id/assign-outbound-number", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { numberId } = req.body || {};
     const agent = await db.getAgent(req.params.id, req.orgId);
@@ -235,7 +235,7 @@ router.put("/:id/assign-outbound-number", requireAuth, requireRole(ADMIN_ROLES),
 // PUT /api/agents/:id/assign-number
 // body: { numberId: "uuid" | null }
 // numberId null = unassign all numbers from this agent
-router.put("/:id/assign-number", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.put("/:id/assign-number", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { numberId } = req.body || {};
     const agent = await db.getAgent(req.params.id, req.orgId);

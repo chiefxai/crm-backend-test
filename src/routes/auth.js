@@ -11,6 +11,7 @@ const db = require("../db/repository");
 const { requireAuth, requireAuthIdentityOnly, isPlatformAdminIdentity } = require("../middleware/auth");
 const industryPacks = require("../seed/industryPacks");
 const workspaceRepository = require("../db/repositories/workspaceRepository");
+const policy = require("../authorization/policy");
 const platformAdmin = require("../platform/admin");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.auth");
@@ -95,13 +96,20 @@ router.get("/workspaces", requireAuthIdentityOnly, async (req, res) => {
   }
 });
 
+router.get('/roles',requireAuth,(req,res) => res.json({
+  organizationRoles: policy.ORGANIZATION_ROLES,workspaceRoles: policy.WORKSPACE_ROLES,
+  authorization: req.authorization,
+}));
+
 // GET /api/auth/me — returns the authenticated user and their org
 router.get("/me", requireAuth, async (req, res) => {
   try {
     const org = await db.getOrg(req.orgId);
     res.json({
       user: { id: req.userId, email: req.userEmail, name: req.userName, role: req.userRole },
-      org,
+      org: org ? { id: org.id,name: org.name,status: org.status,industry: org.industry,
+        workspaceName: org.workspaceName,subscriptionPlan: org.subscriptionPlan } : null,
+      authorization: req.authorization,
       workspace: await workspaceRepository.getDefault(req.orgId),
       workspaceCapabilities: { multipleWorkspaces: false, sharing: false },
     });

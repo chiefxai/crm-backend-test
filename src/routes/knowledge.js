@@ -3,7 +3,7 @@
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
 const multer = require("multer");
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const knowledgeBase = require("../ai/knowledgeBase");
 const documentParser = require("../utils/documentParser");
 const auditLog = require("../platform/auditLog");
@@ -23,7 +23,7 @@ router.get("/documents", requireAuth, async (req, res) => {
   catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/documents", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/documents", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { title, text } = req.body || {};
     const doc = await knowledgeBase.addDocument(req.orgId, title, text);
@@ -32,7 +32,7 @@ router.post("/documents", requireAuth, requireRole(ADMIN_ROLES), async (req, res
   } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/documents/upload", requireAuth, requireRole(ADMIN_ROLES), handleUpload, async (req, res) => {
+router.post("/documents/upload", requireAuth, requirePermission("workspace.settings.manage"), handleUpload, async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No file uploaded." });
     const text = await documentParser.extractText(req.file.originalname, req.file.buffer);
@@ -43,7 +43,7 @@ router.post("/documents/upload", requireAuth, requireRole(ADMIN_ROLES), handleUp
   } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.delete("/documents/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.delete("/documents/:id", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     await knowledgeBase.deleteDocument(req.orgId, req.params.id);
     auditLog.record(req.orgId, req, "knowledge.delete_document", "knowledge_document", req.params.id);

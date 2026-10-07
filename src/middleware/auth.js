@@ -14,6 +14,8 @@ const { runWithScope } = require("../workspaces/scope");
 // Dev-mode: no configured auth provider in a non-production environment:
 //   Every request is treated as DEV_USER_ID in DEV_ORG_ID — no token check.
 
+const policy = require('../authorization/policy');
+const workspaces = require('../db/repositories/workspaceRepository');
 const jwt      = require("jsonwebtoken");
 const db       = require("../db/repository");
 const provider = require("../auth");        // plug-and-play provider
@@ -57,6 +59,35 @@ function resolvePayload(req, token) {
   return provider.verifyToken(token);
 }
 
+async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdmin = false,membership: knownMembership }) {
+  if (isDevMode() && orgId === DEV_ORG_ID && userId === DEV_USER_ID) return policy.authorization({ orgRole: 'Organization Admin',workspaceRole: 'Workspace Admin' });
+  if (workspaceId !== orgId) throw Object.assign(new Error('Workspace is unavailable during the isolation migration'),{ statusCode: 403 });
+  const membership = knownMembership === undefined ? await db.findMembershipForUser(userId,email,orgId) : knownMembership;
+  if (!membership && !platformAdmin) throw Object.assign(new Error('Active organization membership required'),{ statusCode: 403 });
+  let state = await workspaces.getAuthorizationState(orgId,workspaceId,membership?.memberId);
+  if (!state) { await workspaces.getDefault(orgId); state = await workspaces.getAuthorizationState(orgId,workspaceId,membership?.memberId); }
+  if (!state || state.workspace_status !== 'Active' || state.organization_status === 'Suspended') throw Object.assign(new Error('Active workspace required'),{ statusCode: 403 });
+  if (membership?.memberId && !state.role) {
+    // Only legacy imports without any assignment are reconciled. Inactive
+    // assignments are preserved and never reactivated by authentication.
+    await workspaces.ensureDefaultMembership(orgId,membership.memberId);
+    state = await workspaces.getAuthorizationState(orgId,workspaceId,membership.memberId);
+  }
+  let workspaceRole = null;
+  if (membership?.memberId && state?.status === 'Active') {
+    workspaceRole = state.role_source === 'legacy' && workspaceId === orgId
+      ? policy.legacyWorkspaceRole(membership.role)
+      : (policy.WORKSPACE_ROLES.includes(state.role) ? state.role : null);
+  }
+  return policy.authorization({ orgRole: policy.organizationRole(membership?.role),workspaceRole,platformAdmin });
+}
+function attachAuthorization(req,value) {
+  req.authorization = value;
+  req.organizationRole = value.organizationRole;
+  req.workspaceRole = value.workspaceRole;
+  req.isPlatformAdmin = value.platformAdmin;
+}
+
 async function requireAuth(req, res, next) {
   const token = extractToken(req);
   if (!token) return res.status(401).json({ error: "Missing Authorization: Bearer <token>" });
@@ -64,9 +95,10 @@ async function requireAuth(req, res, next) {
   if (isDevMode()) {
     req.userId = DEV_USER_ID; req.userEmail = "dev@localhost";
     req.userName = "Dev User"; req.orgId = DEV_ORG_ID; req.workspaceId = DEV_ORG_ID; req.userRole = "Organization Admin";
+    attachAuthorization(req,policy.authorization({ orgRole: 'Organization Admin',workspaceRole: 'Workspace Admin' }));
     res.set("X-Organization-Id", req.orgId);
     res.set("X-Workspace-Id", req.workspaceId);
-    return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, next);
+    return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, () => policy.enforceRequest(req,res,next));
   }
 
   try {
@@ -117,12 +149,15 @@ async function requireAuth(req, res, next) {
     req.userName  = payload.name || membership.name || null;
     req.orgId     = membership.orgId;
     req.userRole  = membership.role;
+    req.authClaims = payload;
+    attachAuthorization(req,await resolveAuthorization({ userId,email: userEmail,orgId: req.orgId,workspaceId: req.workspaceId,
+      platformAdmin: isPlatformAdminIdentity(payload,userEmail),membership }));
     res.set("X-Organization-Id", req.orgId);
     res.set("X-Workspace-Id", req.workspaceId);
-    return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, next);
+    return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, () => policy.enforceRequest(req,res,next));
   } catch (err) {
     log.error("❌ auth.js: token verification failed:", err.message);
-    return res.status(401).json({ error: "Invalid or expired token" });
+    return res.status(err.statusCode || 401).json({ error: err.statusCode ? err.message : "Invalid or expired token" });
   }
 }
 
@@ -159,25 +194,29 @@ function getSseTicketSecret() {
   return secret || "dev-sse-ticket-secret";
 }
 function createSseTicket(req, ttlSeconds = 60) {
-  const payload = Buffer.from(JSON.stringify({ sub: req.userId, email: req.userEmail || null, orgId: req.orgId, workspaceId: req.workspaceId || req.orgId, role: req.userRole, exp: Math.floor(Date.now()/1000) + ttlSeconds, jti: crypto.randomUUID() })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ sub: req.userId, email: req.userEmail || null, orgId: req.orgId, workspaceId: req.workspaceId || req.orgId, role: req.userRole, platformAdmin: req.isPlatformAdmin === true, exp: Math.floor(Date.now()/1000) + ttlSeconds, jti: crypto.randomUUID() })).toString("base64url");
   const sig = crypto.createHmac("sha256", getSseTicketSecret()).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
 function verifySseTicket(ticket) {
   if (!ticket || typeof ticket !== "string") return null;
-  const [payload, sig] = ticket.split(".");
+  const [payload, sig, extra] = ticket.split(".");
+  if (extra !== undefined) return null;
   if (!payload || !sig) return null;
   const expected = crypto.createHmac("sha256", getSseTicketSecret()).update(payload).digest("base64url");
   const a=Buffer.from(sig), b=Buffer.from(expected);
   if (a.length !== b.length || !crypto.timingSafeEqual(a,b)) return null;
   try { const data=JSON.parse(Buffer.from(payload,"base64url").toString("utf8")); return data.exp > Math.floor(Date.now()/1000) ? data : null; } catch { return null; }
 }
-function requireSseTicket(req, res, next) {
+async function requireSseTicket(req, res, next) {
   try {
     const data = verifySseTicket(req.query.ticket);
     if (!data) return res.status(401).json({ error: "Invalid or expired SSE ticket" });
     req.userId = data.sub; req.userEmail = data.email; req.orgId = data.orgId;
     req.workspaceId = data.workspaceId || data.orgId; req.userRole = data.role;
+    attachAuthorization(req,await resolveAuthorization({ userId: data.sub,email: data.email,orgId: data.orgId,
+      workspaceId: req.workspaceId,platformAdmin: data.platformAdmin === true }));
+    if (!policy.hasPermission(req,'workspace.read')) return res.status(403).json({ error: 'Workspace read access required' });
     return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, next);
   } catch { return res.status(401).json({ error: "Invalid SSE ticket" }); }
 }
@@ -189,7 +228,7 @@ function getWebSocketTicketSecret() {
 }
 function createWebSocketTicket(req, ttlSeconds = 60) {
   const payload = Buffer.from(JSON.stringify({
-    sub: req.userId, email: req.userEmail || null, orgId: req.orgId, workspaceId: req.workspaceId || req.orgId, role: req.userRole,
+    sub: req.userId, email: req.userEmail || null, orgId: req.orgId, workspaceId: req.workspaceId || req.orgId, role: req.userRole, platformAdmin: req.isPlatformAdmin === true,
     exp: Math.floor(Date.now() / 1000) + ttlSeconds, jti: crypto.randomUUID(), purpose: "browser-ws"
   })).toString("base64url");
   const sig = crypto.createHmac("sha256", getWebSocketTicketSecret()).update(payload).digest("base64url");
@@ -197,7 +236,8 @@ function createWebSocketTicket(req, ttlSeconds = 60) {
 }
 function verifyWebSocketTicket(ticket) {
   if (!ticket || typeof ticket !== "string") return null;
-  const [payload, sig] = ticket.split(".");
+  const [payload, sig, extra] = ticket.split(".");
+  if (extra !== undefined) return null;
   if (!payload || !sig) return null;
   const expected = crypto.createHmac("sha256", getWebSocketTicketSecret()).update(payload).digest("base64url");
   const a = Buffer.from(sig), b = Buffer.from(expected);
@@ -238,4 +278,4 @@ function requirePlatformAdmin(req, res, next) {
   });
 }
 
-module.exports = { isPlatformAdminIdentity, requireAuth, requireAuthIdentityOnly, requireInternalService, requireAuthOrInternal, requireRole, createSseTicket, requireSseTicket, createWebSocketTicket, verifyWebSocketTicket, requirePlatformAdmin, ADMIN_ROLES, DEV_ORG_ID, DEV_USER_ID };
+module.exports = { resolveAuthorization, requirePermission: policy.requirePermission, hasPermission: policy.hasPermission, isPlatformAdminIdentity, requireAuth, requireAuthIdentityOnly, requireInternalService, requireAuthOrInternal, requireRole, createSseTicket, requireSseTicket, createWebSocketTicket, verifyWebSocketTicket, requirePlatformAdmin, ADMIN_ROLES, DEV_ORG_ID, DEV_USER_ID };

@@ -2,7 +2,7 @@
 
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
-const { requireAuth, requireRole } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const db = require("../db/repository");
 const workflowEngine = require("../crm/workflowEngine");
 const storage = require("../storage");
@@ -281,7 +281,7 @@ router.post("/dialer-tasks/:id/auto-dial/start", requireAuth, async (req, res) =
 // Deletion is deliberately restricted to the customer Organization Admin.
 // The endpoint never cascades silently: the caller must explicitly choose
 // which related CRM data should also be removed/reset.
-const requireOrganizationAdmin = requireRole(["Organization Admin"]);
+const requireOrganizationAdmin = requirePermission("workspace.delete");
 
 router.get("/dialer-tasks/:id/delete-impact", requireAuth, requireOrganizationAdmin, async (req, res) => {
   try {

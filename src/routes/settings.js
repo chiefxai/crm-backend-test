@@ -3,7 +3,7 @@
 const { safeErrorMessage } = require("../observability/safeError");
 const crypto = require("crypto");
 const router = require("express").Router();
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission, hasPermission } = require("../middleware/auth");
 const db = require("../db/repository");
 const workspaceRepository = require("../db/repositories/workspaceRepository");
 const auditLog = require("../platform/auditLog");
@@ -22,7 +22,7 @@ const { getIndustryDefinition } = require("../platform/industry");
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
 // always provisions TeamMember regardless of the CRM title.
-const AUTH_PRIVILEGED_ROLES = new Set(["Super Admin", "Organization Admin"]);
+const AUTH_PRIVILEGED_ROLES = new Set(["Super Admin", "Owner", "Organization Admin"]);
 
 function isAuthPrivilegedRole(role) {
   return role && AUTH_PRIVILEGED_ROLES.has(String(role).trim());
@@ -58,7 +58,7 @@ function cognitoTemporaryPassword() {
 }
 
 // Paste this URL into the Vobiz portal as the number's Answer URL (must include webhook_secret).
-router.get("/vobiz-inbound-webhook", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.get("/vobiz-inbound-webhook", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const baseUrl = (process.env.PUBLIC_API_BASE_URL || process.env.PUBLIC_URL || process.env.API_BASE_URL || "")
       .trim()
@@ -82,7 +82,7 @@ router.get("/vobiz-inbound-webhook", requireAuth, requireRole(ADMIN_ROLES), asyn
   }
 });
 
-router.post("/vobiz-inbound-webhook/sync", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/vobiz-inbound-webhook/sync", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const channel = await channelsEngine.getChannel(req.orgId, "vobiz");
     const authId = channel?.config?.authId;
@@ -113,13 +113,18 @@ const WORKSPACE_PROFILE_FIELDS = new Set([
   'defaultInterestRate','riskProfile','companyBio','defaultOutboundNumber',
 ]);
 async function selectedWorkspaceProfile(req) {
-  return workspaceRepository.getProfile(req.orgId,req.workspaceId);
+  const profile = await workspaceRepository.getProfile(req.orgId,req.workspaceId);
+  const fields = new Set([...WORKSPACE_PROFILE_FIELDS,'id','organizationId','workspaceId','featureFlags','voiceConfig']);
+  if (hasPermission(req,'billing.read')) {
+    for (const field of ['subscriptionPlan','billingMethod','aiMinutesUsed','phoneCharges','billingPeriodEnd','rechargeBalanceInr','rechargeReservedInr']) fields.add(field);
+  }
+  return Object.fromEntries(Object.entries(profile).filter(([key]) => fields.has(key)));
 }
 router.get('/workspace',requireAuth,async(req,res) => {
   try { res.json(await selectedWorkspaceProfile(req)); }
   catch(err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
-router.post('/workspace',requireAuth,requireRole(ADMIN_ROLES),async(req,res) => {
+router.post('/workspace',requireAuth,requirePermission("workspace.settings.manage"),async(req,res) => {
   try {
     const patch = Object.fromEntries(Object.entries(req.body || {}).filter(([key,value]) => WORKSPACE_PROFILE_FIELDS.has(key) && value !== undefined));
     for (const key of ['name','workspaceName','industry']) {
@@ -164,7 +169,7 @@ router.get("/numbers", requireAuth, async (req, res) => {
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/numbers", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/numbers", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     if (req.body.number && !(await db.isNumberAvailable(req.body.number, req.orgId))) {
       return res.status(409).json({ error: "This number is already assigned to another organization." });
@@ -175,7 +180,7 @@ router.post("/numbers", requireAuth, requireRole(ADMIN_ROLES), async (req, res) 
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.patch("/numbers/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.patch("/numbers/:id", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     if (req.body.number && !(await db.isNumberAvailable(req.body.number, req.orgId))) {
       return res.status(409).json({ error: "This number is already assigned to another organization." });
@@ -186,7 +191,7 @@ router.patch("/numbers/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, 
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.delete("/numbers/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.delete("/numbers/:id", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     // A Vobiz number has two related records: the virtual-number entry used
     // by the CRM UI and the channel row used for the provider credentials.
@@ -212,7 +217,7 @@ router.delete("/numbers/:id", requireAuth, requireRole(ADMIN_ROLES), async (req,
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/numbers/sync", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/numbers/sync", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const incoming = Array.isArray(req.body) ? req.body.map(n => n.number).filter(Boolean) : [];
     for (const number of incoming) {
@@ -236,7 +241,7 @@ router.get("/me", requireAuth, async (req, res) => {
     const memberFlags = Array.isArray(membership?.featureFlags) ? membership.featureFlags : [];
     // Org admins get whatever the org-level flags are (controlled by super admin).
     // Other roles get the intersection of personal grants and org-level grants.
-    const isOrgAdmin = req.userRole === "Organization Admin";
+    const isOrgAdmin = hasPermission(req,"workspace.settings.manage");
     const featureFlags = isOrgAdmin
       ? orgFlags
       : memberFlags.filter((f) => orgFlags.includes(f));
@@ -246,6 +251,8 @@ router.get("/me", requireAuth, async (req, res) => {
       name: req.userName,
       role: req.userRole,
       orgId: req.orgId,
+      workspaceId: req.workspaceId,
+      authorization: req.authorization,
       featureFlags,
       orgFeatureFlags: orgFlags,
     });
@@ -257,7 +264,7 @@ router.get("/team", requireAuth, async (req, res) => {
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
+router.post("/team", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
   try {
     const { featureFlags, role, ...memberFields } = req.body || {};
     let availableFeatureFlags = [];
@@ -360,10 +367,12 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
   }
 });
 
-router.patch("/team/:id/flags", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
+router.patch("/team/:id/flags", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
   try {
     const { featureFlags } = req.body;
     if (!Array.isArray(featureFlags)) return res.status(400).json({ error: "featureFlags must be an array" });
+    const target = await db.getTeamMemberById(req.orgId,req.params.id);
+    if (target && isAuthPrivilegedRole(target.role) && !req.isPlatformAdmin) return res.status(403).json({ error: 'Privileged memberships require platform administration' });
     const sanitizedFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
     const updated = await db.patch("team", req.orgId, req.params.id, { featureFlags: sanitizedFeatureFlags });
     if (!updated) return res.status(404).json({ error: "Team member not found" });
@@ -372,7 +381,7 @@ router.patch("/team/:id/flags", requireAuth, requireRole(["Organization Admin"])
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.patch("/team/:id", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
+router.patch("/team/:id", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
   try {
     const patch = { ...(req.body || {}) };
     if (isAuthPrivilegedRole(patch.role)) {
@@ -383,28 +392,48 @@ router.patch("/team/:id", requireAuth, requireRole(["Organization Admin"]), asyn
     const existing = await db.getTeamMemberById(req.orgId, req.params.id);
     if (!existing) return res.status(404).json({ error: "Team member not found" });
 
+    if (isAuthPrivilegedRole(existing.role) && !req.isPlatformAdmin) return res.status(403).json({ error: 'Privileged organization memberships require platform administration' });
     const updated = await db.patch("team", req.orgId, req.params.id, patch);
     auditLog.record(req.orgId, req, "team.update", "team_member", req.params.id, patch);
     res.json(updated);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.delete("/team/:id", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
+router.delete("/team/:id", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
   try {
+    const existing = await db.getTeamMemberById(req.orgId,req.params.id);
+    if (existing && isAuthPrivilegedRole(existing.role) && !req.isPlatformAdmin) return res.status(403).json({ error: 'Privileged organization memberships require platform administration' });
     await db.remove("team", req.orgId, req.params.id);
     auditLog.record(req.orgId, req, "team.remove", "team_member", req.params.id, {});
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/team/sync", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
-  try { res.json(await db.replaceTeamMembers(req.orgId, req.body)); }
+router.post("/team/sync", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
+  try {
+    if (!Array.isArray(req.body)) return res.status(400).json({ error: 'Expected a team array' });
+    // Whole-team imports cannot bypass the role restrictions in individual CRUD.
+    if (!req.isPlatformAdmin) {
+      const existing = await db.list('team',req.orgId);
+      const privileged = existing.filter(member => isAuthPrivilegedRole(member.role));
+      for (const member of req.body) {
+        if (!isAuthPrivilegedRole(member.role)) continue;
+        const old = privileged.find(row => row.id === member.id);
+        if (!old || JSON.stringify(old) !== JSON.stringify(member)) return res.status(403).json({ error: 'Privileged memberships cannot be changed through team sync' });
+      }
+      if (privileged.some(member => !req.body.some(row => row.id === member.id && row.role === member.role && row.status === member.status))) return res.status(403).json({ error: 'Privileged memberships cannot be removed through team sync' });
+    }
+    res.json(await db.replaceTeamMembers(req.orgId,req.body));
+  }
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
 // ── Organization settings ──
 router.get("/org", requireAuth, async (req, res) => {
-  try { res.json(await db.getOrg(req.orgId) || {}); }
+  try {
+    const org = await db.getOrg(req.orgId);
+    res.json(org ? { id: org.id,name: org.name,status: org.status,subscriptionPlan: org.subscriptionPlan } : {});
+  }
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
@@ -426,12 +455,14 @@ router.get("/pipeline-stages", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/org", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/org", requireAuth, requirePermission("organization.manage"), async (req, res) => {
   try {
     const before = await db.getOrg(req.orgId);
-    const updated = await db.updateOrg(req.orgId, req.body);
+    const orgPatch = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => WORKSPACE_PROFILE_FIELDS.has(key)));
+    if (Object.keys(orgPatch).some(key => key !== 'name') && !hasPermission(req,'workspace.settings.manage')) return res.status(403).json({ error: 'Workspace settings permission required for legacy profile fields' });
+    const updated = await db.updateOrg(req.orgId, orgPatch);
     // Compatibility for the previous frontend during a rolling deployment.
-    if (req.workspaceId === req.orgId) {
+    if (req.workspaceId === req.orgId && hasPermission(req,'workspace.settings.manage')) {
       const patch = Object.fromEntries(Object.entries(req.body || {}).filter(([key,value]) => WORKSPACE_PROFILE_FIELDS.has(key) && value !== undefined));
       await workspaceRepository.updateSettings(req.orgId,req.workspaceId,patch);
     }

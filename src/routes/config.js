@@ -4,7 +4,7 @@
 
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const { getConfigForOrg, updateConfigForOrg, PROMPT_PRESETS, buildIndustryPersona } = require("../config/agentConfig");
 const db = require("../db/repository");
 const auditLog = require("../platform/auditLog");
@@ -21,7 +21,7 @@ router.get("/", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const updated = await updateConfigForOrg(req.orgId, req.body);
     auditLog.record(req.orgId, req, "config.update", "config", null, req.body);
@@ -40,7 +40,7 @@ router.get("/presets", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/preset", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/preset", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { name } = req.body || {};
     if (!PROMPT_PRESETS[name]) return res.status(400).json({ error: `Unknown preset "${name}". Valid: ${Object.keys(PROMPT_PRESETS).join(", ")}` });
@@ -53,7 +53,7 @@ router.post("/preset", requireAuth, requireRole(ADMIN_ROLES), async (req, res) =
 });
 
 // Regenerate the AI persona from this org's industry + company profile.
-router.post("/preset/industry", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/preset/industry", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const org = await require('../db/repositories/workspaceRepository').getProfile(req.orgId,req.workspaceId);
     const persona = buildIndustryPersona(org);

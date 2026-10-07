@@ -10,7 +10,7 @@ const { safeErrorMessage } = require("../observability/safeError");
 const express = require("express");
 const engine = require("../crm/objectsEngine");
 const auditLog = require("../platform/auditLog");
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const { getLogger } = require("../observability/logger");
 const { parsePagination } = require("../lib/pagination");
 const log = getLogger("routes.objects");
@@ -46,7 +46,7 @@ router.get("/", requireAuth, async (req, res) => {
 
 // Defining a new object type is a schema change — admin-level action,
 // same bar as org settings/team management.
-router.post("/", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const created = await engine.createObject(req.orgId, req.body);
     auditLog.record(req.orgId, req, "object.create", "object", created.id, { key: created.key, label: created.label });

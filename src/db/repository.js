@@ -804,7 +804,10 @@ async function _txReplaceRows(table, orgId, rows, deserialize, tag) {
   const client = await _pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(`DELETE FROM ${table} WHERE org_id = $1 AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2))`, [orgId, workspaceIdForOrg(orgId)]);
+    const authority = require('../authorization/policy').getRequestAuthority();
+    const requestOwnsScope = authority?.orgId === orgId && authority?.workspaceId === workspaceIdForOrg(orgId);
+    const replaceWithDeletion = !requestOwnsScope || authority.permissions.includes('workspace.delete');
+    if (replaceWithDeletion) await client.query(`DELETE FROM ${table} WHERE org_id = $1 AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2))`, [orgId, workspaceIdForOrg(orgId)]);
     const result = [];
     for (const apiRow of rows) {
       const row = { ...apiRow, workspace_id: workspaceIdForOrg(orgId) };
@@ -827,10 +830,12 @@ async function _txReplaceRows(table, orgId, rows, deserialize, tag) {
         return v;
       });
       await client.query(
-        `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})`,
+        `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})${replaceWithDeletion ? '' : ' ON DUPLICATE KEY UPDATE ' + cols.filter(column => !['id','org_id','workspace_id'].includes(column)).map(column =>
+          `${column}=IF(org_id=VALUES(org_id) AND COALESCE(workspace_id,org_id)=VALUES(workspace_id),VALUES(${column}),${column})`).join(',')}`,
         values
       );
       const { rows: saved } = await client.query(`SELECT * FROM ${table} WHERE id = $1 AND org_id=$2 AND (workspace_id=$3 OR (workspace_id IS NULL AND org_id=$3))`, [row.id,orgId,workspaceIdForOrg(orgId)]);
+      if (!saved[0]) throw new Error('A synchronized record belongs to another workspace');
       result.push(deserialize(saved[0]));
     }
     await client.query("COMMIT");

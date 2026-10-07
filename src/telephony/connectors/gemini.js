@@ -13,7 +13,7 @@ const { runWithScope } = require("../../workspaces/scope");
 const { WebSocketServer } = require("ws");
 const { incrementSessions, decrementSessions, getActiveSessionsCount } = require("../../shared");
 const { getLogger } = require("../../observability/logger");
-const { verifyWebSocketTicket } = require("../../middleware/auth");
+const { verifyWebSocketTicket, resolveAuthorization } = require("../../middleware/auth");
 const log = getLogger("telephony.connectors.gemini");
 const activeByOrg = new Map();
 const MAX_SESSIONS_PER_ORG = Number(process.env.MAX_BROWSER_VOICE_SESSIONS_PER_ORG || 5);
@@ -47,7 +47,20 @@ wss.on("connection", (ws, req) => {
     log.error("❌ Gemini browser session failed:", err.message);
     try { ws.close(1011, "Voice session initialization failed"); } catch {}
   });
+  let checking = false;
+  const accessTimer = setInterval(async () => {
+    if (checking) return;
+    checking = true;
+    try {
+      const access = await resolveAuthorization({ userId: ticket.sub,email: ticket.email,orgId,
+        workspaceId: ticket.workspaceId || orgId,platformAdmin: ticket.platformAdmin === true });
+      if (!access.permissions.includes('workspace.call')) ws.close(1008,'Voice access revoked');
+    } catch { ws.close(1008,'Voice access unavailable'); }
+    finally { checking = false; }
+  },30000);
+  accessTimer.unref();
   ws.on("close", () => {
+    clearInterval(accessTimer);
     const next = Math.max(0, (activeByOrg.get(orgId) || 1) - 1);
     if (next) activeByOrg.set(orgId, next); else activeByOrg.delete(orgId);
     decrementSessions();
@@ -63,11 +76,17 @@ module.exports = {
   capabilities: { inbound: false, outbound: false, recording: false, streaming: true, dtmf: false, numberProvisioning: false, machineDetection: false },
   wsPaths: ["/session"],
 
-  handleUpgrade(request, socket, head, _pathname) {
+  async handleUpgrade(request, socket, head, _pathname) {
     try {
       const url = new URL(request.url, "http://localhost");
       const ticket = verifyWebSocketTicket(url.searchParams.get("ticket"));
       if (!ticket) { socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"); socket.destroy(); return; }
+      const access = await resolveAuthorization({ userId: ticket.sub,email: ticket.email,orgId: ticket.orgId,
+        workspaceId: ticket.workspaceId || ticket.orgId,platformAdmin: ticket.platformAdmin === true });
+      if (!access.permissions.includes('workspace.call')) {
+        socket.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); socket.destroy(); return;
+      }
+      if (socket.destroyed) return;
       request.browserWsTicket = ticket;
       wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws, request));
     } catch {

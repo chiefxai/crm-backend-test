@@ -15,7 +15,7 @@ const instagram = require("../channels/instagram");
 const db = require("../db/repository");
 const conversationIntelligence = require("../ai/conversationIntelligence");
 const auditLog = require("../platform/auditLog");
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.channels");
 const telephony = require("../telephony/registry");
@@ -43,7 +43,7 @@ channelsRouter.get("/", requireAuth, async (req, res) => {
 });
 
 // body: { phoneNumberId, accessToken, aiAutoReply? }
-channelsRouter.post("/whatsapp", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+channelsRouter.post("/whatsapp", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { phoneNumberId, accessToken, aiAutoReply } = req.body || {};
     if (!phoneNumberId || !accessToken) {
@@ -61,7 +61,7 @@ channelsRouter.post("/whatsapp", requireAuth, requireRole(ADMIN_ROLES), async (r
 });
 
 // body: { igBusinessAccountId, accessToken, aiAutoReply? }
-channelsRouter.post("/instagram", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+channelsRouter.post("/instagram", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { igBusinessAccountId, accessToken, aiAutoReply } = req.body || {};
     if (!igBusinessAccountId || !accessToken) {
@@ -78,7 +78,7 @@ channelsRouter.post("/instagram", requireAuth, requireRole(ADMIN_ROLES), async (
 });
 
 // body: { authId, authToken, phoneNumber } — same as above, for Vobiz.ai.
-channelsRouter.post("/vobiz", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+channelsRouter.post("/vobiz", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const { authId, authToken, phoneNumber } = req.body || {};
     if (!authId || !authToken || !phoneNumber) {
@@ -108,7 +108,7 @@ channelsRouter.post("/vobiz", requireAuth, requireRole(ADMIN_ROLES), async (req,
 // virtual_numbers is just a display/routing entry; this is the actual
 // credential connection that outbound calls fall back to, so both need
 // their own delete path (see channelsEngine.removeChannel's comment).
-channelsRouter.delete("/:type", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+channelsRouter.delete("/:type", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     await channelsEngine.removeChannel(req.orgId, req.params.type);
     auditLog.record(req.orgId, req, "channel.disconnect", "channel", req.params.type, { type: req.params.type });

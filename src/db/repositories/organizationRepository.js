@@ -73,6 +73,7 @@ async function createOrganizationSetup({
     }
     if (adminEmail) await client.query(`INSERT INTO org_members (id,org_id,user_id,email,name,role,feature_flags,created_at) VALUES ($1,$2,NULL,$3,$4,'Organization Admin',$5,$6)`, [memberId,orgId,adminEmail.toLowerCase(),adminName||adminEmail,JSON.stringify(featureFlags||[]),now]);
     if (memberId) await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,created_at) VALUES (?,?,?,'Workspace Admin','Active',?)`, [orgId,orgId,memberId,now]);
+    if (memberId) await client.query('UPDATE org_members SET workspace_assignments_initialized=1 WHERE org_id=? AND id=?',[orgId,memberId]);
     await client.query("COMMIT");
     const orgResult=await client.query(`SELECT * FROM organizations WHERE id = $1`,[orgId]); const cloudResult=await client.query(`SELECT * FROM organization_cloud_projects WHERE id = $1`,[cloudProjectId]);
     return {org:toApi(orgResult.rows[0]),cloudProject:toApiCloudProject(cloudResult.rows[0]),memberId};

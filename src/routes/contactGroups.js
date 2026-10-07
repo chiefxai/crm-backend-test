@@ -9,7 +9,7 @@
 
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const db = require("../db/repository");
 
 router.get("/", requireAuth, async (req, res) => {
@@ -39,7 +39,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
 // Deleting a group leaves its members in place (just ungrouped) — strip the
 // deleted group id out of every lead that referenced it so nothing points
 // at a group that no longer exists.
-router.delete("/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.delete("/:id", requireAuth, requirePermission("workspace.delete"), async (req, res) => {
   try {
     const groupId = req.params.id;
     const leads = await db.list("leads", req.orgId);

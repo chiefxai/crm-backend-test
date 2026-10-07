@@ -2,7 +2,7 @@
 
 const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
-const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
+const { requireAuth, requirePermission } = require("../middleware/auth");
 const db = require("../db/repository");
 const lendingObjectsMirror = require("../crm/lendingObjectsMirror");
 const { parsePagination } = require("../lib/pagination");
@@ -47,7 +47,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.delete("/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.delete("/:id", requireAuth, requirePermission("workspace.delete"), async (req, res) => {
   try {
     await db.remove("leads", req.orgId, req.params.id);
     global.broadcastLog(`👤 Removed lead: ${req.params.id}`, { type: "lead", leadId: req.params.id });
