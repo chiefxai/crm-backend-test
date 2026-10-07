@@ -53,6 +53,7 @@ router.use("/api", require("./campaigns"));
 
 // Settings (numbers, team, org)
 router.use("/api/settings", require("./settings"));
+router.use("/api/workspace-sharing", require("./workspaceSharing"));
 
 // Dashboard analytics
 router.use("/api/dashboard", require("./dashboard"));

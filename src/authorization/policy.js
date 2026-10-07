@@ -42,6 +42,8 @@ function requestPermission(req) {
   const read = ['GET','HEAD','OPTIONS'].includes(req.method);
   if (['/api/auth/me','/api/auth/roles','/api/settings/me'].includes(path)) return null;
   if (path === '/api/settings/workspaces') return read ? 'organization.read' : 'organization.manage';
+  if (/^\/api\/workspace-sharing\/records(?:\/|$)/.test(path)) return 'workspace.read';
+  if (/^\/api\/workspace-sharing\/grants(?:\/|$)/.test(path)) return read ? 'workspace.read' : 'workspace.settings.manage';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';
   if (/^\/api\/settings\/workspace\/members(?:\/|$)/.test(path)) return 'workspace.members.manage';
   if (/^\/api\/settings\/team(?:\/|$)/.test(path)) return read ? 'organization.members.read' : 'organization.members.manage';

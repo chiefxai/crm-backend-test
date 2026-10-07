@@ -14,11 +14,11 @@ retaining compatibility with legacy responses. Requests carry both
 CRM caches are partitioned by identity, organization and workspace. Workspace
 access is checked before permissions and operational data load.
 
-**Additional workspaces and sharing are disabled.** The middleware rejects any
-workspace ID other than the organization's initial workspace. The API/query builder now applies organization and workspace scope, and the
-operational tables have additive workspace columns. Workspace provisioning/member management,
-remaining provider/callback audits and final schema contraction
-remain unfinished. This release does not enable multiple workspaces per organization.
+Workspace provisioning and same-organization read sharing are implemented
+behind independent environment gates. Both `MULTI_WORKSPACE_ENABLED=true` and
+`WORKSPACE_ISOLATION_VERIFIED=true` are required for child workspace access;
+sharing additionally requires `WORKSPACE_SHARING_ENABLED=true`. Keep these off
+until the VM's isolation audit and MySQL migration have been reviewed.
 
 ## Implemented in the isolation release
 
@@ -109,7 +109,14 @@ production build. No MySQL migration or end-to-end VM execution was performed.
 
 Syntax/diff checks and the frontend production build are used for this release.
 MySQL migrations, live telephony and VM runtime execution are not verified here.
-Additional workspace creation and sharing remain disabled.
+Additional workspace provisioning creates a workspace, its first Workspace
+Admin assignment and industry seed objects in one transaction. Sharing grants
+are read-only, limited to an explicit field allowlist, expire within at most one
+year, and can be revoked by a Workspace Admin of the source workspace. The
+target can read projected records only while the grant is active; it cannot
+edit source data. The sharing UI/API remains disabled unless all three gates
+are enabled. Full MySQL and VM behavior still needs to be verified before
+turning on either gate.
 
 ## Role enforcement release
 
@@ -256,11 +263,11 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
 4. Organization/workspace permission enforcement and workspace role assignment
    CRUD/UI and explicit owner handoff are implemented. Verify revocation and
    role boundaries against the full stack before enabling additional workspaces.
-5. Add workspace provisioning/settings/member management and workspace industry
-   configuration to both backend and frontend. Enable additional workspaces only
-   after the operational-scope audit is complete.
-6. Add explicit same-organization read-sharing grants, expiry/revocation, a
-   separate shared list and an allowlist of visible fields.
+5. Verify workspace provisioning/settings/member management and workspace
+   industry configuration against MySQL and the full application stack.
+6. Verify same-organization read-sharing grants, expiry/revocation, the shared
+   records view and the field allowlist against MySQL and the full application
+   stack before enabling the sharing flag.
 7. Add restricted editing with versions, mapped copies/transfers, recruitment
    workflows and scaling improvements (outbox/idempotency/pagination).
 

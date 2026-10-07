@@ -6,4 +6,8 @@ function multipleWorkspacesEnabled() {
     && process.env.WORKSPACE_ISOLATION_VERIFIED === "true";
 }
 
-module.exports = { multipleWorkspacesEnabled };
+function workspaceSharingEnabled() {
+  return multipleWorkspacesEnabled() && process.env.WORKSPACE_SHARING_ENABLED === "true";
+}
+
+module.exports = { multipleWorkspacesEnabled, workspaceSharingEnabled };

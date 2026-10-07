@@ -14,7 +14,7 @@ const workspaceRepository = require("../db/repositories/workspaceRepository");
 const policy = require("../authorization/policy");
 const platformAdmin = require("../platform/admin");
 const { getLogger } = require("../observability/logger");
-const { multipleWorkspacesEnabled } = require("../workspaces/capabilities");
+const { multipleWorkspacesEnabled, workspaceSharingEnabled } = require("../workspaces/capabilities");
 const log = getLogger("routes.auth");
 
 const router = express.Router();
@@ -119,7 +119,7 @@ router.get("/me", requireAuth, async (req, res) => {
         workspaceName: org.workspaceName,subscriptionPlan: org.subscriptionPlan } : null,
       authorization: req.authorization,
       workspace: activeWorkspace,
-      workspaceCapabilities: { multipleWorkspaces: multipleWorkspacesEnabled(), sharing: false },
+      workspaceCapabilities: { multipleWorkspaces: multipleWorkspacesEnabled(), sharing: workspaceSharingEnabled() },
     });
   } catch (err) {
     log.error("❌ /api/auth/me:", err.message);
