@@ -1,3 +1,4 @@
+const { runWithScope } = require("../workspaces/scope");
 // src/middleware/auth.js
 //
 // Provider-agnostic JWT authentication middleware.
@@ -63,7 +64,9 @@ async function requireAuth(req, res, next) {
   if (isDevMode()) {
     req.userId = DEV_USER_ID; req.userEmail = "dev@localhost";
     req.userName = "Dev User"; req.orgId = DEV_ORG_ID; req.workspaceId = DEV_ORG_ID; req.userRole = "Organization Admin";
-    return next();
+    res.set("X-Organization-Id", req.orgId);
+    res.set("X-Workspace-Id", req.workspaceId);
+    return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, next);
   }
 
   try {
@@ -114,7 +117,9 @@ async function requireAuth(req, res, next) {
     req.userName  = payload.name || membership.name || null;
     req.orgId     = membership.orgId;
     req.userRole  = membership.role;
-    return next();
+    res.set("X-Organization-Id", req.orgId);
+    res.set("X-Workspace-Id", req.workspaceId);
+    return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, next);
   } catch (err) {
     log.error("❌ auth.js: token verification failed:", err.message);
     return res.status(401).json({ error: "Invalid or expired token" });
@@ -154,7 +159,7 @@ function getSseTicketSecret() {
   return secret || "dev-sse-ticket-secret";
 }
 function createSseTicket(req, ttlSeconds = 60) {
-  const payload = Buffer.from(JSON.stringify({ sub: req.userId, email: req.userEmail || null, orgId: req.orgId, role: req.userRole, exp: Math.floor(Date.now()/1000) + ttlSeconds, jti: crypto.randomUUID() })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ sub: req.userId, email: req.userEmail || null, orgId: req.orgId, workspaceId: req.workspaceId || req.orgId, role: req.userRole, exp: Math.floor(Date.now()/1000) + ttlSeconds, jti: crypto.randomUUID() })).toString("base64url");
   const sig = crypto.createHmac("sha256", getSseTicketSecret()).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
@@ -168,7 +173,13 @@ function verifySseTicket(ticket) {
   try { const data=JSON.parse(Buffer.from(payload,"base64url").toString("utf8")); return data.exp > Math.floor(Date.now()/1000) ? data : null; } catch { return null; }
 }
 function requireSseTicket(req, res, next) {
-  try { const data=verifySseTicket(req.query.ticket); if (!data) return res.status(401).json({error:"Invalid or expired SSE ticket"}); req.userId=data.sub; req.userEmail=data.email; req.orgId=data.orgId; req.userRole=data.role; return next(); } catch (err) { return res.status(401).json({error:"Invalid SSE ticket"}); }
+  try {
+    const data = verifySseTicket(req.query.ticket);
+    if (!data) return res.status(401).json({ error: "Invalid or expired SSE ticket" });
+    req.userId = data.sub; req.userEmail = data.email; req.orgId = data.orgId;
+    req.workspaceId = data.workspaceId || data.orgId; req.userRole = data.role;
+    return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, next);
+  } catch { return res.status(401).json({ error: "Invalid SSE ticket" }); }
 }
 
 function getWebSocketTicketSecret() {
@@ -178,7 +189,7 @@ function getWebSocketTicketSecret() {
 }
 function createWebSocketTicket(req, ttlSeconds = 60) {
   const payload = Buffer.from(JSON.stringify({
-    sub: req.userId, email: req.userEmail || null, orgId: req.orgId, role: req.userRole,
+    sub: req.userId, email: req.userEmail || null, orgId: req.orgId, workspaceId: req.workspaceId || req.orgId, role: req.userRole,
     exp: Math.floor(Date.now() / 1000) + ttlSeconds, jti: crypto.randomUUID(), purpose: "browser-ws"
   })).toString("base64url");
   const sig = crypto.createHmac("sha256", getWebSocketTicketSecret()).update(payload).digest("base64url");

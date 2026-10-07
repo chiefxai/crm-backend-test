@@ -7,6 +7,7 @@ const { createRabbitMqQueueAdapter } = require("./adapters/rabbitMqQueueAdapter"
 const { createOciQueueAdapter } = require("./adapters/ociQueueAdapter");
 const { createAwsSqsQueueAdapter } = require("./adapters/awsSqsQueueAdapter");
 
+const { wrapWorkspaceQueue } = require("./workspaceQueue");
 let instance = null;
 
 function getQueue() {
@@ -31,6 +32,7 @@ function getQueue() {
     default:
       throw new Error(`[queue] unknown QUEUE_PROVIDER "${provider}" — supported: memory, rabbitmq, oci_queue, aws_sqs`);
   }
+  instance = wrapWorkspaceQueue(instance);
   // start() is intentionally not awaited to preserve the existing synchronous
   // getQueue() API. RabbitMQ buffers enqueues until its channel is ready.
   Promise.resolve(instance.start()).catch(err => {

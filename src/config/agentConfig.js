@@ -541,7 +541,7 @@ async function getAgentConfigForNumber(phoneNumber, orgId) {
   try {
     const db = require("../db/repository");
     if (!db.isConfigured()) return { config: currentConfig, agentId: null };
-    const agent = await db.getAgentForNumber(phoneNumber);
+    const agent = await db.getAgentForNumber(phoneNumber, orgId);
     if (agent) {
       return {
         agentId: agent.id,

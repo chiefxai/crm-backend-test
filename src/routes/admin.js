@@ -72,7 +72,7 @@ router.get("/logs-stream", requireSseTicket, (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.write(`data: ${JSON.stringify({ timestamp: new Date().toISOString(), message: "Live event stream connected" })}\n\n`);
-  const client = { res, orgId: req.orgId };
+  const client = { res, orgId: req.orgId, workspaceId: req.workspaceId };
   addLogClient(client);
   req.on("close", () => removeLogClient(client));
 });

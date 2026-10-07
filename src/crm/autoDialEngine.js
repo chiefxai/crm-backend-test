@@ -1,3 +1,4 @@
+const { runWithScope } = require("../workspaces/scope");
 // src/crm/autoDialEngine.js
 // ============================================================
 // Server-side "Continuous Dialer Mode" — walks a dialer task's lead list
@@ -524,7 +525,7 @@ async function processAutoDialTasks() {
   }
   for (const task of tasks) {
     try {
-      await processTask(task);
+      await runWithScope({ orgId: task.orgId, workspaceId: task.workspaceId || task.orgId }, () => processTask(task));
     } catch (err) {
       log.error(`❌ [autoDialEngine] Unexpected error processing task ${task.id} (org ${task.orgId}):`, err.message);
     }

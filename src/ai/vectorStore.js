@@ -9,13 +9,14 @@
 // `LIKE %query%` match in the old local shim, which wasn't doing any
 // real search at all.
 //
-// One Chroma collection per org (`kb_<orgId>`), so orgs never share
+// One Chroma collection per workspace (`kb_<workspaceId>`), so workspaces never share
 // vector space. If Chroma isn't reachable, every call here throws — the
 // caller (knowledgeBase.js) is responsible for surfacing that clearly
 // rather than silently falling back to fake results.
 // ============================================================
 
 const { ChromaClient } = require("chromadb");
+const { scopeForOrg } = require("../workspaces/scope");
 const genai = require("./googleAiClient");
 
 const { isVertex } = genai;
@@ -48,7 +49,7 @@ function getClient() {
 // hyphen, starting and ending alphanumeric — `kb_<uuid>` always satisfies
 // that since org ids are uuids.
 function collectionName(orgId) {
-  return `kb_${orgId}`;
+  return `kb_${scopeForOrg(orgId).workspaceId}`;
 }
 
 async function getCollection(orgId) {

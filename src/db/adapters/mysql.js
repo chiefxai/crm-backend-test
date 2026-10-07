@@ -35,6 +35,8 @@ if (process.env.NODE_ENV === "production" && AUTH_SECRET === "chiefvoice-dev-sec
 }
 const AUTH_TOKEN_TTL = "30d";
 
+const { WORKSPACE_TABLES } = require("../../workspaces/tables");
+const { getScope } = require("../../workspaces/scope");
 const { pool, closePool } = require("../pool");
 
 // Identifiers cannot be parameterized with mysql2. Every identifier that
@@ -547,6 +549,10 @@ const TABLES = {
   }
 };
 
+// The expansion migration adds this field to existing tables. For fresh
+// installations the legacy bootstrap also knows how to serialize it.
+for (const table of WORKSPACE_TABLES) TABLES[table].columns.workspace_id = "text";
+
 // Forward embeds: `<table>.<fk_col>` references `<relTable>.id`.
 const EMBED_FK = {
   organizations: "org_id",
@@ -562,6 +568,7 @@ const EMBED_REVERSE_FK = {
 // genuinely unbounded content such as prompts, transcripts and notes.
 const VARCHAR_COLUMNS = new Map([
   ["org_id", "VARCHAR(191)"],
+  ["workspace_id", "VARCHAR(191)"],
   ["user_id", "VARCHAR(191)"],
   ["admin_id", "VARCHAR(191)"],
   ["id", "VARCHAR(191)"],
@@ -973,6 +980,8 @@ function deserializeRow(table, row) {
 class QueryBuilder {
   constructor(table) {
     this.table = table;
+    this.scope = getScope();
+    this.systemRead = false;
     this.def = TABLES[table];
     if (!this.def) throw new Error(`[mysqlClient] unknown table "${table}"`);
     this.op = null;
@@ -1036,8 +1045,48 @@ class QueryBuilder {
   then(resolve, reject) { return this._exec({}).then(resolve, reject); }
   catch(onReject) { return this._exec({}).catch(onReject); }
 
+  // Only trusted internal callers use this for ownership checks and platform
+  // scans. It cannot disable scope for a write.
+  systemReadOnly(reason) {
+    if (typeof reason !== "string" || !reason.trim()) throw new Error("A system-read reason is required");
+    this.systemRead = true;
+    return this;
+  }
+
+  _workspaceScope(row) {
+    if (this.systemRead) {
+      if (this.op !== "select") throw new Error("System scans are read-only");
+      return null;
+    }
+    if (!WORKSPACE_TABLES.has(this.table)) return null;
+    const orgFilter = this.filters.find(([kind, column]) => kind === "eq" && column === "`org_id`");
+    const orgId = row?.org_id || orgFilter?.[2] || this.scope?.orgId;
+    const scope = this.scope || (orgId ? { orgId, workspaceId: orgId } : null);
+    if (!scope) return null; // Explicit cross-org system scan; never inferred from a client ID.
+    if (orgId && orgId !== scope.orgId) throw new Error("Organization does not match query workspace");
+    const workspaceFilter = this.filters.find(([kind, column]) => kind === "eq" && column === "`workspace_id`");
+    if ((row?.workspace_id && row.workspace_id !== scope.workspaceId) || (workspaceFilter && workspaceFilter[2] !== scope.workspaceId)) {
+      throw new Error("Workspace does not match query scope");
+    }
+    return scope;
+  }
+
+  _scopeInsert(row) {
+    const scope = this._workspaceScope(row);
+    if (WORKSPACE_TABLES.has(this.table) && !scope) throw new Error("Operational writes require an organization and workspace");
+    if (scope) { row.org_id = scope.orgId; row.workspace_id = scope.workspaceId; }
+    return row;
+  }
+
   _buildWhere(startIdx = 1) {
     const clauses = []; const params = [];
+    const scope = this._workspaceScope();
+    if (scope) {
+      clauses.push("`org_id` = ?", "(`workspace_id` = ? OR (`workspace_id` IS NULL AND `org_id` = ?))");
+      // NULL fallback is limited to the initial workspace during mixed-version
+      // deployment. It must never expose legacy rows to a child workspace.
+      params.push(scope.orgId, scope.workspaceId, scope.workspaceId);
+    }
     for (const [kind, col, val, extra] of this.filters) {
       if (kind === "eq") { clauses.push(`${col} = ?`); params.push(val); }
       else if (kind === "neq") { clauses.push(`${col} != ?`); params.push(val); }
@@ -1101,13 +1150,15 @@ class QueryBuilder {
         for (const row of rows) {
           const relId = row[fk];
           if (!relId) { row[relTable] = null; continue; }
-          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = $1`, [relId]);
+          const scoped = WORKSPACE_TABLES.has(relTable);
+          const { rows: relRows } = await pool.query(`SELECT * FROM ${relTable} WHERE id = ?${scoped ? " AND org_id=? AND COALESCE(workspace_id,org_id)=?" : ""}`, [relId, ...(scoped ? [row.org_id, row.workspace_id || row.org_id] : [])]);
           row[relTable] = relRows[0] ? deserializeRow(relTable, relRows[0]) : null;
         }
       } else if (EMBED_REVERSE_FK[relTable] && subcols.trim() === "count") {
         const fk = EMBED_REVERSE_FK[relTable];
         for (const row of rows) {
-          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = $1`, [row.id]);
+          const scoped = WORKSPACE_TABLES.has(relTable);
+          const { rows: countRows } = await pool.query(`SELECT COUNT(*) as c FROM ${relTable} WHERE ${fk} = ?${scoped ? " AND org_id=? AND COALESCE(workspace_id,org_id)=?" : ""}`, [row.id, ...(scoped ? [row.org_id, row.workspace_id || row.org_id] : [])]);
           row[relTable] = [{ count: Number(countRows[0].c) }];
         }
       }
@@ -1129,28 +1180,34 @@ class QueryBuilder {
     if (this.op === "delete") { const {where,params}=this._buildWhere(); await pool.query(`DELETE FROM ${table} ${where}`,params); return {data:null,error:null}; }
     if (this.op === "insert") {
       const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
-      for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
+      for (const apiRow of rows) { const row=this._scopeInsert({...apiRow}); if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
         const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
         await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
         const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
       } return this._finishWrite(inserted,mode);
     }
     if (this.op === "update") {
-      const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
+      const patch={...this.payload};
+      if (WORKSPACE_TABLES.has(table) && ("org_id" in patch || "workspace_id" in patch)) {
+        throw new Error("Operational record ownership is immutable");
+      } const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
       if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
       const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
     }
     if (this.op === "upsert") {
-      const row={...this.payload};
+      const row=this._scopeInsert({...this.payload});
       if(!row[def.pk]) row[def.pk]=genId();
       const all=Object.keys(row).filter(c=>c in def.columns);
-      const cols=all.filter(c=>c!==def.pk);
+      const cols=all.filter(c=>c!==def.pk && (!WORKSPACE_TABLES.has(table) || !["org_id","workspace_id"].includes(c)));
       const values=all.map(c=>serializeValue(def.columns[c],row[c]));
       // Use MySQL's atomic duplicate-key handling. The previous implementation
       // performed SELECT -> UPDATE/INSERT, which could race under concurrent
       // requests.
       const updateCols=cols.length ? cols : [def.pk];
-      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
+      const scoped = WORKSPACE_TABLES.has(table);
+      const updateSql=updateCols.map(c => scoped
+        ? `${q(c)} = IF(org_id=VALUES(org_id) AND COALESCE(workspace_id,org_id)=VALUES(workspace_id), VALUES(${q(c)}), ${q(c)})`
+        : `${q(c)} = VALUES(${q(c)})`).join(",");
       await pool.query(
         `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
         values
@@ -1163,15 +1220,15 @@ class QueryBuilder {
       const uniqueKeys=def.uniqueKeys || [[def.pk]];
       for (const keyCols of uniqueKeys) {
         if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
-        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
-        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ") + (scoped ? " AND org_id=? AND COALESCE(workspace_id,org_id)=?" : "");
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, [...keyCols.map(c=>serializeValue(def.columns[c],row[c])), ...(scoped ? [row.org_id,row.workspace_id] : [])]);
         if (result.rows[0]) { saved=result.rows[0]; break; }
       }
       if (!saved) {
-        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?${scoped ? " AND org_id=? AND COALESCE(workspace_id,org_id)=?" : ""} LIMIT 1`,[row[def.pk], ...(scoped ? [row.org_id,row.workspace_id] : [])]);
         saved=result.rows[0];
       }
-      if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
+      if (!saved) throw new Error(scoped ? "Record identifier belongs to another workspace" : `Persisted ${table} row could not be located`);
       return this._finishWrite([deserializeRow(table,saved)],mode);
     }
     if(this.selectOpts.count && this.selectOpts.head){ const {where,params}=this._buildWhere(); const r=await pool.query(`SELECT COUNT(*) c FROM ${table} ${where}`,params); return {data:null,error:null,count:Number(r.rows[0].c)}; }

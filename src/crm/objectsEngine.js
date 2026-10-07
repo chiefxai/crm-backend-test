@@ -40,8 +40,8 @@ async function listObjects(orgId) {
 
   const objectIds = objects.map((o) => o.id);
   const [{ data: fields, error: fErr }, { data: stages, error: sErr }] = await Promise.all([
-    db.supabase.from("object_fields").select("*").in("object_id", objectIds).order("position", { ascending: true }),
-    db.supabase.from("object_stages").select("*").in("object_id", objectIds).order("position", { ascending: true })
+    db.supabase.from("object_fields").select("*").eq("org_id", orgId).in("object_id", objectIds).order("position", { ascending: true }),
+    db.supabase.from("object_stages").select("*").eq("org_id", orgId).in("object_id", objectIds).order("position", { ascending: true })
   ]);
   if (fErr) throw new Error(`[objectsEngine.listObjects] fields: ${fErr.message}`);
   if (sErr) throw new Error(`[objectsEngine.listObjects] stages: ${sErr.message}`);
@@ -70,8 +70,8 @@ async function getObjectByKey(orgId, objectKey) {
   if (!object) return null;
 
   const [{ data: fields, error: fErr }, { data: stages, error: sErr }] = await Promise.all([
-    db.supabase.from("object_fields").select("*").eq("object_id", object.id).order("position", { ascending: true }),
-    db.supabase.from("object_stages").select("*").eq("object_id", object.id).order("position", { ascending: true })
+    db.supabase.from("object_fields").select("*").eq("org_id", orgId).eq("object_id", object.id).order("position", { ascending: true }),
+    db.supabase.from("object_stages").select("*").eq("org_id", orgId).eq("object_id", object.id).order("position", { ascending: true })
   ]);
   if (fErr) throw new Error(`[objectsEngine.getObjectByKey] fields: ${fErr.message}`);
   if (sErr) throw new Error(`[objectsEngine.getObjectByKey] stages: ${sErr.message}`);
@@ -339,6 +339,7 @@ async function patchRecord(orgId, objectKey, recordId, body) {
   const { data: existing, error: getErr } = await db.supabase
     .from("object_records")
     .select("data")
+    .eq("object_id", object.id)
     .eq("id", recordId)
     .eq("org_id", orgId)
     .maybeSingle();
@@ -366,6 +367,7 @@ async function patchRecord(orgId, objectKey, recordId, body) {
   const { data: row, error } = await db.supabase
     .from("object_records")
     .update(updatePayload)
+    .eq("object_id", object.id)
     .eq("id", recordId)
     .eq("org_id", orgId)
     .select()
@@ -376,9 +378,12 @@ async function patchRecord(orgId, objectKey, recordId, body) {
 
 async function removeRecord(orgId, objectKey, recordId) {
   requireDb();
+  const object = await getObjectByKey(orgId, objectKey);
+  if (!object) return false;
   const { data: deleted, error } = await db.supabase
     .from("object_records")
     .delete()
+    .eq("object_id", object.id)
     .eq("id", recordId)
     .eq("org_id", orgId)
     .select("id")
@@ -403,6 +408,7 @@ async function getDashboardMetrics(orgId) {
   const { data: records, error } = await db.supabase
     .from("object_records")
     .select("*")
+    .eq("org_id", orgId)
     .in("object_id", objectIds);
   if (error) throw new Error(`[objectsEngine.getDashboardMetrics] ${error.message}`);
 

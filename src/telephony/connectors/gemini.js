@@ -1,3 +1,4 @@
+const { runWithScope } = require("../../workspaces/scope");
 // src/telephony/connectors/gemini.js — Gemini browser voice-session connector
 //
 // Handles the /session WebSocket path used by the web dashboard's
@@ -42,7 +43,7 @@ wss.on("connection", (ws, req) => {
   incrementSessions();
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
   log.info(`🌐 [gemini] browser session connected org=${orgId} user=${ticket.sub} from ${ip} | Active: ${getActiveSessionsCount()}`);
-  Promise.resolve(handleBrowserSession(ws, ticket)).catch((err) => {
+  Promise.resolve(runWithScope({ orgId, workspaceId: ticket.workspaceId || orgId }, () => handleBrowserSession(ws, ticket))).catch((err) => {
     log.error("❌ Gemini browser session failed:", err.message);
     try { ws.close(1011, "Voice session initialization failed"); } catch {}
   });

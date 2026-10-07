@@ -1,3 +1,4 @@
+const { runWithScope } = require("../workspaces/scope");
 // services/dialerRetryEngine.js
 // ============================================================
 // Automatic redial for outbound Vobiz calls that ended in "No Answer" or
@@ -65,6 +66,7 @@ async function processDueRetries() {
   }
 
   for (const row of due) {
+    await runWithScope({ orgId: row.orgId, workspaceId: row.workspaceId || row.orgId }, async () => {
     try {
       // Skip if this lead was already reached (or is already being retried)
       // through a NEWER call than the one this pending row came from —
@@ -96,7 +98,7 @@ async function processDueRetries() {
       if (alreadyHandled) {
         log.info(`🔁 [dialerRetryEngine] Skipping redial for ${row.leadName} (org ${row.orgId}) — a newer call to this number already exists.`);
         await db.patch("calllogs", row.orgId, row.id, { retryStatus: "superseded" });
-        continue;
+        return;
       }
 
       // Atomically claim the retry in MySQL. This prevents two scheduler
@@ -105,14 +107,14 @@ async function processDueRetries() {
       const claimed = await db.claimCallForRetry(row.orgId, row.id);
       if (!claimed) {
         await db.patch("calllogs", row.orgId, row.id, { retryStatus: "superseded" }).catch(() => {});
-        continue;
+        return;
       }
 
       const baseUrl = getPublicBaseUrl();
       if (!baseUrl) {
         log.error("❌ [dialerRetryEngine] No PUBLIC_URL configured — cannot build callback URLs for auto-redial. Marking exhausted instead of retrying forever.");
         await db.patch("calllogs", row.orgId, row.id, { retryStatus: "exhausted" });
-        continue;
+        return;
       }
 
       const nextAttempt = (row.attemptNumber || 1) + 1;
@@ -151,6 +153,7 @@ async function processDueRetries() {
       // exhausted instead of leaving it "pending" to be retried forever.
       await db.patch("calllogs", row.orgId, row.id, { retryStatus: "exhausted" }).catch(() => {});
     }
+    });
   }
 }
 

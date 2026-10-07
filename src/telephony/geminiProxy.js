@@ -1,3 +1,4 @@
+const { onScopedEvent } = require("../workspaces/scope");
 // ============================================================
 // services/geminiProxy.js
 //
@@ -197,7 +198,7 @@ Never call 'save_question_response' unless the caller has actually, verbally ans
   let isFinalized = false;
 
   // ── Handle browser messages ───────────────────────────────
-  browserWs.on("message", async (rawMsg) => {
+  onScopedEvent(browserWs,"message", async (rawMsg) => {
     if (!isActive || !geminiSession) return;
     try {
       const msg = JSON.parse(rawMsg.toString());
@@ -229,13 +230,13 @@ Never call 'save_question_response' unless the caller has actually, verbally ans
       .catch(err => log.error("❌ Post-call error:", err.message));
   }
 
-  browserWs.on("close", async () => {
+  onScopedEvent(browserWs,"close", async () => {
     log.info(`🌐 Disconnected | Call ID: ${callId}`);
     await finalizeCall();
     if (geminiSession) try { await geminiSession.close(); } catch {}
   });
 
-  browserWs.on("error", err => {
+  onScopedEvent(browserWs,"error", err => {
     log.error("❌ WS error:", err.message);
     isActive = false;
   });
@@ -513,7 +514,7 @@ async function openGeminiSession(browserWs, voiceName, systemPrompt, recordStrea
 
   // Attach raw WebSocket packet listener to capture exact Google server frames including usageMetadata
   if (session && session.conn && session.conn.ws) {
-    session.conn.ws.on("message", (rawFrame) => {
+    onScopedEvent(session.conn.ws,"message", (rawFrame) => {
       try {
         const payload = JSON.parse(rawFrame.toString());
         if (global.broadcastLog) {

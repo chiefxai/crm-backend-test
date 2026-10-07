@@ -54,6 +54,7 @@ app.use(cors({
     ? (origin, cb) => (!origin || ALLOWED_ORIGINS.includes(origin) ? cb(null, true) : cb(new Error("CORS")))
     : true, // dev: allow all
   credentials: true,
+  exposedHeaders: ["X-Request-Id", "X-Organization-Id", "X-Workspace-Id"],
 }));
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+const { scopeForOrg } = require("../workspaces/scope");
 // ============================================================
 // services/channelsEngine.js
 //
@@ -105,12 +106,13 @@ async function upsertChannel(orgId, type, externalId, config = {}) {
   // INSERT will fail with a duplicate-key 500.
   const { data: exactChannel, error: exactErr } = await db.supabase
     .from("channels")
-    .select("id, org_id")
+    .select("id, org_id, workspace_id")
+    .systemReadOnly("Check global channel ownership")
     .eq("type", type)
     .eq("external_id", externalId)
     .maybeSingle();
   if (exactErr) throw new Error(`[channelsEngine.upsertChannel] ${exactErr.message}`);
-  if (exactChannel && exactChannel.org_id !== orgId) {
+  if (exactChannel && (exactChannel.org_id !== orgId || (exactChannel.workspace_id || exactChannel.org_id) !== scopeForOrg(orgId).workspaceId)) {
     const err = new Error("This channel number is already assigned to another organization.");
     err.statusCode = 409;
     throw err;

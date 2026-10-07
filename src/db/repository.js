@@ -26,6 +26,9 @@ const { getLogger } = require("../observability/logger");
 const { buildVobizIncomingWebhookUrl } = require("../telephony/vobiz/vobizWebhookAuth");
 const organizationRepository = require("./repositories/organizationRepository");
 const aiUsageRepository = require("./repositories/aiUsageRepository");
+const { scopeForOrg, getScope } = require("../workspaces/scope");
+const { WORKSPACE_TABLES } = require("../workspaces/tables");
+const workspaceIdForOrg = orgId => scopeForOrg(orgId).workspaceId;
 const log = getLogger("db.repository");
 
 // Shared pool for all repository queries and transactions.
@@ -292,6 +295,7 @@ function fromDbRow(entity, row) {
   if (!row) return row;
   const map = ENTITIES[entity].fields;
   const obj = {};
+  if (WORKSPACE_TABLES.has(ENTITIES[entity].table)) obj.workspaceId = row.workspace_id || row.org_id;
   for (const [apiKey, dbKey] of Object.entries(map)) {
     if (row[dbKey] !== undefined) obj[apiKey] = row[dbKey];
   }
@@ -312,9 +316,9 @@ async function getCallLogsWithContacts(orgId, options = {}) {
   const page = Number.isInteger(options.page) ? options.page : null;
   const limit = Number.isInteger(options.limit) ? options.limit : null;
   const callId = options.callId || null;
-  const where = ["cl.org_id = ?"]; const params = [orgId];
+  const where = ["cl.org_id = ?", "(cl.workspace_id=$2 OR (cl.workspace_id IS NULL AND cl.org_id=$2))"]; const params = [orgId, workspaceIdForOrg(orgId)];
   if (callId) { where.push("cl.id = ?"); params.push(callId); }
-  const base = `FROM call_logs cl LEFT JOIN leads l ON l.org_id = cl.org_id AND l.id = cl.lead_id WHERE ${where.join(" AND ")}`;
+  const base = `FROM call_logs cl LEFT JOIN leads l ON l.org_id = cl.org_id AND COALESCE(l.workspace_id,l.org_id) = COALESCE(cl.workspace_id,cl.org_id) AND l.id = cl.lead_id WHERE ${where.join(" AND ")}`;
   const countResult = page && limit ? await _pool.query(`SELECT COUNT(*) AS total ${base}`, params) : null;
   let sql = `SELECT cl.*, l.name AS contact_name, l.phone AS contact_phone ${base} ORDER BY cl.created_at DESC`;
   if (page && limit) { params.push((page - 1) * limit, limit); sql += " LIMIT ?, ?"; }
@@ -332,9 +336,9 @@ async function getEnquiriesWithContacts(orgId, options = {}) {
   const page = Number.isInteger(options.page) ? options.page : null;
   const limit = Number.isInteger(options.limit) ? options.limit : null;
   const callId = options.callId || null;
-  const where = ["e.org_id = ?"]; const params = [orgId];
+  const where = ["e.org_id = ?", "(e.workspace_id=$2 OR (e.workspace_id IS NULL AND e.org_id=$2))"]; const params = [orgId, workspaceIdForOrg(orgId)];
   if (callId) { where.push("e.call_id = ?"); params.push(callId); }
-  const base = `FROM enquiries e LEFT JOIN call_logs cl ON cl.org_id = e.org_id AND cl.id = e.call_id LEFT JOIN leads l ON l.org_id = e.org_id AND l.id = COALESCE(e.lead_id, cl.lead_id) WHERE ${where.join(" AND ")}`;
+  const base = `FROM enquiries e LEFT JOIN call_logs cl ON cl.org_id = e.org_id AND COALESCE(cl.workspace_id,cl.org_id) = COALESCE(e.workspace_id,e.org_id) AND cl.id = e.call_id LEFT JOIN leads l ON l.org_id = e.org_id AND COALESCE(l.workspace_id,l.org_id) = COALESCE(e.workspace_id,e.org_id) AND l.id = COALESCE(e.lead_id, cl.lead_id) WHERE ${where.join(" AND ")}`;
   const countResult = page && limit ? await _pool.query(`SELECT COUNT(*) AS total ${base}`, params) : null;
   let sql = `SELECT e.*, COALESCE(e.lead_id, cl.lead_id) AS contact_id, l.name AS contact_name, l.phone AS contact_phone ${base} ORDER BY e.created_at DESC`;
   if (page && limit) { params.push((page - 1) * limit, limit); sql += " LIMIT ?, ?"; }
@@ -416,7 +420,7 @@ async function getDialerTasksWithContacts(orgId) {
 }
 
 async function getLoansWithContacts(orgId) {
-  const { rows } = await _pool.query(`SELECT lo.*, l.name AS contact_name, l.phone AS contact_phone FROM loans lo LEFT JOIN leads l ON l.org_id = lo.org_id AND l.id = lo.lead_id WHERE lo.org_id = ? ORDER BY lo.created_at DESC`, [orgId]);
+  const { rows } = await _pool.query(`SELECT lo.*, l.name AS contact_name, l.phone AS contact_phone FROM loans lo LEFT JOIN leads l ON l.org_id = lo.org_id AND COALESCE(l.workspace_id,l.org_id) = COALESCE(lo.workspace_id,lo.org_id) AND l.id = lo.lead_id WHERE lo.org_id = ? AND (lo.workspace_id=$2 OR (lo.workspace_id IS NULL AND lo.org_id=$2)) ORDER BY lo.created_at DESC`, [orgId, workspaceIdForOrg(orgId)]);
   return (rows || []).map((row) => {
     const api = fromDbRow("loans", row);
     api.contactId = row.lead_id || null; api.contactName = row.contact_name || null; api.contactPhone = row.contact_phone || null;
@@ -462,6 +466,48 @@ async function list(entity, orgId, options = {}) {
   return paginate ? { rows, total: count ?? rows.length } : rows;
 }
 
+// Batch relationship checks avoid accepting an ID from another workspace.
+// IDs stay globally unique, and operational ownership cannot be reassigned.
+async function assertWorkspaceReferences(entity, orgId, inputs, { allowMissing = false } = {}) {
+  const relations = {
+    loans: [{ key: "leadId", tables: ["leads"] }],
+    campaigns: [{ key: "workflowId", tables: ["workflows"] }],
+    dialertasks: [{ key: "workflowId", tables: ["workflows"] }],
+    numbers: [{ key: "agentId", tables: ["org_agents"] }],
+    agents: [{ key: "knowledgeBaseDocumentIds", tables: ["knowledge_documents"], array: true }],
+  }[entity] || [];
+  for (const relation of relations) {
+    const ids = [...new Set(inputs.flatMap(input => relation.array ? (input[relation.key] || []) : [input[relation.key]]).filter(Boolean))];
+    if (!ids.length) continue;
+    const found = new Set();
+    for (const table of relation.tables) {
+      const { data, error } = await supabase.from(table).select("id").eq("org_id", orgId).in("id", ids);
+      if (error) throw new Error(`[db.references] ${error.message}`);
+      for (const row of data || []) found.add(row.id);
+    }
+    const missing = ids.filter(id => !found.has(id));
+    if (missing.length && allowMissing) {
+      // Bulk sync may retain historical links whose target was deleted.
+      // Preserve those snapshots, while rejecting IDs owned elsewhere.
+      for (const table of relation.tables) {
+        const { data, error } = await supabase.from(table).select("id").systemReadOnly("Check ownership of historical relationship IDs").in("id", missing);
+        if (error) throw new Error(`[db.references] ${error.message}`);
+        if ((data || []).length) {
+          const conflict = new Error(`${relation.key} refers to another workspace`);
+          conflict.statusCode = 400;
+          throw conflict;
+        }
+      }
+      continue;
+    }
+    if (missing.length) {
+      const error = new Error(`${relation.key} must refer to a record in this workspace`);
+      error.statusCode = 400;
+      throw error;
+    }
+  }
+}
+
 async function create(entity, orgId, apiObj) {
   assertEntity(entity);
   const { table } = ENTITIES[entity];
@@ -478,6 +524,7 @@ async function create(entity, orgId, apiObj) {
     const call = await getCallLogById(orgId, input.callId);
     if (call?.leadId) input.leadId = call.leadId;
   }
+  await assertWorkspaceReferences(entity, orgId, [input]);
   const row = { ...toDbRow(entity, input), org_id: orgId };
   if (!input.id) delete row.id; // let MySQL generate the uuid
   const { data, error } = await supabase.from(table).insert(row).select().single();
@@ -492,6 +539,7 @@ async function patch(entity, orgId, id, apiPatch) {
   if (entity === "leads" && input.phone) {
     input.phone = require("../lib/phone").normalizePhone(input.phone);
   }
+  await assertWorkspaceReferences(entity, orgId, [input]);
   const row = toDbRow(entity, input);
   const { data, error } = await supabase
     .from(table)
@@ -526,9 +574,9 @@ async function getDialerTaskDeletionImpact(orgId, taskId) {
   const { rows } = await _pool.query(
     `SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
        FROM dialer_tasks
-      WHERE org_id = ? AND id = ?
+      WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id = ?
       LIMIT 1`,
-    [orgId, taskId]
+    [orgId, workspaceIdForOrg(orgId), taskId]
   );
   const task = rows?.[0];
   if (!task) return null;
@@ -543,14 +591,14 @@ async function getDialerTaskDeletionImpact(orgId, taskId) {
   if (callIds.length) {
     const placeholders = callIds.map(() => "?").join(",");
     const result = await _pool.query(
-      `SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (${placeholders}))`,
-      [orgId, taskId, ...callIds]
+      `SELECT id FROM call_logs WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND (campaign_id = ? OR id IN (${placeholders}))`,
+      [orgId, workspaceIdForOrg(orgId), taskId, ...callIds]
     );
     callIds = [...new Set((result.rows || []).map((row) => row.id).concat(callIds))];
   } else {
     const result = await _pool.query(
-      `SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?`,
-      [orgId, taskId]
+      `SELECT id FROM call_logs WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND campaign_id = ?`,
+      [orgId, workspaceIdForOrg(orgId), taskId]
     );
     callIds = [...new Set((result.rows || []).map((row) => row.id))];
   }
@@ -560,8 +608,8 @@ async function getDialerTaskDeletionImpact(orgId, taskId) {
     const placeholders = leadIds.map(() => "?").join(",");
     const leadResult = await _pool.query(
       `SELECT COUNT(*) AS count, SUM(CASE WHEN pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact' THEN 1 ELSE 0 END) AS pipeline_count
-         FROM leads WHERE org_id = ? AND id IN (${placeholders})`,
-      [orgId, ...leadIds]
+         FROM leads WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id IN (${placeholders})`,
+      [orgId, workspaceIdForOrg(orgId), ...leadIds]
     );
     counts.leads = Number(leadResult.rows?.[0]?.count || 0);
     counts.pipeline = Number(leadResult.rows?.[0]?.pipeline_count || 0);
@@ -570,17 +618,17 @@ async function getDialerTaskDeletionImpact(orgId, taskId) {
   if (callIds.length) {
     const placeholders = callIds.map(() => "?").join(",");
     const enquiryResult = await _pool.query(
-      `SELECT COUNT(*) AS count FROM enquiries WHERE org_id = ? AND call_id IN (${placeholders})`,
-      [orgId, ...callIds]
+      `SELECT COUNT(*) AS count FROM enquiries WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND call_id IN (${placeholders})`,
+      [orgId, workspaceIdForOrg(orgId), ...callIds]
     );
     counts.enquiries = Number(enquiryResult.rows?.[0]?.count || 0);
 
     const callbackResult = await _pool.query(
       `SELECT COUNT(*) AS count
          FROM call_logs
-        WHERE org_id = ? AND id IN (${placeholders})
+        WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id IN (${placeholders})
           AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')`,
-      [orgId, ...callIds]
+      [orgId, workspaceIdForOrg(orgId), ...callIds]
     );
     counts.scheduledCallbacks = Number(callbackResult.rows?.[0]?.count || 0);
   }
@@ -611,10 +659,10 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     const taskResult = await client.query(
       `SELECT id, name, lead_ids, call_results, auto_dial_enabled, current_provider_call_sid
          FROM dialer_tasks
-        WHERE org_id = ? AND id = ?
+        WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id = ?
         LIMIT 1
         FOR UPDATE`,
-      [orgId, taskId]
+      [orgId, workspaceIdForOrg(orgId), taskId]
     );
     const task = taskResult.rows?.[0];
     if (!task) {
@@ -638,14 +686,14 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (callIds.length) {
       const placeholders = callIds.map(() => "?").join(",");
       const result = await client.query(
-        `SELECT id FROM call_logs WHERE org_id = ? AND (campaign_id = ? OR id IN (${placeholders}))`,
-        [orgId, taskId, ...callIds]
+        `SELECT id FROM call_logs WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND (campaign_id = ? OR id IN (${placeholders}))`,
+        [orgId, workspaceIdForOrg(orgId), taskId, ...callIds]
       );
       callIds = [...new Set((result.rows || []).map((row) => row.id).concat(callIds))];
     } else {
       const result = await client.query(
-        `SELECT id FROM call_logs WHERE org_id = ? AND campaign_id = ?`,
-        [orgId, taskId]
+        `SELECT id FROM call_logs WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND campaign_id = ?`,
+        [orgId, workspaceIdForOrg(orgId), taskId]
       );
       callIds = [...new Set((result.rows || []).map((row) => row.id))];
     }
@@ -655,8 +703,8 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (callIds.length && deleteEnquiries) {
       const placeholders = callIds.map(() => "?").join(",");
       const result = await client.query(
-        `DELETE FROM enquiries WHERE org_id = ? AND call_id IN (${placeholders})`,
-        [orgId, ...callIds]
+        `DELETE FROM enquiries WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND call_id IN (${placeholders})`,
+        [orgId, workspaceIdForOrg(orgId), ...callIds]
       );
       counts.enquiries = Number(result.affectedRows || 0);
     }
@@ -673,9 +721,9 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
                 retry_claimed_at = NULL,
                 status = CASE WHEN status = 'Callback Scheduled' THEN 'Completed' ELSE status END,
                 conversation_outcome = CASE WHEN conversation_outcome IN ('callback_scheduled', 'scheduled_callback') THEN 'completed' ELSE conversation_outcome END
-          WHERE org_id = ? AND id IN (${placeholders})
+          WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id IN (${placeholders})
             AND (callback_time IS NOT NULL OR callback_status = 'pending' OR status = 'Callback Scheduled' OR retry_status = 'pending')`,
-        [orgId, ...callIds]
+        [orgId, workspaceIdForOrg(orgId), ...callIds]
       );
       counts.scheduledCallbacks = Number(result.affectedRows || 0);
 
@@ -686,13 +734,13 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
               SET callback_time = (
                 SELECT MAX(cl.callback_time)
                   FROM call_logs cl
-                 WHERE cl.org_id = l.org_id
+                 WHERE cl.org_id = l.org_id AND COALESCE(cl.workspace_id,cl.org_id) = COALESCE(l.workspace_id,l.org_id)
                    AND cl.lead_id = l.id
                    AND cl.callback_time IS NOT NULL
                    AND (cl.status = 'Callback Scheduled' OR cl.retry_status = 'pending')
               )
-            WHERE l.org_id = ? AND l.id IN (${leadPlaceholders})`,
-          [orgId, ...leadIds]
+            WHERE l.org_id = ? AND (l.workspace_id=$2 OR (l.workspace_id IS NULL AND l.org_id=$2)) AND l.id IN (${leadPlaceholders})`,
+          [orgId, workspaceIdForOrg(orgId), ...leadIds]
         );
       }
     }
@@ -701,9 +749,9 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
       const placeholders = leadIds.map(() => "?").join(",");
       const result = await client.query(
         `UPDATE leads SET pipeline_stage = 'contact'
-          WHERE org_id = ? AND id IN (${placeholders})
+          WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id IN (${placeholders})
             AND pipeline_stage IS NOT NULL AND pipeline_stage <> 'contact'`,
-        [orgId, ...leadIds]
+        [orgId, workspaceIdForOrg(orgId), ...leadIds]
       );
       counts.pipeline = Number(result.affectedRows || 0);
     }
@@ -711,24 +759,24 @@ async function deleteDialerTaskData(orgId, taskId, options = {}, actor = {}) {
     if (leadIds.length && deleteLeads) {
       const placeholders = leadIds.map(() => "?").join(",");
       const result = await client.query(
-        `DELETE FROM leads WHERE org_id = ? AND id IN (${placeholders})`,
-        [orgId, ...leadIds]
+        `DELETE FROM leads WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id IN (${placeholders})`,
+        [orgId, workspaceIdForOrg(orgId), ...leadIds]
       );
       counts.leads = Number(result.affectedRows || 0);
       counts.pipeline = counts.leads;
     }
 
     const taskDelete = await client.query(
-      "DELETE FROM dialer_tasks WHERE org_id = ? AND id = ?",
-      [orgId, taskId]
+      "DELETE FROM dialer_tasks WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id = ?",
+      [orgId, workspaceIdForOrg(orgId), taskId]
     );
     if (Number(taskDelete.affectedRows || 0) !== 1) throw new Error("Dialer task could not be deleted");
 
     try {
       await client.query(
-        `INSERT INTO audit_log (id, org_id, actor_user_id, actor_email, action, target_type, target_id, metadata, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [require("crypto").randomUUID(), orgId, actor.userId || null, actor.userEmail || null, "delete", "dialer_task", taskId,
+        `INSERT INTO audit_log (id, org_id, workspace_id, actor_user_id, actor_email, action, target_type, target_id, metadata, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [require("crypto").randomUUID(), orgId, workspaceIdForOrg(orgId), actor.userId || null, actor.userEmail || null, "delete", "dialer_task", taskId,
           JSON.stringify({ taskName: task.name, deleteLeads, deleteEnquiries, deleteScheduledCallbacks, removeFromPipeline }), new Date().toISOString()]
       );
     } catch (auditError) {
@@ -756,10 +804,10 @@ async function _txReplaceRows(table, orgId, rows, deserialize, tag) {
   const client = await _pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(`DELETE FROM ${table} WHERE org_id = $1`, [orgId]);
+    await client.query(`DELETE FROM ${table} WHERE org_id = $1 AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2))`, [orgId, workspaceIdForOrg(orgId)]);
     const result = [];
     for (const apiRow of rows) {
-      const row = { ...apiRow };
+      const row = { ...apiRow, workspace_id: workspaceIdForOrg(orgId) };
       if (!row.id) row.id = require("crypto").randomUUID();
       if (!row.created_at) row.created_at = new Date().toISOString();
       // Determine column list — use the known table def if available, else all keys
@@ -775,14 +823,14 @@ async function _txReplaceRows(table, orgId, rows, deserialize, tag) {
       const values = cols.map((c) => {
         const v = row[c];
         if (v === null || v === undefined) return null;
-        if (tableDef && (tableDef.columns[c] === "json")) return JSON.stringify(v);
+        if (tableDef && (["json","array"].includes(tableDef.columns[c]))) return JSON.stringify(v);
         return v;
       });
       await client.query(
         `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})`,
         values
       );
-      const { rows: saved } = await client.query(`SELECT * FROM ${table} WHERE id = $1`, [row.id]);
+      const { rows: saved } = await client.query(`SELECT * FROM ${table} WHERE id = $1 AND org_id=$2 AND (workspace_id=$3 OR (workspace_id IS NULL AND org_id=$3))`, [row.id,orgId,workspaceIdForOrg(orgId)]);
       result.push(deserialize(saved[0]));
     }
     await client.query("COMMIT");
@@ -799,6 +847,7 @@ async function _txReplaceRows(table, orgId, rows, deserialize, tag) {
 // frontend's full local copy back to the backend.
 async function replaceAll(entity, orgId, apiArray) {
   assertEntity(entity);
+  await assertWorkspaceReferences(entity, orgId, Array.isArray(apiArray) ? apiArray : [], { allowMissing: true });
   // "team" (org_members) carries a server-only field — user_id, the link
   // to a real application auth account — that the frontend's TeamMember type
   // doesn't know about and can never round-trip. A plain delete+reinsert
@@ -978,8 +1027,8 @@ async function replaceDialerTasks(orgId, apiArray) {
     try {
       await _pool.query(
         `UPDATE leads SET pipeline_stage = 'campaign'
-         WHERE org_id = $1 AND id IN (${allLeadIds.map(() => "?").join(",")}) AND (pipeline_stage IS NULL OR pipeline_stage = 'contact')`,
-        [orgId, ...allLeadIds]
+         WHERE org_id = $1 AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id IN (${allLeadIds.map(() => "?").join(",")}) AND (pipeline_stage IS NULL OR pipeline_stage = 'contact')`,
+        [orgId, workspaceIdForOrg(orgId), ...allLeadIds]
       );
     } catch (err) {
       log.error(`❌ [db.replaceDialerTasks] failed to advance pipeline_stage for org ${orgId}:`, err.message);
@@ -1048,23 +1097,23 @@ async function replaceNumbers(orgId, apiArray) {
     // ones being updated (those are UPSERTed below without ever being
     // deleted, so the outbound_number_id FK pointing at them never cascades).
     if (keepIds.length) {
-      await client.query(`DELETE FROM ${table} WHERE org_id = $1 AND id NOT IN (${keepIds.map(() => "?").join(",")})`, [orgId, ...keepIds]);
+      await client.query(`DELETE FROM ${table} WHERE org_id = $1 AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND id NOT IN (${keepIds.map(() => "?").join(",")})`, [orgId, workspaceIdForOrg(orgId), ...keepIds]);
     } else {
-      await client.query(`DELETE FROM ${table} WHERE org_id = $1`, [orgId]);
+      await client.query(`DELETE FROM ${table} WHERE org_id = $1 AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2))`, [orgId, workspaceIdForOrg(orgId)]);
     }
 
     if (removedNumbers.length) {
       await client.query(
         `DELETE FROM channels
-         WHERE org_id = ? AND type = "vobiz"
+         WHERE org_id = ? AND (workspace_id=$2 OR (workspace_id IS NULL AND org_id=$2)) AND type = "vobiz"
            AND external_id IN (${removedNumbers.map(() => "?").join(",")})`,
-        [orgId, ...removedNumbers]
+        [orgId, workspaceIdForOrg(orgId), ...removedNumbers]
       );
     }
 
     const result = [];
     for (const apiRow of rows) {
-      const row = { ...apiRow };
+      const row = { ...apiRow, workspace_id: workspaceIdForOrg(orgId) };
       if (!row.id) row.id = require("crypto").randomUUID();
       if (!row.created_at) row.created_at = new Date().toISOString();
       const cols = tableDef ? Object.keys(row).filter((c) => c in tableDef.columns) : Object.keys(row);
@@ -1077,16 +1126,17 @@ async function replaceNumbers(orgId, apiArray) {
       const values = cols.map((c) => {
         const v = row[c];
         if (v === null || v === undefined) return null;
-        if (tableDef && tableDef.columns[c] === "json") return JSON.stringify(v);
+        if (tableDef && ["json","array"].includes(tableDef.columns[c])) return JSON.stringify(v);
         return v;
       });
-      const updateSet = cols.filter((c) => c !== "id").map((c) => `${c} = VALUES(${c})`).join(", ");
+      const updateSet = cols.filter((c) => !["id","org_id","workspace_id"].includes(c)).map((c) => `${c} = IF(org_id=VALUES(org_id) AND COALESCE(workspace_id,org_id)=VALUES(workspace_id), VALUES(${c}), ${c})`).join(", ");
       await client.query(
         `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})
          ON DUPLICATE KEY UPDATE ${updateSet}`,
         values
       );
-      const { rows: saved } = await client.query(`SELECT * FROM ${table} WHERE id = $1`, [row.id]);
+      const { rows: saved } = await client.query(`SELECT * FROM ${table} WHERE id = $1 AND org_id=$2 AND (workspace_id=$3 OR (workspace_id IS NULL AND org_id=$3))`, [row.id,orgId,workspaceIdForOrg(orgId)]);
+      if (!saved[0]) throw new Error("Number identifier belongs to another workspace");
       result.push(fromDbRow("numbers", saved[0]));
     }
     await client.query("COMMIT");
@@ -1137,10 +1187,11 @@ async function replaceLeads(orgId, apiArray) {
   if (candidateIds.length) {
     const { data: owners, error: ownersErr } = await supabase
       .from(table)
-      .select("id, org_id")
+      .select("id, org_id, workspace_id")
+      .systemReadOnly("Check contact ID ownership before inserting")
       .in("id", candidateIds);
     if (ownersErr) throw new Error(`[db.replaceLeads] read id owners: ${ownersErr.message}`);
-    idOwner = new Map((owners || []).map((r) => [r.id, r.org_id]));
+    idOwner = new Map((owners || []).map((r) => [r.id, `${r.org_id}:${r.workspace_id || r.org_id}`]));
   }
 
   const tableDef = supabase.TABLES && supabase.TABLES[table];
@@ -1149,10 +1200,10 @@ async function replaceLeads(orgId, apiArray) {
     await client.query("BEGIN");
     const result = [];
     for (const apiRow of apiArray) {
-      const row = { ...toDbRow("leads", apiRow), org_id: orgId };
+      const row = { ...toDbRow("leads", apiRow), org_id: orgId, workspace_id: workspaceIdForOrg(orgId) };
       const matched = (row.id && existingById.get(row.id)) || (row.phone && existingByPhone.get(row.phone));
       if (matched) row.id = matched.id;
-      else if (row.id && idOwner.has(row.id) && idOwner.get(row.id) !== orgId) row.id = require("crypto").randomUUID();
+      else if (row.id && idOwner.has(row.id) && idOwner.get(row.id) !== `${orgId}:${workspaceIdForOrg(orgId)}`) row.id = require("crypto").randomUUID();
       if (!row.id) row.id = require("crypto").randomUUID();
       if (!row.created_at) row.created_at = new Date().toISOString();
 
@@ -1179,16 +1230,17 @@ async function replaceLeads(orgId, apiArray) {
       const values = cols.map((c) => {
         const v = row[c];
         if (v === null || v === undefined) return null;
-        if (tableDef && tableDef.columns[c] === "json") return JSON.stringify(v);
+        if (tableDef && ["json","array"].includes(tableDef.columns[c])) return JSON.stringify(v);
         return v;
       });
-      const updateSet = cols.filter((c) => c !== "id").map((c) => `${c} = VALUES(${c})`).join(", ");
+      const updateSet = cols.filter((c) => !["id","org_id","workspace_id"].includes(c)).map((c) => `${c} = IF(org_id=VALUES(org_id) AND COALESCE(workspace_id,org_id)=VALUES(workspace_id), VALUES(${c}), ${c})`).join(", ");
       await client.query(
         `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})
          ON DUPLICATE KEY UPDATE ${updateSet}`,
         values
       );
-      const { rows: saved } = await client.query(`SELECT * FROM ${table} WHERE id = $1`, [row.id]);
+      const { rows: saved } = await client.query(`SELECT * FROM ${table} WHERE id = $1 AND org_id=$2 AND (workspace_id=$3 OR (workspace_id IS NULL AND org_id=$3))`, [row.id,orgId,workspaceIdForOrg(orgId)]);
+      if (!saved[0]) throw new Error("Contact identifier belongs to another workspace");
       result.push(fromDbRow("leads", saved[0]));
     }
     await client.query("COMMIT");
@@ -1492,17 +1544,17 @@ async function claimAutoDialLead(orgId, taskId, leadId) {
   const client = await _pool.connect();
   try {
     const updateResult = await client.query(`UPDATE dialer_tasks SET current_lead_id = $3, auto_dial_status = 'dialing', current_call_started_at = NOW(), updated_at = NOW()
-      WHERE id = $2 AND org_id = $1 AND auto_dial_enabled = true AND current_lead_id IS NULL
+      WHERE id = $2 AND org_id = $1 AND (workspace_id=$5 OR (workspace_id IS NULL AND org_id=$5)) AND auto_dial_enabled = true AND current_lead_id IS NULL
       AND (next_dial_at IS NULL OR next_dial_at <= $4)
-      AND EXISTS (SELECT 1 FROM leads AS l WHERE l.id = $3 AND l.org_id = $1)
-      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(call_results, CONCAT('$.', JSON_QUOTE($3), '.status'))), 'Pending') = 'Pending'`, [orgId, taskId, leadId, nowIso]);
+      AND EXISTS (SELECT 1 FROM leads AS l WHERE l.id = $3 AND l.org_id = $1 AND (l.workspace_id=$5 OR (l.workspace_id IS NULL AND l.org_id=$5)))
+      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(call_results, CONCAT('$.', JSON_QUOTE($3), '.status'))), 'Pending') = 'Pending'`, [orgId, taskId, leadId, nowIso, workspaceIdForOrg(orgId)]);
     // The UPDATE itself is the compare-and-set claim. If another scheduler
     // instance won the row first, affectedRows is 0 and this worker must not
     // read the row and accidentally treat the other worker's claim as its own.
     if (Number(updateResult.affectedRows || updateResult.rowCount || 0) !== 1) return null;
-    const { rows } = await client.query(`SELECT * FROM dialer_tasks WHERE id = $1 AND org_id = $2 AND current_lead_id = $3`, [taskId, orgId, leadId]);
+    const { rows } = await client.query(`SELECT * FROM dialer_tasks WHERE id = $1 AND org_id = $2 AND current_lead_id = $3 AND (workspace_id=$4 OR (workspace_id IS NULL AND org_id=$4))`, [taskId, orgId, leadId,workspaceIdForOrg(orgId)]);
     if (!rows[0]) return null;
-    return { ...fromDbRow('dialertasks', rows[0]), orgId };
+    return { ...fromDbRow('dialertasks', rows[0]), orgId, workspaceId: rows[0].workspace_id || orgId };
   } finally { client.release(); }
 }
 
@@ -1526,7 +1578,7 @@ async function claimCallForRetry(orgId, rowId) {
     // when the subquery correlates to the target row (Error 1093). Wrap the
     // inner scan in a derived table so the existence check is evaluated safely.
     const updateResult = await client.query(`UPDATE call_logs AS c SET retry_status = 'retrying', retry_claimed_at = $4
-      WHERE c.id = $2 AND c.org_id = $1 AND c.retry_status = 'pending'
+      WHERE c.id = $2 AND c.org_id = $1 AND (c.workspace_id=$5 OR (c.workspace_id IS NULL AND c.org_id=$5)) AND c.retry_status = 'pending'
       AND c.next_retry_at <= $3
       AND c.status IN ('No Answer','Answering Machine','Callback Scheduled')
       AND NOT EXISTS (
@@ -1534,6 +1586,7 @@ async function claimCallForRetry(orgId, rowId) {
           SELECT newer.id
           FROM call_logs AS newer
           WHERE newer.org_id = c.org_id
+            AND COALESCE(newer.workspace_id,newer.org_id)=COALESCE(c.workspace_id,c.org_id)
             AND newer.id <> c.id
             AND newer.created_at > c.created_at
             AND REGEXP_REPLACE(COALESCE(newer.caller_number, newer.lead_name, ''), '[^0-9]', '')
@@ -1555,12 +1608,12 @@ async function claimCallForRetry(orgId, rowId) {
               )
             )
         ) AS newer_call_for_same_number
-      )`, [orgId, rowId, nowIso, nowIso]);
+      )`, [orgId, rowId, nowIso, nowIso,workspaceIdForOrg(orgId)]);
     // Compare-and-set semantics: exactly one worker can transition pending -> retrying.
     if (Number(updateResult.affectedRows || updateResult.rowCount || 0) !== 1) return null;
-    const { rows } = await client.query(`SELECT * FROM call_logs WHERE id = $1 AND org_id = $2 AND retry_status = 'retrying'`, [rowId, orgId]);
+    const { rows } = await client.query(`SELECT * FROM call_logs WHERE id = $1 AND org_id = $2 AND retry_status = 'retrying' AND (workspace_id=$3 OR (workspace_id IS NULL AND org_id=$3))`, [rowId, orgId,workspaceIdForOrg(orgId)]);
     if (!rows[0]) return null;
-    return { ...fromDbRow('calllogs', rows[0]), orgId };
+    return { ...fromDbRow('calllogs', rows[0]), orgId, workspaceId: rows[0].workspace_id || orgId };
   } finally { client.release(); }
 }
 
@@ -1622,11 +1675,11 @@ async function getScheduledCallbacks(orgId) {
   const { rows: joinedRows } = await _pool.query(`
     SELECT cl.*, l.name AS contact_name, l.phone AS contact_phone
       FROM call_logs cl
-      LEFT JOIN leads l ON l.org_id = cl.org_id AND l.id = cl.lead_id
-     WHERE cl.org_id = ?
+      LEFT JOIN leads l ON l.org_id = cl.org_id AND COALESCE(l.workspace_id,l.org_id) = COALESCE(cl.workspace_id,cl.org_id) AND l.id = cl.lead_id
+     WHERE cl.org_id = ? AND (cl.workspace_id=$2 OR (cl.workspace_id IS NULL AND cl.org_id=$2))
        AND cl.status IN ('Callback Scheduled', 'No Answer', 'Answering Machine')
        AND cl.retry_status = 'pending'
-     ORDER BY cl.next_retry_at ASC`, [orgId]);
+     ORDER BY cl.next_retry_at ASC`, [orgId,workspaceIdForOrg(orgId)]);
 
   const allRows = (joinedRows || []).map((row) => {
     const api = fromDbRow("calllogs", row);
@@ -1831,35 +1884,40 @@ async function reconcilePendingScheduleDuplicates(orgId, allRows, winners) {
 // carry a dialed "To" number but no auth context) can be tagged with the
 // right org. Returns null if not configured, or if the number isn't
 // registered under Settings > Numbers for any org yet.
-async function findOrgIdForNumber(number) {
-  if (!number) return null;
-  const digitsOnly = String(number).replace(/[^\d]/g, "");
-  if (!digitsOnly) return null;
-  const last10 = digitsOnly.slice(-10);
-
-  // Inbound routing is a core MySQL data path. Do not depend on the
-  // legacy Supabase client here: a stale/unconfigured Supabase connection
-  // must never prevent a telephony DID from resolving to its organization.
-  const { rows: matches } = await _pool.query(
-    "SELECT org_id, number FROM virtual_numbers WHERE REPLACE(REPLACE(REPLACE(REPLACE(number, '+', ''), ' ', ''), '-', ''), '(', '') LIKE ?",
+async function findWorkspaceForNumber(number) {
+  const digits = String(number || "").replace(/[^\d]/g, "");
+  if (digits.length < 10) return null;
+  const last10 = digits.slice(-10);
+  const { rows: numbers } = await _pool.query(
+    "SELECT org_id,workspace_id,number FROM virtual_numbers WHERE REGEXP_REPLACE(number,'[^0-9]','') LIKE ?",
     [`%${last10}`]
   );
-
-  if (matches.length > 1) {
-    log.error(`❌ [db.findOrgIdForNumber] Number "${number}" matches ${matches.length} orgs (${matches.map((m) => m.org_id).join(", ")}) — duplicate virtual_numbers ownership detected.`);
-  }
-  if (matches.length) return matches[0].org_id;
-
-  // Fallback to the Vobiz channel's external_id for numbers that were
-  // connected before the virtual_numbers row was created.
   const { rows: channels } = await _pool.query(
-    "SELECT org_id, external_id FROM channels WHERE type = ?",
-    ["vobiz"]
+    "SELECT org_id,workspace_id,external_id FROM channels WHERE type='vobiz' AND REGEXP_REPLACE(external_id,'[^0-9]','') LIKE ?",
+    [`%${last10}`]
   );
-  const channelMatch = (channels || []).find((row) =>
-    String(row.external_id || "").replace(/[^\d]/g, "").endsWith(last10)
-  );
-  return channelMatch?.org_id || null;
+  const owners = new Map();
+  for (const row of [...numbers,...channels]) {
+    if (!row.org_id) continue;
+    const owner = { orgId: row.org_id, workspaceId: row.workspace_id || row.org_id };
+    owners.set(JSON.stringify([owner.orgId,owner.workspaceId]), owner);
+  }
+  if (owners.size > 1) {
+    const error = new Error("Telephone number has ambiguous workspace ownership; routing refused");
+    error.statusCode = 409;
+    throw error;
+  }
+  return owners.values().next().value || null;
+}
+
+async function findOrgIdForNumber(number) {
+  const scope = await findWorkspaceForNumber(number);
+  // Legacy telephony callers carry only an org ID. They cannot route a child
+  // workspace until the provider lifecycle has been migrated end to end.
+  if (scope && scope.workspaceId !== scope.orgId) {
+    throw new Error("Child-workspace telephony is not enabled");
+  }
+  return scope?.orgId || null;
 }
 
 // Whether `number` is free to assign to `orgId` — false if another org
@@ -1891,8 +1949,9 @@ async function ensureVirtualNumberForPhone(orgId, phoneNumber, { provider = "Vob
 }
 
 async function isNumberAvailable(number, orgId) {
-  const existingOrgId = await findOrgIdForNumber(number);
-  if (existingOrgId && existingOrgId !== orgId) return false;
+  const existingOwner = await findWorkspaceForNumber(number);
+  const requestedOwner = scopeForOrg(orgId);
+  if (existingOwner && (existingOwner.orgId !== requestedOwner.orgId || existingOwner.workspaceId !== requestedOwner.workspaceId)) return false;
 
   // Vobiz channel rows are globally unique by type + external_id. A number
   // can therefore remain reserved even after its virtual_numbers row was
@@ -1904,7 +1963,8 @@ async function isNumberAvailable(number, orgId) {
     if (digitsOnly) {
       const { data: channels, error } = await supabase
         .from("channels")
-        .select("org_id, external_id")
+        .select("org_id, workspace_id, external_id")
+        .systemReadOnly("Check global telephone-number ownership")
         .eq("type", "vobiz");
       if (error) throw new Error("[db.isNumberAvailable] " + error.message);
       const last10 = digitsOnly.slice(-10);
@@ -2305,6 +2365,7 @@ async function listAgents(orgId, options = {}) {
 }
 
 async function createAgent(orgId, fields) {
+  await assertWorkspaceReferences("agents", orgId, [fields]);
   const now = new Date().toISOString();
   const { data, error } = await supabase
     .from("org_agents")
@@ -2359,6 +2420,7 @@ async function getAgent(agentId, orgId) {
 }
 
 async function updateAgent(agentId, orgId, fields) {
+  await assertWorkspaceReferences("agents", orgId, [fields]);
   const patch = { updated_at: new Date().toISOString() };
   if (fields.name          !== undefined) patch.name          = fields.name;
   if (fields.systemPrompt  !== undefined) patch.system_prompt = fields.systemPrompt;
@@ -2389,6 +2451,11 @@ async function updateAgent(agentId, orgId, fields) {
  *  Uses raw pg to avoid Supabase REST type-coercion on outbound_number_id
  *  (the column was originally declared UUID but virtual_numbers.id is TEXT). */
 async function assignAgentOutboundNumber(agentId, numberId, orgId) {
+  if (!(await getAgent(agentId, orgId))) throw new Error("Agent is not available in this workspace");
+  if (numberId) {
+    const { data, error } = await supabase.from("virtual_numbers").select("id").eq("org_id", orgId).eq("id", numberId).maybeSingle();
+    if (error || !data) throw new Error("Outbound number is not available in this workspace");
+  }
   // Was raw `_pool.query(...)` on a second, separate Pool from the
   // adapter's own — bypassing the adapter entirely meant it never awaited
   // `ready` (the schema-bootstrap promise every other write here does via
@@ -2415,14 +2482,15 @@ async function deleteAgent(agentId, orgId) {
 
 /** Assign a phone number to an agent (exclusive). Pass numberId=null to unassign. */
 async function assignAgentToNumber(agentId, numberId, orgId) {
+  if (!(await getAgent(agentId, orgId))) throw new Error("Agent is not available in this workspace");
   // Unassign the number from any other agent first
   if (numberId) {
-    await supabase.from("virtual_numbers").update({ agent_id: null }).eq("id", numberId).eq("org_id", orgId);
-    const { error } = await supabase
+    const { error, data } = await supabase
       .from("virtual_numbers")
       .update({ agent_id: agentId })
       .eq("id", numberId)
-      .eq("org_id", orgId);
+      .eq("org_id", orgId).select("id").maybeSingle();
+    if (!data) throw new Error("Inbound number is not available in this workspace");
     if (error) throw new Error(`[db.assignAgentToNumber] ${error.message}`);
   } else {
     // Unassign all numbers from this agent
@@ -2431,23 +2499,24 @@ async function assignAgentToNumber(agentId, numberId, orgId) {
 }
 
 /** Returns the agent config for a given phone number, or null if none assigned. */
-async function getAgentForNumber(phoneNumber) {
+async function getAgentForNumber(phoneNumber, orgId = null) {
   if (!phoneNumber) return null;
   const digitsOnly = String(phoneNumber).replace(/[^\d]/g, "");
-  if (!digitsOnly) return null;
+  if (digitsOnly.length < 10) return null;
   const last10 = digitsOnly.slice(-10);
 
   const { rows: numbers } = await _pool.query(
-    "SELECT agent_id, org_id, number FROM virtual_numbers WHERE agent_id IS NOT NULL"
+    "SELECT agent_id,org_id,workspace_id,number FROM virtual_numbers WHERE agent_id IS NOT NULL AND REGEXP_REPLACE(number,'[^0-9]','') LIKE ? LIMIT 2",
+    [`%${last10}`]
   );
-  const match = (numbers || []).find((row) =>
-    String(row.number || "").replace(/[^\d]/g, "").endsWith(last10)
-  );
-  if (!match?.agent_id) return null;
+  if (numbers.length !== 1) return null;
+  const match = numbers[0];
+  const expected = orgId ? scopeForOrg(orgId) : getScope();
+  if (expected && (match.org_id !== expected.orgId || (match.workspace_id || match.org_id) !== expected.workspaceId)) return null;
 
   const { rows: agents } = await _pool.query(
-    "SELECT * FROM org_agents WHERE id = ? LIMIT 1",
-    [match.agent_id]
+    "SELECT * FROM org_agents WHERE id = ? AND org_id=? AND (workspace_id=$3 OR (workspace_id IS NULL AND org_id=$3)) LIMIT 1",
+    [match.agent_id,match.org_id,match.workspace_id || match.org_id]
   );
   const row = agents?.[0];
   if (!row) return null;
@@ -2734,6 +2803,7 @@ module.exports = {
   findOrgIdForUser,
   findMembershipForUser,
   findOrgIdForNumber,
+  findWorkspaceForNumber,
   ensureVirtualNumberForPhone,
   findLeadByPhone,
   findCapturedNameForCall,

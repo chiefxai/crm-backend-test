@@ -1,3 +1,4 @@
+const { onScopedEvent } = require("../workspaces/scope");
 // ============================================================
 // services/geminiPipeline.js
 //
@@ -429,7 +430,7 @@ You are a text model, but everything you write here gets read aloud verbatim by 
     }
   }
 
-  browserWs.on("message", async (rawMsg) => {
+  onScopedEvent(browserWs,"message", async (rawMsg) => {
     if (!isActive || !sttSession) return;
     try {
       const msg = JSON.parse(rawMsg.toString());
@@ -463,13 +464,13 @@ You are a text model, but everything you write here gets read aloud verbatim by 
       .catch(err => log.error("❌ [pipeline] Post-call error:", err.message));
   }
 
-  browserWs.on("close", async () => {
+  onScopedEvent(browserWs,"close", async () => {
     log.info(`🌐 [pipeline] Disconnected | Call ID: ${callId}`);
     await finalizeCall();
     if (sttSession) try { await sttSession.close(); } catch {}
   });
 
-  browserWs.on("error", err => {
+  onScopedEvent(browserWs,"error", err => {
     log.error("❌ [pipeline] WS error:", err.message);
     isActive = false;
   });

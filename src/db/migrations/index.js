@@ -43,7 +43,7 @@ const migrations = [{
       INNER JOIN workspaces w ON w.org_id=m.org_id AND w.id=m.org_id
       ON DUPLICATE KEY UPDATE member_id=workspace_members.member_id`, now: true },
   ],
-}];
+}, require("./2026100702-operational-workspace-scope")];
 
 async function ensureJournal(client) {
   await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
