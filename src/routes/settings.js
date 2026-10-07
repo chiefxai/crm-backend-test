@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const router = require("express").Router();
 const { requireAuth, requireRole, ADMIN_ROLES } = require("../middleware/auth");
 const db = require("../db/repository");
+const workspaceRepository = require("../db/repositories/workspaceRepository");
 const auditLog = require("../platform/auditLog");
 const industryPacks = require("../seed/industryPacks");
 const { updateConfigForOrg, buildIndustryPersona } = require("../config/agentConfig");
@@ -103,19 +104,53 @@ router.post("/vobiz-inbound-webhook/sync", requireAuth, requireRole(ADMIN_ROLES)
   }
 });
 
+// Operational preferences belong to the selected workspace. Subscription,
+// wallet, member directory and retention remain organization resources.
+const WORKSPACE_PROFILE_FIELDS = new Set([
+  'name','workspaceName','industry','branchName','taxId','nmlsId','foundedYear',
+  'headquarters','website','contactEmail','supportPhone','complianceOfficer',
+  'regulatoryJurisdictions','businessType','primaryLendingSectors',
+  'defaultInterestRate','riskProfile','companyBio','defaultOutboundNumber',
+]);
+async function selectedWorkspaceProfile(req) {
+  return workspaceRepository.getProfile(req.orgId,req.workspaceId);
+}
+router.get('/workspace',requireAuth,async(req,res) => {
+  try { res.json(await selectedWorkspaceProfile(req)); }
+  catch(err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+});
+router.post('/workspace',requireAuth,requireRole(ADMIN_ROLES),async(req,res) => {
+  try {
+    const patch = Object.fromEntries(Object.entries(req.body || {}).filter(([key,value]) => WORKSPACE_PROFILE_FIELDS.has(key) && value !== undefined));
+    for (const key of ['name','workspaceName','industry']) {
+      if (patch[key] !== undefined && (typeof patch[key] !== 'string' || !patch[key].trim() || patch[key].length > 255)) return res.status(400).json({ error: `Invalid ${key}` });
+    }
+    if (patch.industry && getIndustryDefinition(patch.industry).key !== patch.industry) return res.status(400).json({ error: 'Unknown industry' });
+    const before = await selectedWorkspaceProfile(req);
+    await workspaceRepository.updateSettings(req.orgId,req.workspaceId,patch);
+    let updated = await selectedWorkspaceProfile(req);
+    if (['industry','name','companyBio'].some(key => patch[key] !== undefined && patch[key] !== before[key])) {
+      await updateConfigForOrg(req.orgId,buildIndustryPersona(updated));
+      updated = await selectedWorkspaceProfile(req);
+    }
+    auditLog.record(req.orgId,req,'workspace_settings.update','workspace',req.workspaceId,patch);
+    res.json(updated);
+  } catch(err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+});
+
 // ── Industry configuration ──
-// Read-only, org-scoped semantic configuration. Persistence remains in the
-// organization row; generic domain records remain in the objects engine.
+// Read-only workspace semantic configuration; generic domain records
+// remain in the scoped objects engine.
 router.get("/industry", requireAuth, async (req, res) => {
   try {
-    const org = await db.getOrg(req.orgId);
-    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const org = await selectedWorkspaceProfile(req);
     const config = getIndustryDefinition(org.industry);
     res.json({
       ...config,
       industry: config.key,
       businessType: org.businessType || org.business_type || null,
       organizationId: req.orgId,
+      workspaceId: req.workspaceId,
     });
   } catch (err) {
     log.error("GET /api/settings/industry failed:", err.message);
@@ -373,9 +408,9 @@ router.get("/org", requireAuth, async (req, res) => {
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.get("/org/profile-config", requireAuth, async (req, res) => {
+router.get(["/org/profile-config", "/workspace/profile-config"], requireAuth, async (req, res) => {
   try {
-    const org = await db.getOrg(req.orgId);
+    const org = await selectedWorkspaceProfile(req);
     res.json(industryPacks.getCompanyProfileConfig(org && org.industry));
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
@@ -385,7 +420,7 @@ router.get("/org/profile-config", requireAuth, async (req, res) => {
 // see industryPacks.js's getPipelineStageLabels.
 router.get("/pipeline-stages", requireAuth, async (req, res) => {
   try {
-    const org = await db.getOrg(req.orgId);
+    const org = await selectedWorkspaceProfile(req);
     const config = getIndustryDefinition(org && org.industry);
     res.json(config.pipeline);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
@@ -395,6 +430,11 @@ router.post("/org", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
   try {
     const before = await db.getOrg(req.orgId);
     const updated = await db.updateOrg(req.orgId, req.body);
+    // Compatibility for the previous frontend during a rolling deployment.
+    if (req.workspaceId === req.orgId) {
+      const patch = Object.fromEntries(Object.entries(req.body || {}).filter(([key,value]) => WORKSPACE_PROFILE_FIELDS.has(key) && value !== undefined));
+      await workspaceRepository.updateSettings(req.orgId,req.workspaceId,patch);
+    }
     const personaInputsChanged = ["industry", "name", "companyBio"].some(k => req.body[k] !== undefined && req.body[k] !== before?.[k]);
     if (personaInputsChanged) {
       await updateConfigForOrg(req.orgId, buildIndustryPersona(updated)).catch((err) =>

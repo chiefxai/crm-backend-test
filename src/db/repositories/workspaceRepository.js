@@ -2,9 +2,13 @@
 // until all operational repositories and background jobs enforce its scope.
 const db = require('../client');
 const { pool } = require('../pool');
-function toApi(row) {
+function parseSettings(value) {
+  if (typeof value === "string") { try { value = JSON.parse(value); } catch { value = {}; } }
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function toApi(row, { includeSettings = false } = {}) {
   return row ? { id: row.id, orgId: row.org_id, name: row.name, industry: row.industry,
-    branchName: row.branch_name, status: row.status, isDefault: Boolean(row.is_default) } : null;
+    branchName: row.branch_name, status: row.status, isDefault: Boolean(row.is_default), ...(includeSettings ? { settings: parseSettings(row.settings) } : {}) } : null;
 }
 async function ensureDefault(orgId, client = pool) {
   await client.query(`INSERT INTO workspaces (id,org_id,name,industry,status,is_default,created_at)
@@ -31,4 +35,46 @@ async function ensureDefaultMembership(orgId, memberId, client = pool) {
     WHERE m.org_id=? AND m.id=? ON DUPLICATE KEY UPDATE member_id=workspace_members.member_id`,
     [new Date().toISOString(),orgId,memberId]);
 }
-module.exports = { getDefault, ensureDefault, ensureDefaultMembership };
+async function getActive(orgId, workspaceId) {
+  await db.ready;
+  const { rows } = await pool.query(`SELECT w.* FROM workspaces w
+    INNER JOIN organizations o ON o.id=w.org_id
+    WHERE w.org_id=? AND w.id=? AND w.status='Active'
+    AND (o.status IS NULL OR o.status <> 'Suspended')`, [orgId, workspaceId]);
+  return toApi(rows[0], { includeSettings: true });
+}
+async function listForOrg(orgId) {
+  await db.ready;
+  await ensureDefault(orgId);
+  const { rows } = await pool.query('SELECT * FROM workspaces WHERE org_id=? ORDER BY is_default DESC,id', [orgId]);
+  return rows.map(row => toApi(row));
+}
+async function updateSettings(orgId, workspaceId, patch) {
+  await db.ready;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid workspace settings');
+  // JSON_SET applies only supplied keys atomically; parallel voice/profile
+  // saves cannot overwrite each other's independent settings.
+  const entries = Object.entries(patch);
+  if (!entries.length) return getActive(orgId, workspaceId);
+  if (entries.some(([key]) => !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(key))) throw new Error('Invalid settings key');
+  const parameters = entries.flatMap(([key, value]) => [`$.${key}`, JSON.stringify(value)]);
+  await pool.query(`UPDATE workspaces SET name=COALESCE(?,name),industry=COALESCE(?,industry),branch_name=CASE WHEN ? THEN ? ELSE branch_name END,settings=JSON_SET(COALESCE(settings,JSON_OBJECT()),
+    ${entries.map(() => '?,CAST(? AS JSON)').join(',')}) WHERE org_id=? AND id=? AND status='Active'`,
+    [patch.workspaceName || null,patch.industry || null,Object.hasOwn(patch,'branchName'),patch.branchName ?? null,...parameters,orgId,workspaceId]);
+  return getActive(orgId, workspaceId);
+}
+async function getProfile(orgId, workspaceId) {
+  const [org,workspace] = await Promise.all([
+    require('./organizationRepository').get(orgId),getActive(orgId,workspaceId),
+  ]);
+  if (!org || !workspace) throw new Error('Active workspace not found');
+  const profile = workspace.isDefault ? { ...org } : {
+    id: org.id, name: org.name, subscriptionPlan: org.subscriptionPlan,
+    billingMethod: org.billingMethod, rechargeBalanceInr: org.rechargeBalanceInr,
+    rechargeReservedInr: org.rechargeReservedInr, aiMinutesUsed: org.aiMinutesUsed,
+    phoneCharges: org.phoneCharges, billingPeriodEnd: org.billingPeriodEnd,
+  };
+  return { ...profile,...workspace.settings,id: org.id,organizationId: org.id,
+    workspaceId: workspace.id,workspaceName: workspace.name,industry: workspace.industry };
+}
+module.exports = { getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, updateSettings, getProfile };

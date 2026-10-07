@@ -1,3 +1,4 @@
+const { onScopedEvent } = require("../../workspaces/scope");
 // services/vobizPipelineCascaded.js
 // ============================================================
 // EXPERIMENTAL — latency comparison only, not feature-complete.
@@ -175,7 +176,7 @@ async function handleVobizSessionCascaded(vobizWs, streamContext = null) {
       });
   };
 
-  vobizWs.on("message", async (rawMsg) => {
+  onScopedEvent(vobizWs, "message", async (rawMsg) => {
     if (!isActive) return;
     let msg;
     try { msg = JSON.parse(rawMsg.toString()); } catch (_) { return; }
@@ -218,14 +219,14 @@ async function handleVobizSessionCascaded(vobizWs, streamContext = null) {
     }
   });
 
-  vobizWs.on("close", () => {
+  onScopedEvent(vobizWs, "close", () => {
     isActive = false;
     stopPacing();
     try { recognizeStream?.end(); } catch (_) {}
     log.info(`🌐 [Cascaded] Vobiz WS closed`);
   });
 
-  vobizWs.on("error", (err) => {
+  onScopedEvent(vobizWs, "error", (err) => {
     log.error("❌ [Cascaded] Vobiz WS error:", err.message);
   });
 }

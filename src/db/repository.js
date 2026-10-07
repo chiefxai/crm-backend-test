@@ -2301,7 +2301,7 @@ async function getQuestions(orgId) {
   // No questionnaire saved yet — fall back to this org's real industry
   // defaults instead of always returning the lending/insurance set
   // regardless of what industry the org actually is.
-  const org = await getOrg(orgId).catch(() => null);
+  const org = await require('./repositories/workspaceRepository').getActive(orgId,workspaceIdForOrg(orgId));
   const industryDefaults = org?.industry ? industryPacks.getDefaultQuestions(org.industry) : null;
   return industryDefaults || DEFAULT_QUESTIONS;
 }

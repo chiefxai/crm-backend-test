@@ -33,7 +33,7 @@ router.post("/", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
 
 router.get("/presets", requireAuth, async (req, res) => {
   try {
-    const org = await db.getOrg(req.orgId);
+    const org = await require('../db/repositories/workspaceRepository').getProfile(req.orgId,req.workspaceId);
     res.json({ voices: AGENT_STUDIO_VOICES, presets: Object.keys(PROMPT_PRESETS), industry: org?.industry || null });
   } catch (err) {
     res.status(500).json({ error: safeErrorMessage(err) });
@@ -55,7 +55,7 @@ router.post("/preset", requireAuth, requireRole(ADMIN_ROLES), async (req, res) =
 // Regenerate the AI persona from this org's industry + company profile.
 router.post("/preset/industry", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
   try {
-    const org = await db.getOrg(req.orgId);
+    const org = await require('../db/repositories/workspaceRepository').getProfile(req.orgId,req.workspaceId);
     const persona = buildIndustryPersona(org);
     const updated = await updateConfigForOrg(req.orgId, persona);
     auditLog.record(req.orgId, req, "config.apply_preset", "config", null, { preset: "industry", industry: org?.industry || null });

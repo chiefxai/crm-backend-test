@@ -1,4 +1,5 @@
-const { onScopedEvent } = require("../workspaces/scope");
+const { recordingKey } = require('../storage/workspaceKeys');
+const { onScopedEvent, bindScopedCallbacks } = require("../workspaces/scope");
 // ============================================================
 // services/geminiPipeline.js
 //
@@ -258,7 +259,7 @@ You are a text model, but everything you write here gets read aloud verbatim by 
           turnCoverage: "TURN_INCLUDES_ALL_INPUT",
         },
       },
-      callbacks: {
+      callbacks: bindScopedCallbacks({
         onmessage: async (response) => {
           if (!isActive) return;
 
@@ -291,7 +292,7 @@ You are a text model, but everything you write here gets read aloud verbatim by 
         },
         onerror: (err) => log.error("❌ [pipeline] STT error:", err.message || err),
         onclose: (e) => log.info(`🔌 [pipeline] STT closed. Code: ${e?.code}, Reason: ${e?.reason || "none"}`),
-      },
+      }),
     });
     log.info(`✅ [pipeline] STT session open | Call ID: ${callId}`);
     send(browserWs, { type: "ready" });
@@ -492,7 +493,7 @@ async function processPostCallData(callId, tempPcmPath, durationSeconds, transcr
     log.warn("⚠️  [pipeline] Recording not saved — STORAGE_ACCESS_KEY / STORAGE_SECRET_KEY / STORAGE_BUCKET are not set.");
   } else if (wavBuffer.length > 44) {
     try {
-      recordingUrl = await storage.upload(`recordings/${callId}.wav`, wavBuffer, { contentType: "audio/wav" });
+      recordingUrl = await storage.upload(recordingKey(callId), wavBuffer, { contentType: "audio/wav" });
       log.info(`💾 [pipeline] Recording uploaded: ${recordingUrl}`);
     } catch (uploadErr) {
       log.error("❌ [pipeline] Upload error:", uploadErr.message);

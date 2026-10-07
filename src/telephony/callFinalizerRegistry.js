@@ -19,13 +19,14 @@
 // invoke it directly. finalizeCall() implementations must guard themselves
 // against double-invocation (an `isFinalized` flag) since both the webhook
 // and the WS-close path may call it.
+const { bindScope } = require('../workspaces/scope');
 function createCallFinalizerRegistry() {
   const finalizers = new Map();
 
   return {
     // Register the finalizeCall() closure for a call once its stream starts.
     register(callId, finalizeFn) {
-      finalizers.set(callId, finalizeFn);
+      finalizers.set(callId, bindScope(finalizeFn));
     },
     // Drop the registration once the call has been finalized (called from
     // inside finalizeCall() itself, alongside its other per-call cleanup).

@@ -1,3 +1,4 @@
+const { onScopedEvent, bindScopedCallbacks } = require("../../workspaces/scope");
 // services/vobizPipeline.js
 // ============================================================
 // STT → LLM → TTS pipeline for real Vobiz phone calls, as an
@@ -29,7 +30,7 @@ const vobizProxy = require("./vobizProxy");
 const { getLogger } = require("../../observability/logger");
 const log = getLogger("telephony.vobizPipeline");
 const {
-  vobizCallNumbers, vobizCallQuestions, vobizCallOrgs, vobizCallDirection, vobizPrewarmedClients,
+  phoneCacheKey, vobizCallNumbers, vobizCallQuestions, vobizCallOrgs, vobizCallWorkspaces, vobizCallDirection, vobizPrewarmedClients,
   handleSearchPolicyKnowledgeBase, handleSaveQuestionResponse, handleSendEmailDocument,
   handleSendWhatsappMessage, handleSaveEnquiry, extractContactAndTrigger, hangupVobizCall, processPostCallData,
   resample24To16, appendCallLog,
@@ -194,7 +195,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   let sessionReadyResolve;
   const sessionReadyPromise = new Promise(res => { sessionReadyResolve = res; });
 
-  vobizWs.on("message", async (rawMsg) => {
+  onScopedEvent(vobizWs, "message", async (rawMsg) => {
     if (!isActive) return;
     const rawStr = rawMsg.toString();
     let msg;
@@ -213,18 +214,19 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             return;
           }
           const cachedOrgId = vobizCallOrgs.get(callId);
-          if (cachedOrgId && String(cachedOrgId) !== authorizedOrgId) {
+          if ((cachedOrgId && String(cachedOrgId) !== authorizedOrgId) || (vobizCallWorkspaces.has(callId) && vobizCallWorkspaces.get(callId) !== (streamContext.workspaceId || authorizedOrgId))) {
             log.error(`🚫 [pipeline] Vobiz org authorization mismatch: token=${authorizedOrgId} cache=${cachedOrgId}`);
             isActive = false;
             try { vobizWs.close(1008, "Organization authorization mismatch"); } catch {}
             return;
           }
           vobizCallOrgs.set(callId, authorizedOrgId);
+          vobizCallWorkspaces.set(callId, streamContext.workspaceId || authorizedOrgId);
           log.info(`🚀 [pipeline] Vobiz Stream started: ${streamId} | CallId: ${callId} | Org: ${authorizedOrgId}`);
 
           const resolvedPhone = vobizCallNumbers.get(callId) || "";
           const sanitizedPhone = resolvedPhone.replace(/[\s\-\(\)\+]+/g, "");
-          const customQuestions = sanitizedPhone ? vobizCallQuestions.get(sanitizedPhone) : null;
+          const customQuestions = sanitizedPhone ? vobizCallQuestions.get(phoneCacheKey(sanitizedPhone)) : null;
           getCallerNumber = () => resolvedPhone || "Vobiz Call";
 
           resolvedOrgId = authorizedOrgId;
@@ -294,7 +296,7 @@ If the caller asks anything about this business, its products, services, pricing
           let activeQuestions = questionsList;
           if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
             activeQuestions = customQuestions;
-            vobizCallQuestions.delete(sanitizedPhone);
+            vobizCallQuestions.delete(phoneCacheKey(sanitizedPhone));
           }
 
           // Normalize once — accepts legacy plain strings or the newer
@@ -444,7 +446,7 @@ You are a text model, but everything you write here gets read aloud verbatim by 
           turnCoverage: "TURN_INCLUDES_ALL_INPUT",
         },
       },
-      callbacks: {
+      callbacks: bindScopedCallbacks({
         onmessage: async (response) => {
           if (!isActive) return;
           try {
@@ -486,7 +488,7 @@ You are a text model, but everything you write here gets read aloud verbatim by 
         },
         onerror: (err) => log.error("❌ [pipeline] STT error:", err.message || err),
         onclose: (e) => { log.info(`🔌 [pipeline] STT closed. Code: ${e?.code}, Reason: ${e?.reason || "none"}`); stopPacing(); },
-      },
+      }),
     });
   }
 
@@ -626,6 +628,7 @@ You are a text model, but everything you write here gets read aloud verbatim by 
     vobizCallNumbers.delete(callId);
     const orgId = vobizCallOrgs.get(callId) || null;
     vobizCallOrgs.delete(callId);
+    vobizCallWorkspaces.delete(callId);
     const direction = vobizCallDirection.get(callId) || "unknown";
     vobizCallDirection.delete(callId);
 
@@ -642,13 +645,13 @@ You are a text model, but everything you write here gets read aloud verbatim by 
       .catch(err => log.error("❌ [pipeline] Post-call error for Vobiz:", err.message));
   }
 
-  vobizWs.on("close", async () => {
+  onScopedEvent(vobizWs, "close", async () => {
     log.info(`🌐 [pipeline] Vobiz WS closed | Call ID: ${generatedCallId}`);
     await finalizeCall();
     if (sttSession) try { await sttSession.close(); } catch {}
   });
 
-  vobizWs.on("error", err => {
+  onScopedEvent(vobizWs, "error", err => {
     log.error("❌ [pipeline] Vobiz WS error:", err.message);
     isActive = false;
   });

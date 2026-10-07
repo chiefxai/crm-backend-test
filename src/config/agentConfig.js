@@ -331,7 +331,12 @@ function updateConfig(newConfig) {
 async function getConfigForOrg(orgId) {
   const db = require("../db/repository");
   if (!db.isConfigured()) return currentConfig;
-  const org = await db.getOrg(orgId);
+  const { scopeForOrg } = require('../workspaces/scope');
+  const { workspaceId } = scopeForOrg(orgId);
+  const workspace = await require('../db/repositories/workspaceRepository').getActive(orgId, workspaceId);
+  if (!workspace) throw new Error('Active workspace not found');
+  if (workspace.settings.voiceConfig) return workspace.settings.voiceConfig;
+  const org = workspace.isDefault ? await db.getOrg(orgId) : null;
   return (org && org.voiceConfig) || currentConfig;
 }
 
@@ -340,7 +345,8 @@ async function updateConfigForOrg(orgId, patch) {
   if (!db.isConfigured()) return updateConfig(patch);
   const existing = await getConfigForOrg(orgId);
   const merged = { ...existing, ...patch };
-  await db.updateOrg(orgId, { voiceConfig: merged });
+  const { workspaceId } = require('../workspaces/scope').scopeForOrg(orgId);
+  await require('../db/repositories/workspaceRepository').updateSettings(orgId, workspaceId, { voiceConfig: merged });
   return merged;
 }
 

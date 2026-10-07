@@ -3,6 +3,7 @@
 // Vobiz WebSocket Proxy & Telephony Handler for Gemini Live API
 // ============================================================
 
+const { getScope, runWithScope, scopeForOrg, onScopedEvent, bindScopedCallbacks } = require("../../workspaces/scope");
 const fs = require("fs");
 const path = require("path");
 const ws = require("ws");
@@ -163,22 +164,28 @@ function getVobizStreamSecret() {
   if (!secret && process.env.NODE_ENV === "production") throw new Error("VOBIZ_STREAM_SECRET is required in production");
   return secret || "dev-vobiz-stream-secret";
 }
-function createVobizStreamToken(callId, orgId, ttlSeconds = 600) {
+function createVobizStreamToken(callId, orgId, ttlSeconds = 600, workspaceId = scopeForOrg(orgId).workspaceId) {
   if (!callId || !orgId) throw new Error("callId and orgId are required for a Vobiz stream token");
-  const payload = Buffer.from(JSON.stringify({ callId: String(callId), orgId: String(orgId), exp: Math.floor(Date.now() / 1000) + ttlSeconds, purpose: "vobiz-media" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ callId: String(callId), orgId: String(orgId), workspaceId: String(workspaceId), exp: Math.floor(Date.now() / 1000) + ttlSeconds, purpose: "vobiz-media" })).toString("base64url");
   const sig = require("crypto").createHmac("sha256", getVobizStreamSecret()).update(payload).digest("base64url");
   return `${payload}.${sig}`;
 }
 function verifyVobizStreamToken(token) {
   if (!token || typeof token !== "string") return null;
-  const [payload, sig] = token.split(".");
+  const [payload, sig, extra] = token.split(".");
+  if (extra !== undefined) return null;
   if (!payload || !sig) return null;
   const expected = require("crypto").createHmac("sha256", getVobizStreamSecret()).update(payload).digest("base64url");
   const a = Buffer.from(sig), b = Buffer.from(expected);
   if (a.length !== b.length || !require("crypto").timingSafeEqual(a, b)) return null;
   try {
     const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return data.purpose === "vobiz-media" && data.callId && data.exp > Math.floor(Date.now() / 1000) ? data : null;
+    if (data.purpose !== "vobiz-media" || !data.callId || typeof data.orgId !== "string" || !data.orgId
+      || !Number.isFinite(data.exp) || data.exp <= Math.floor(Date.now() / 1000)) return null;
+    // Old signed tokens are valid only for their original default workspace.
+    data.workspaceId = data.workspaceId || data.orgId;
+    if (typeof data.workspaceId !== "string" || !data.workspaceId || data.workspaceId.length > 191 || data.orgId.length > 191) return null;
+    return data;
   } catch { return null; }
 }
 // vobizCallQuestions/vobizCallTaskConfig below are stored keyed by the
@@ -193,12 +200,18 @@ const vobizCallQuestions = new Map();
 /** Snapshot of campaign questions for post-call finalize (live map entry is deleted on answer). */
 const vobizCallQuestionsForFinalize = new Map();
 const vobizCallTaskConfig = new Map();
+function phoneCacheKey(phone) {
+  const scope = getScope();
+  if (!scope) throw new Error('Workspace context is required for call phone caches');
+  return JSON.stringify([scope.orgId,scope.workspaceId,phone]);
+}
 // callId -> orgId, so the calls-table insert at finalizeCall() can tag which
 // org this recording belongs to. Set either at outbound-trigger time (known
 // from the authenticated dashboard request) or at inbound-webhook time
 // (resolved from the dialed "To" number against virtual_numbers) — see
 // server.js's /api/vobiz/call and /api/vobiz/incoming.
 const vobizCallOrgs = new Map();
+const vobizCallWorkspaces = new Map();
 // callId -> 'inbound' | 'outbound', set alongside vobizCallOrgs at the same
 // two points (server.js's /api/vobiz/call and /api/vobiz/incoming) — lets
 // the real call_logs row saved at finalizeCall() record which direction
@@ -332,7 +345,11 @@ function copySetAcrossIds(set, ids) {
 function aliasVobizCallState(ids) {
   const all = uniqueCallIds(...ids);
   if (!all.length) return all;
+  const owners = new Set(all.filter(id => vobizCallOrgs.has(id)).map(id =>
+    JSON.stringify([vobizCallOrgs.get(id), vobizCallWorkspaces.get(id) || vobizCallOrgs.get(id)])));
+  if (owners.size > 1) throw new Error("Vobiz call aliases belong to different workspaces");
   copyMapAcrossIds(vobizCallOrgs, all);
+  copyMapAcrossIds(vobizCallWorkspaces, all);
   copyMapAcrossIds(vobizCallDirection, all);
   copyMapAcrossIds(vobizCallAttemptNumber, all);
   copyMapAcrossIds(vobizCallRetryContext, all);
@@ -357,7 +374,10 @@ function clearRingLiveSessionAliases(entry) {
 function rememberOutboundCall(ids, { orgId, direction, attemptNumber, retryContext, fromNumber, toNumber }) {
   const all = uniqueCallIds(...ids);
   for (const id of all) {
-    if (orgId) rememberMap(vobizCallOrgs, id, orgId);
+    if (orgId) {
+      rememberMap(vobizCallOrgs, id, orgId);
+      rememberMap(vobizCallWorkspaces, id, scopeForOrg(orgId).workspaceId);
+    }
     if (direction) rememberMap(vobizCallDirection, id, direction);
     if (attemptNumber) rememberMap(vobizCallAttemptNumber, id, attemptNumber);
     if (retryContext) rememberMap(vobizCallRetryContext, id, retryContext);
@@ -607,15 +627,15 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
 
   if (questions && Array.isArray(questions) && questions.length > 0) {
     const sanitizedNumber = phoneNumber.replace(/[\s\-\(\)\+]+/g, "");
-    vobizCallQuestions.set(sanitizedNumber, questions);
+    rememberMap(vobizCallQuestions, phoneCacheKey(sanitizedNumber), questions);
   }
   if (language || (assignedContact && assignedContact.name && assignedContact.phone) || starhealthEnabled) {
     const sanitizedNumber = phoneNumber.replace(/[\s\-\(\)\+]+/g, "");
-    vobizCallTaskConfig.set(sanitizedNumber, { language, assignedContact, starhealthEnabled });
+    rememberMap(vobizCallTaskConfig, phoneCacheKey(sanitizedNumber), { language, assignedContact, starhealthEnabled });
   }
   if (agentId) {
     const sanitizedNumber = phoneNumber.replace(/[\s\-\(\)\+]+/g, "");
-    vobizCallAgentId.set(sanitizedNumber, agentId);
+    rememberMap(vobizCallAgentId, phoneCacheKey(sanitizedNumber), agentId);
   }
 
   let billingReservation = null;
@@ -844,6 +864,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   const startTime = Date.now();
   const authorizedCallId = streamContext?.callId ? String(streamContext.callId) : null;
   const authorizedOrgId = streamContext?.orgId ? String(streamContext.orgId) : null;
+  const authorizedWorkspaceId = streamContext?.workspaceId || authorizedOrgId;
   if (!authorizedCallId || !authorizedOrgId) throw new Error("Vobiz stream authorization context is required");
 
   const generatedCallId = `call_vobiz_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -964,7 +985,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
 
   let isFinalized = false;
 
-  vobizWs.on("message", async (rawMsg) => {
+  onScopedEvent(vobizWs, "message", async (rawMsg) => {
     if (!isActive) return;
     const rawStr = rawMsg.toString();
     
@@ -983,6 +1004,11 @@ async function handleVobizSession(vobizWs, streamContext = null) {
         case "start":
           streamId = msg.start.streamId;
           callId = msg.start.callId;
+          if (typeof callId !== 'string' || !callId || callId.length > 191) {
+            isActive = false;
+            vobizWs.close(1008, 'Missing call identifier');
+            return;
+          }
 
           // Vobiz can expose different identifiers in the Answer webhook
           // (CallUUID) and the media Stream start frame (callId). The signed
@@ -995,13 +1021,14 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           }
 
           const cachedOrgId = vobizCallOrgs.get(callId);
-          if (cachedOrgId && String(cachedOrgId) !== authorizedOrgId) {
+          if ((cachedOrgId && String(cachedOrgId) !== authorizedOrgId) || (vobizCallWorkspaces.has(callId) && vobizCallWorkspaces.get(callId) !== authorizedWorkspaceId)) {
             log.error(`🚫 Vobiz stream org mismatch: token=${authorizedOrgId} cache=${cachedOrgId} call=${callId}`);
             isActive = false;
             try { vobizWs.close(1008, "Organization authorization mismatch"); } catch {}
             return;
           }
           vobizCallOrgs.set(callId, authorizedOrgId);
+          vobizCallWorkspaces.set(callId, authorizedWorkspaceId);
           aliasVobizCallState([callId, authorizedCallId]);
           log.info(`🚀 Vobiz Stream started: ${streamId} | CallId: ${callId} | Org: ${authorizedOrgId}`);
           vobizCallFinalizers.register(callId, finalizeCall);
@@ -1030,12 +1057,12 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           const calleeNumber = vobizCallCallee.get(callId) || "";
           const sanitizedCallee = calleeNumber.replace(/[\s\-\(\)\+]+/g, "");
           const customQuestions = vobizCallQuestions.get(callId)
-            || (sanitizedCallee ? vobizCallQuestions.get(sanitizedCallee) : null);
+            || (sanitizedCallee ? vobizCallQuestions.get(phoneCacheKey(sanitizedCallee)) : null);
           const taskConfig = vobizCallTaskConfig.get(callId)
-            || (sanitizedCallee ? vobizCallTaskConfig.get(sanitizedCallee) : null);
+            || (sanitizedCallee ? vobizCallTaskConfig.get(phoneCacheKey(sanitizedCallee)) : null);
           if (vobizCallQuestions.has(callId)) vobizCallQuestions.delete(callId);
           if (vobizCallTaskConfig.has(callId)) vobizCallTaskConfig.delete(callId);
-          if (sanitizedCallee && vobizCallTaskConfig.has(sanitizedCallee)) vobizCallTaskConfig.delete(sanitizedCallee);
+          if (sanitizedCallee && vobizCallTaskConfig.has(phoneCacheKey(sanitizedCallee))) vobizCallTaskConfig.delete(phoneCacheKey(sanitizedCallee));
 
           // Diagnostic only (temporary) — org/call-log saving for this call
           // depends entirely on this callId matching the CallUUID the
@@ -1080,9 +1107,9 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           log.debug(`⏱️ Vobiz startup pre-warm launched at +${Date.now() - startupT0}ms after start handler entered (client pre-warmed=${hadPrewarmedClient})`);
 
           const explicitAgentId = vobizCallAgentId.get(callId)
-            || (sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null);
+            || (sanitizedCallee ? vobizCallAgentId.get(phoneCacheKey(sanitizedCallee)) : null);
           if (vobizCallAgentId.has(callId)) vobizCallAgentId.delete(callId);
-          if (explicitAgentId && sanitizedCallee) vobizCallAgentId.delete(sanitizedCallee);
+          if (explicitAgentId && sanitizedCallee) vobizCallAgentId.delete(phoneCacheKey(sanitizedCallee));
 
           const outboundDirection = (vobizCallDirection.get(callId) || "unknown") === "outbound";
           if (!outboundDirection && resolvedOrgId) {
@@ -1274,9 +1301,9 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           if (customQuestions && Array.isArray(customQuestions) && customQuestions.length > 0) {
             log.info(`ℹ️ Using dynamic campaign questions for Vobiz call:`, customQuestions);
             vobizCallQuestionsForFinalize.set(callId, customQuestions);
-            if (sanitizedCallee) vobizCallQuestionsForFinalize.set(sanitizedCallee, customQuestions);
+            if (sanitizedCallee) rememberMap(vobizCallQuestionsForFinalize, phoneCacheKey(sanitizedCallee), customQuestions);
             vobizCallQuestions.delete(callId);
-            if (sanitizedCallee) vobizCallQuestions.delete(sanitizedCallee);
+            if (sanitizedCallee) vobizCallQuestions.delete(phoneCacheKey(sanitizedCallee));
           }
 
           let finalPrompt;
@@ -1371,7 +1398,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             ? normalizedQuestions
             : [];
           vobizCallQuestionsForFinalize.set(callId, questionsForPostCall);
-          if (sanitizedCallee) vobizCallQuestionsForFinalize.set(sanitizedCallee, questionsForPostCall);
+          if (sanitizedCallee) rememberMap(vobizCallQuestionsForFinalize, phoneCacheKey(sanitizedCallee), questionsForPostCall);
 
           if (!isActive) return;
 
@@ -1559,6 +1586,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     vobizCallCallee.delete(callId);
     const orgId = vobizCallOrgs.get(callId) || null;
     vobizCallOrgs.delete(callId);
+    vobizCallWorkspaces.delete(callId);
     const isMachineDetected = vobizMachineDetectedCalls.has(callId);
     vobizMachineDetectedCalls.delete(callId);
     const attemptNumber = vobizCallAttemptNumber.get(callId) || 1;
@@ -1574,6 +1602,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
       vobizCallNumbers.delete(aliasId);
       vobizCallCallee.delete(aliasId);
       vobizCallOrgs.delete(aliasId);
+      vobizCallWorkspaces.delete(aliasId);
       vobizCallDirection.delete(aliasId);
       vobizCallAttemptNumber.delete(aliasId);
       vobizCallRetryContext.delete(aliasId);
@@ -1645,12 +1674,12 @@ async function handleVobizSession(vobizWs, streamContext = null) {
       vobizCallQuestionsForFinalize.get(callId)
         || vobizCallQuestions.get(callId)
         || (sanitizedCalleeForFinalize
-          ? vobizCallQuestionsForFinalize.get(sanitizedCalleeForFinalize)
-            || vobizCallQuestions.get(sanitizedCalleeForFinalize)
+          ? vobizCallQuestionsForFinalize.get(phoneCacheKey(sanitizedCalleeForFinalize))
+            || vobizCallQuestions.get(phoneCacheKey(sanitizedCalleeForFinalize))
           : null),
     );
     if (vobizCallQuestionsForFinalize.has(callId)) vobizCallQuestionsForFinalize.delete(callId);
-    if (sanitizedCalleeForFinalize) vobizCallQuestionsForFinalize.delete(sanitizedCalleeForFinalize);
+    if (sanitizedCalleeForFinalize) vobizCallQuestionsForFinalize.delete(phoneCacheKey(sanitizedCalleeForFinalize));
 
     log.info(`🚀 [vobiz] Enqueuing post-call pipeline for ${generatedCallId} | questions=${workflowQuestions.length} | transcriptLines=${transcriptLines.length}`);
     postCallQueue.enqueue("finalizeCall:vobiz", {
@@ -1673,14 +1702,14 @@ async function handleVobizSession(vobizWs, streamContext = null) {
     });
   }
 
-  vobizWs.on("close", async () => {
+  onScopedEvent(vobizWs, "close", async () => {
     log.info(`🌐 Vobiz WS closed | Call ID: ${generatedCallId}`);
     await finalizeCall();
     const geminiSession = await geminiSessionPromise;
     if (geminiSession) try { await geminiSession.close(); } catch {}
   });
 
-  vobizWs.on("error", err => {
+  onScopedEvent(vobizWs, "error", err => {
     log.error(`❌ Vobiz WS error [${generatedCallId}]:`, err.message);
     // The websocket error itself is not a process-fatal condition. Finalize
     // the call once so dialer state, recording and post-call processing are
@@ -1955,7 +1984,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       // it from the handle instead of us resending transcript history.
       sessionResumption: resumeHandle ? { handle: resumeHandle } : {},
     },
-    callbacks: {
+    callbacks: bindScopedCallbacks({
       onmessage: async (response) => {
         // A single message-processing bug (like the capturedEmail
         // ReferenceError that used to live here) must never crash the whole
@@ -2280,12 +2309,12 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         }
         if (e?.code !== 1000 && onDisconnect) onDisconnect(e?.code, e?.reason);
       },
-    },
+    }),
   });
 
   // Attach raw WebSocket packet listener to capture exact Google server frames including usageMetadata
   if (session && session.conn && session.conn.ws) {
-    session.conn.ws.on("message", (rawFrame) => {
+    onScopedEvent(session.conn.ws, "message", (rawFrame) => {
       try {
         const payload = JSON.parse(rawFrame.toString());
         const usage = payload.usageMetadata || payload.serverContent?.usageMetadata || payload.usage_metadata || payload.serverContent?.usage_metadata;
@@ -2616,7 +2645,7 @@ async function processPostCallData({
     recordingUrl,
     transcriptLines,
     extractedCallerName,
-    getWorkflowQuestions: () => workflowQuestions || (sanitizedCallee ? postCallAgents.normalizeQuestions(vobizCallQuestions.get(sanitizedCallee)) : null),
+    getWorkflowQuestions: () => workflowQuestions || (sanitizedCallee ? postCallAgents.normalizeQuestions(vobizCallQuestions.get(phoneCacheKey(sanitizedCallee))) : null),
     isMachineDetected,
     attemptNumber,
     retryContext,
@@ -2906,7 +2935,7 @@ async function extractContactAndTrigger(
 }
 
 module.exports = {
-  handleVobizSession, vobizCallNumbers, vobizCallCallee, vobizCallQuestions, vobizCallTaskConfig, vobizCallOrgs, vobizCallDirection, vobizCallUuidToInternalId, vobizMachineDetectedCalls, vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, triggerVobizOutboundCall, vobizPrewarmedClients, scheduleInboundVobizPrewarm,
+  phoneCacheKey, handleVobizSession, vobizCallNumbers, vobizCallCallee, vobizCallQuestions, vobizCallTaskConfig, vobizCallOrgs, vobizCallWorkspaces, vobizCallDirection, vobizCallUuidToInternalId, vobizMachineDetectedCalls, vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, triggerVobizOutboundCall: (orgId, phone, options) => runWithScope(scopeForOrg(orgId), () => triggerVobizOutboundCall(orgId, phone, options)), vobizPrewarmedClients, scheduleInboundVobizPrewarm,
   aliasVobizCallState, collectVobizCallIds, findCachedCallIdByPhone, syncDialerProviderCallSid,
   // Exported additionally so services/vobizPipeline.js (STT->LLM->TTS engine)
   // can reuse the exact same tool-call handlers, post-call processing, and

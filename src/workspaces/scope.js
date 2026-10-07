@@ -32,4 +32,8 @@ function bindScope(operation, scope = getScope()) {
 function onScopedEvent(emitter, event, listener) {
   return emitter.on(event, bindScope(listener));
 }
-module.exports = { validateScope, getScope, runWithScope, runWithoutScope, scopeForOrg, bindScope, onScopedEvent };
+function bindScopedCallbacks(callbacks) {
+  return Object.fromEntries(Object.entries(callbacks).map(([key,value]) =>
+    [key, typeof value === 'function' ? bindScope(value) : value]));
+}
+module.exports = { bindScopedCallbacks, validateScope, getScope, runWithScope, runWithoutScope, scopeForOrg, bindScope, onScopedEvent };

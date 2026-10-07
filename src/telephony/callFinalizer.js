@@ -1,3 +1,4 @@
+const { recordingKey } = require('../storage/workspaceKeys');
 // src/telephony/callFinalizer.js
 // ============================================================
 // Shared "a call just ended" pipeline — everything that happens AFTER
@@ -251,7 +252,7 @@ async function uploadRecording(provider, callId, wavBuffer) {
   if (!wavBuffer || wavBuffer.length <= 44) return null; // header-only/empty — nothing to upload
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const url = await storage.upload(`recordings/${callId}.wav`, wavBuffer, { contentType: "audio/wav" });
+      const url = await storage.upload(recordingKey(callId), wavBuffer, { contentType: "audio/wav" });
       log.info(`💾 [${provider}] recording uploaded: ${url}`);
       return url;
     } catch (err) {

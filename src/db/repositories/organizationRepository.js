@@ -107,6 +107,12 @@ async function update(orgId, patch) {
   const { row, settings } = split({ ...existing, ...patch });
   const { data, error } = await supabase.from("organizations").update({ ...row, settings }).eq("id", orgId).select().single();
   if (error) throw new Error(`[organizationRepository.update] ${error.message}`);
+  if (patch.status !== undefined) {
+    // The initial workspace originally mirrored org suspension. Keep that
+    // mirror reversible when the platform reactivates a legacy organization.
+    await pool.query("UPDATE workspaces SET status=? WHERE org_id=? AND id=? AND is_default=1",
+      [patch.status === 'Suspended' ? 'Suspended' : 'Active',orgId,orgId]);
+  }
   return toApi(data);
 }
 

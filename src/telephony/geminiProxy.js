@@ -1,4 +1,5 @@
-const { onScopedEvent } = require("../workspaces/scope");
+const { recordingKey } = require('../storage/workspaceKeys');
+const { onScopedEvent, bindScopedCallbacks } = require("../workspaces/scope");
 // ============================================================
 // services/geminiProxy.js
 //
@@ -402,7 +403,7 @@ async function openGeminiSession(browserWs, voiceName, systemPrompt, recordStrea
       },
     },
 
-    callbacks: {
+    callbacks: bindScopedCallbacks({
       onmessage: async (response) => {
         if (!browserWs || browserWs.readyState !== 1) return;
 
@@ -509,7 +510,7 @@ async function openGeminiSession(browserWs, voiceName, systemPrompt, recordStrea
         log.info(`🔌 Gemini closed. Code: ${e?.code}, Reason: ${e?.reason || "none"}`);
         send(browserWs, { type: "ended" });
       },
-    },
+    }),
   });
 
   // Attach raw WebSocket packet listener to capture exact Google server frames including usageMetadata
@@ -598,7 +599,7 @@ async function processPostCallData(callId, tempPcmPath, durationSeconds, transcr
 
   if (storage.isConfigured() && wavBuffer.length > 44) {
     try {
-      recordingUrl = await storage.upload(`recordings/${callId}.wav`, wavBuffer, { contentType: "audio/wav" });
+      recordingUrl = await storage.upload(recordingKey(callId), wavBuffer, { contentType: "audio/wav" });
       log.info(`💾 Recording uploaded: ${recordingUrl}`);
     } catch (uploadErr) {
       log.error("❌ Upload error:", uploadErr.message);

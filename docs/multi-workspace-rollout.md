@@ -1,6 +1,6 @@
 # Multi-workspace rollout
 
-## Current release: operational data isolation groundwork
+## Current release: operational scope, Vobiz lifecycle and workspace settings
 
 Organizations continue to own billing, subscriptions and their member directory.
 The new `workspaces` table represents a child operational boundary. Initial
@@ -16,9 +16,9 @@ access is checked before permissions and operational data load.
 
 **Additional workspaces and sharing are disabled.** The middleware rejects any
 workspace ID other than the organization's initial workspace. The API/query builder now applies organization and workspace scope, and the
-operational tables have additive workspace columns. The Vobiz lifecycle,
-workspace settings, role enforcement and final schema contraction remain
-unfinished. This release does not enable multiple workspaces per organization.
+operational tables have additive workspace columns. Role enforcement,
+provisioning, remaining provider/callback audits and final schema contraction
+remain unfinished. This release does not enable multiple workspaces per organization.
 
 ## Implemented in the isolation release
 
@@ -57,12 +57,43 @@ paths still need review before enabling independent workspaces.
 Validation for this release: JavaScript syntax checks, diff checks and frontend
 production build. No MySQL migration or end-to-end VM execution was performed.
 
+## Implemented in the lifecycle/settings release
+
+- Migration `2026100703_workspace_settings` adds workspace settings JSON.
+  Voice configuration is read/written in the active workspace. Only the initial
+  workspace can fall back to historical organization voice settings.
+- `/api/settings/workspace` separates operational profile preferences from
+  organization subscriptions, wallet and retention. The frontend uses this
+  endpoint and falls back to the old route only for an initial workspace when
+  the VM has not been upgraded yet. Industry/pipeline/persona reads use workspace
+  metadata. Only profile fields are accepted by the workspace update endpoint.
+- Vobiz signed media tokens include workspace ownership. Upgrade checks confirm
+  the workspace and organization remain active before opening a media session.
+  Socket and Gemini SDK callbacks and registered finalizers restore their scope.
+- Webhooks resolve ownership before running hangup/fallback writes and prewarm.
+  Provider-ID aliases cannot combine different workspace owners. Contact phone
+  numbers are no longer treated as authoritative call aliases. Per-phone prompt
+  and agent caches are partitioned by workspace; hangup requires matching scope.
+- New child recording keys include organization/workspace IDs. Historical
+  default recording keys are preserved. Signed-URL/storage policy audit remains.
+- Organization retention applies its policy to each workspace sequentially,
+  including suspended workspaces, and returns per-workspace plus aggregate counts.
+  Fixed missing `.lt()` support in the database adapter.
+- Organization backups include every workspace and assignment table, explicit
+  workspace metadata and recording ownership. Fixed pool result handling, fail
+  on table export errors and clean up temporary ZIP archives.
+
+Syntax/diff checks and the frontend production build are used for this release.
+MySQL migrations, live telephony and VM runtime execution are not verified here.
+Additional workspace creation and sharing remain disabled.
+
 ## Migration rules
 
 - `schema_migrations` records ordered IDs, checksums and completion timestamps.
 - The previous schema bootstrap runs once as `2026100700_legacy_baseline`.
 - `2026100701_workspace_foundation` adds tables, constraints and default rows.
 - `2026100702_operational_workspace_scope` expands operational table scope.
+- `2026100703_workspace_settings` adds operational workspace preferences.
 - The same connection holds the existing MySQL advisory lock throughout.
 - MySQL DDL is not transactional. Migration steps must be retry-safe, and a
   migration is recorded only after every step succeeds.
@@ -120,9 +151,9 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
 1. Finish the data-access audit, remove implicit system scans, migrate
    questionnaire/channel uniqueness to workspace keys and contract nullable scope
    columns only after legacy writers have been retired.
-2. Complete Vobiz webhook/media/finalizer context, workspace-owned voice settings,
-   storage path and signed-URL rules, retention/backups and callback-service paths.
-   Queue, retry, browser voice, vector and SSE groundwork is implemented.
+2. Finish signed-URL/storage policies, remaining provider/callback-service paths,
+   durable call ownership and backup pagination/snapshot consistency. Vobiz
+   context, workspace voice settings and per-workspace retention are implemented.
 3. Confirm the migration and cross-workspace behavior against MySQL and the full
    application stack before allowing independent workspace data.
 4. Introduce organization and workspace permissions; enforce assignments and

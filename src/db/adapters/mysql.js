@@ -1013,6 +1013,7 @@ class QueryBuilder {
   in(col, arr)    { this.filters.push(["in", assertColumn(this.table, col), arr]); return this; }
   gt(col, val)    { this.filters.push(["gt", assertColumn(this.table, col), val]); return this; }
   gte(col, val)   { this.filters.push(["gte", assertColumn(this.table, col), val]); return this; }
+  lt(col, val)    { this.filters.push(["lt", assertColumn(this.table, col), val]); return this; }
   lte(col, val)   { this.filters.push(["lte", assertColumn(this.table, col), val]); return this; }
   ilike(col, val) { this.filters.push(["ilike", assertColumn(this.table, col), val]); return this; }
   match(obj = {}) { for (const [col, val] of Object.entries(obj)) this.eq(col, val); return this; }
@@ -1093,6 +1094,7 @@ class QueryBuilder {
       else if (kind === "is") clauses.push(val === null || String(val).toLowerCase() === "null" ? `${col} IS NULL` : `${col} IS NOT NULL`);
       else if (kind === "gt") { clauses.push(`${col} > ?`); params.push(val); }
       else if (kind === "gte") { clauses.push(`${col} >= ?`); params.push(val); }
+      else if (kind === "lt") { clauses.push(`${col} < ?`); params.push(val); }
       else if (kind === "lte") { clauses.push(`${col} <= ?`); params.push(val); }
       else if (kind === "ilike") { clauses.push(`${col} LIKE ?`); params.push(val); }
       else if (kind === "in") { if (!val || !val.length) clauses.push("0"); else { clauses.push(`${col} IN (${val.map(() => "?").join(",")})`); params.push(...val); } }
