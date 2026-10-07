@@ -1802,17 +1802,13 @@ async function getPendingRetriesForScheduler(limit = 5000) {
 // that was just stopped mid-call still needs that one last call's outcome
 // recorded even though auto_dial_enabled is now false.
 async function getActiveAutoDialTasks() {
-  // The query-builder shim (src/db/adapters/mysql.js) only ANDs filters
-  // together — no .or() — so an "enabled OR has an in-flight call" query
-  // can't be expressed in one call. Dialer task row counts are small
-  // (one row per campaign-dial task, not per lead), so filtering the full
-  // table in JS is simpler and cheap.
+  // Run the OR predicate in MySQL so scheduler memory and result transfer
+  // scale with active calls/tasks instead of every historical dialer task.
   const { data, error } = await supabase.from("dialer_tasks").select("*")
-    .systemReadOnly("Scan auto-dial tasks across organizations");
+    .systemReadOnly("Scan active auto-dial tasks across organizations")
+    .or("auto_dial_enabled.eq.1,current_provider_call_sid.neq.");
   if (error) throw new Error(`[db.getActiveAutoDialTasks] ${error.message}`);
-  return (data || [])
-    .filter((row) => row.auto_dial_enabled || row.current_provider_call_sid)
-    .map((row) => ({ ...fromDbRow("dialertasks", row), orgId: row.org_id }));
+  return (data || []).map((row) => ({ ...fromDbRow("dialertasks", row), orgId: row.org_id }));
 }
 
 // Single-lead lookup by id, org-scoped — autoDialEngine.js needs this to
