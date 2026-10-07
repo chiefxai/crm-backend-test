@@ -70,6 +70,9 @@ production build. No MySQL migration or end-to-end VM execution was performed.
 - Vobiz signed media tokens include workspace ownership. Upgrade checks confirm
   the workspace and organization remain active before opening a media session.
   Socket and Gemini SDK callbacks and registered finalizers restore their scope.
+- Vobiz can recover an active outbound campaign call's workspace after an API
+  restart from the exact provider Call ID stored on its workspace-scoped task;
+  ambiguous owner matches are rejected before callback processing.
 - Webhooks resolve ownership before running hangup/fallback writes and prewarm.
   Provider-ID aliases cannot combine different workspace owners. Contact phone
   numbers are no longer treated as authoritative call aliases. Per-phone prompt

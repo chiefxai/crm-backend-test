@@ -51,6 +51,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
       orgId: vobizCallOrgs.get(CallUUID),
       workspaceId: vobizCallWorkspaces.get(CallUUID) || vobizCallOrgs.get(CallUUID),
     } : null;
+    if (!owner) owner = await db.findWorkspaceForVobizCallIds(aliases);
     if (!owner) {
       const inboundOwner = To ? await db.findWorkspaceForNumber(To) : null;
       const outboundOwner = From ? await db.findWorkspaceForNumber(From) : null;
@@ -243,7 +244,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
     });
   } catch (err) {
     log.error("Vobiz incoming workspace routing failed:", err.message);
-    if (!res.headersSent) return res.status(503).send("Unable to route call safely");
+    if (!res.headersSent) return res.status(err.statusCode || 503).send("Unable to route call safely");
   }
 });
 

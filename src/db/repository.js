@@ -1915,6 +1915,35 @@ async function findWorkspaceForNumber(number) {
   return owners.values().next().value || null;
 }
 
+// Recover an in-flight Vobiz callback's owner after an API process restart.
+// Auto-dial task leases store both provider and CallSid in workspace-scoped
+// rows. The system read is limited to the exact provider IDs and is only used
+// by the authenticated provider webhook before it establishes request scope.
+async function findWorkspaceForVobizCallIds(providerCallIds) {
+  const ids = [...new Set((Array.isArray(providerCallIds) ? providerCallIds : [providerCallIds])
+    .filter(value => typeof value === "string" && value.trim())
+    .map(value => value.trim()))];
+  if (!ids.length) return null;
+  const { data, error } = await supabase.from("dialer_tasks")
+    .select("org_id,workspace_id,current_provider_call_sid,current_provider")
+    .systemReadOnly("Recover Vobiz webhook owner from active campaign lease")
+    .eq("current_provider", "vobiz")
+    .in("current_provider_call_sid", ids);
+  if (error) throw new Error(`[db.findWorkspaceForVobizCallIds] ${error.message}`);
+  const owners = new Map();
+  for (const row of data || []) {
+    if (!row.org_id) continue;
+    const owner = { orgId: row.org_id, workspaceId: row.workspace_id || row.org_id };
+    owners.set(JSON.stringify([owner.orgId, owner.workspaceId]), owner);
+  }
+  if (owners.size > 1) {
+    const error = new Error("Vobiz call ID matches active tasks in multiple workspaces");
+    error.statusCode = 409;
+    throw error;
+  }
+  return owners.values().next().value || null;
+}
+
 async function findOrgIdForNumber(number) {
   const scope = await findWorkspaceForNumber(number);
   // Legacy telephony callers carry only an org ID. They cannot route a child
@@ -2809,6 +2838,7 @@ module.exports = {
   findMembershipForUser,
   findOrgIdForNumber,
   findWorkspaceForNumber,
+  findWorkspaceForVobizCallIds,
   ensureVirtualNumberForPhone,
   findLeadByPhone,
   findCapturedNameForCall,
