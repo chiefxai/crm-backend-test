@@ -1633,7 +1633,11 @@ async function getCallsDueForRetry() {
     .eq("retry_status", "pending")
     .lte("next_retry_at", nowIso);
   if (error) throw new Error(`[db.getCallsDueForRetry] ${error.message}`);
-  return (data || []).map((row) => ({ ...fromDbRow("calllogs", row), orgId: row.org_id }));
+  return (data || []).map((row) => ({
+    ...fromDbRow("calllogs", row),
+    orgId: row.org_id,
+    workspaceId: row.workspace_id || row.org_id,
+  }));
 }
 
 const PENDING_SCHEDULE_STATUSES = ["Callback Scheduled", "No Answer", "Answering Machine"];
@@ -1814,7 +1818,11 @@ async function getActiveAutoDialTasks() {
     .systemReadOnly("Scan active auto-dial tasks across organizations")
     .or("auto_dial_enabled.eq.1,current_provider_call_sid.neq.");
   if (error) throw new Error(`[db.getActiveAutoDialTasks] ${error.message}`);
-  return (data || []).map((row) => ({ ...fromDbRow("dialertasks", row), orgId: row.org_id }));
+  return (data || []).map((row) => ({
+    ...fromDbRow("dialertasks", row),
+    orgId: row.org_id,
+    workspaceId: row.workspace_id || row.org_id,
+  }));
 }
 
 // Single-lead lookup by id, org-scoped — autoDialEngine.js needs this to

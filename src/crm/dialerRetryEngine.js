@@ -129,7 +129,8 @@ async function processDueRetries() {
       // actual placement to the queue and move on to the next due row
       // instead of waiting on this one's HTTP round-trip to the provider.
       getRedialQueue().enqueue("placeRedial", {
-        orgId: row.orgId, rowId: row.id, dialTarget, leadName: row.leadName,
+        orgId: row.orgId, workspaceId: row.workspaceId || row.orgId,
+        rowId: row.id, dialTarget, leadName: row.leadName,
         baseUrl, attemptNumber: nextAttempt,
         questions: retryContext.questions, from: retryContext.from, language: retryContext.language,
         assignedContact: retryContext.assignedContact,
@@ -163,6 +164,11 @@ async function processDueRetries() {
 // tracks toward MAX_RETRY_ATTEMPTS; a queue-level rethrow-and-retry would
 // just duplicate that with a different budget/backoff).
 async function handlePlaceRedialJob(data) {
+  const workspaceId = data.workspaceId || data.orgId;
+  return runWithScope({ orgId: data.orgId, workspaceId }, () => handlePlaceRedialJobScoped(data));
+}
+
+async function handlePlaceRedialJobScoped(data) {
   const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, campaignId, provider = telephony.getDefaultProvider() } = data;
   try {
     await telephony.triggerOutboundCall(provider, orgId, dialTarget, {

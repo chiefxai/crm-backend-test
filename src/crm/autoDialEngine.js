@@ -378,7 +378,8 @@ async function processTask(task) {
     // up this poll tick from moving on to other tasks. queue.enqueue()
     // returns as soon as the job is accepted, not once it's placed.
     getDialQueue().enqueue("placeDial", {
-      orgId, taskId, leadId: pendingLeadId, leadName: lead.name || null, leadPhone: lead.phone,
+      orgId, workspaceId: task.workspaceId || orgId,
+      taskId, leadId: pendingLeadId, leadName: lead.name || null, leadPhone: lead.phone,
       taskName: task.name, provider, baseUrl, questions: task.questions, language: task.language,
       from, agentId, starhealthEnabled: !!task.starhealthEnabled,
       retryPolicy: task.retryConfig || task.retryPolicy || task.callResults?.__retryConfig || null,
@@ -403,6 +404,11 @@ async function processTask(task) {
 // leave the task's currentLeadId claimed until the queue exhausts its own
 // retries, stalling the whole task for no benefit.
 async function handlePlaceDialJob(data) {
+  const workspaceId = data.workspaceId || data.orgId;
+  return runWithScope({ orgId: data.orgId, workspaceId }, () => handlePlaceDialJobScoped(data));
+}
+
+async function handlePlaceDialJobScoped(data) {
   const { orgId, taskId, leadId, leadName, leadPhone, taskName, provider, baseUrl, questions, language, from, agentId, starhealthEnabled, retryPolicy, campaignId, autoDialRunId } = data;
   try {
     // The job sat in the queue briefly between being enqueued and actually
