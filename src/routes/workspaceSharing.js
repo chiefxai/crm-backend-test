@@ -52,10 +52,10 @@ router.delete('/grants/:id',requirePermission('workspace.settings.manage'),requi
 
 router.get('/records/:grantId',requirePermission('workspace.read'),async(req,res)=>{
   try {
-    const grant=await workspaceSharing.getActiveForTarget(req.orgId,req.workspaceId,req.params.grantId);
-    if (!grant) return res.status(404).json({error:'Active incoming share was not found'});
     const pageSize=Math.max(1,Math.min(Number.parseInt(req.query.limit,10)||50,100));
-    const page=await workspaceSharing.listSharedRecords(grant,req.query.cursor,pageSize);
+    const result=await workspaceSharing.readActiveSharedRecords(req.orgId,req.workspaceId,req.params.grantId,req.query.cursor,pageSize);
+    if (!result) return res.status(404).json({error:'Active incoming share was not found'});
+    const {grant,...page}=result;
     res.json({grant:{id:grant.id,objectKey:grant.object_key,objectLabel:grant.object_label,sourceWorkspaceId:grant.source_workspace_id},...page});
   } catch(error) { res.status(error.statusCode||500).json({error:error.statusCode?error.message:'Could not load shared records'}); }
 });

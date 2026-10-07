@@ -52,17 +52,6 @@ async function revoke(orgId, sourceWorkspaceId, grantId) {
   return true;
 }
 
-async function getActiveForTarget(orgId, targetWorkspaceId, grantId) {
-  await db.ready;
-  const now=new Date().toISOString();
-  const { rows } = await pool.query(`SELECT g.*,o.key AS object_key,o.label AS object_label
-    FROM workspace_share_grants g INNER JOIN objects o
-      ON o.org_id=g.org_id AND o.id=g.object_id AND o.workspace_id=g.source_workspace_id
-    WHERE g.id=? AND g.org_id=? AND g.target_workspace_id=? AND g.revoked_at IS NULL
-      AND (g.expires_at IS NULL OR g.expires_at>?)`,[grantId,orgId,targetWorkspaceId,now]);
-  return rows[0] || null;
-}
-
 function decodeCursor(cursor) {
   if (!cursor) return null;
   try {
@@ -72,26 +61,45 @@ function decodeCursor(cursor) {
   } catch { throw Object.assign(new Error('Invalid page cursor'),{statusCode:400}); }
 }
 
-async function listSharedRecords(grant, cursor, pageSize=50) {
+async function readActiveSharedRecords(orgId,targetWorkspaceId,grantId,cursor,pageSize=50) {
   await db.ready;
-  const after=decodeCursor(cursor);
-  const params=[grant.org_id,grant.source_workspace_id,grant.object_id];
-  let cursorClause='';
-  if (after) { cursorClause=' AND (created_at<? OR (created_at=? AND id<?))'; params.push(after.createdAt,after.createdAt,after.id); }
-  params.push(Math.max(1,Math.min(Number(pageSize)||50,100))+1);
-  const { rows }=await pool.query(`SELECT id,stage_id,data,created_at FROM object_records
-    WHERE org_id=? AND workspace_id=? AND object_id=?${cursorClause}
-    ORDER BY created_at DESC,id DESC LIMIT ?`,params);
-  const more=rows.length>Math.max(1,Math.min(Number(pageSize)||50,100));
-  const selected=more?rows.slice(0,-1):rows;
-  const fields=parseJson(grant.allowed_fields,[]);
-  const records=selected.map(row=>{
-    const source=parseJson(row.data,{}), data={};
-    for (const key of fields) if (Object.hasOwn(source,key)) data[key]=source[key];
-    return { data };
-  });
-  const last=selected[selected.length-1];
-  return { records,nextCursor:more&&last?Buffer.from(JSON.stringify({createdAt:last.created_at,id:last.id})).toString('base64url'):null };
+  const client=await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const now=new Date().toISOString();
+    const { rows:grants }=await client.query(`SELECT g.*,o.key AS object_key,o.label AS object_label
+      FROM workspace_share_grants g
+      INNER JOIN workspaces sw ON sw.org_id=g.org_id AND sw.id=g.source_workspace_id AND sw.status='Active'
+      INNER JOIN workspaces tw ON tw.org_id=g.org_id AND tw.id=g.target_workspace_id AND tw.status='Active'
+      INNER JOIN objects o ON o.org_id=g.org_id AND o.id=g.object_id AND o.workspace_id=g.source_workspace_id
+      WHERE g.id=? AND g.org_id=? AND g.target_workspace_id=? AND g.revoked_at IS NULL
+        AND (g.expires_at IS NULL OR g.expires_at>?) FOR SHARE`,[grantId,orgId,targetWorkspaceId,now]);
+    const grant=grants[0];
+    if (!grant) { await client.query('COMMIT'); return null; }
+    const after=decodeCursor(cursor);
+    const params=[grant.org_id,grant.source_workspace_id,grant.object_id];
+    let cursorClause='';
+    if (after) { cursorClause=' AND (created_at<? OR (created_at=? AND id<?))'; params.push(after.createdAt,after.createdAt,after.id); }
+    const limit=Math.max(1,Math.min(Number(pageSize)||50,100));
+    params.push(limit+1);
+    const { rows }=await client.query(`SELECT id,data,created_at FROM object_records
+      WHERE org_id=? AND workspace_id=? AND object_id=?${cursorClause}
+      ORDER BY created_at DESC,id DESC LIMIT ?`,params);
+    const more=rows.length>limit;
+    const selected=more?rows.slice(0,-1):rows;
+    const fields=parseJson(grant.allowed_fields,[]);
+    const records=selected.map(row=>{
+      const source=parseJson(row.data,{}), data={};
+      for (const key of fields) if (Object.hasOwn(source,key)) data[key]=source[key];
+      return { data };
+    });
+    const last=selected[selected.length-1];
+    await client.query('COMMIT');
+    return { grant,records,nextCursor:more&&last?Buffer.from(JSON.stringify({createdAt:last.created_at,id:last.id})).toString('base64url'):null };
+  } catch(error) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw error;
+  } finally { client.release(); }
 }
 
-module.exports={list,create,revoke,getActiveForTarget,listSharedRecords};
+module.exports={list,create,revoke,readActiveSharedRecords};
