@@ -42,9 +42,9 @@ function getPublicBaseUrl() {
   return null;
 }
 
-async function processDueRetries() {
+async function processDueRetries(callLogId = null) {
   try {
-    const recovered = await db.recoverStaleRetryClaims();
+    const recovered = await db.recoverStaleRetryClaims(callLogId);
     if (recovered) {
       log.warn(`♻️ [dialerRetryEngine] Recovered ${recovered} stale retry claim(s) after scheduler restart.`);
     }
@@ -59,7 +59,12 @@ async function processDueRetries() {
 
   let due = [];
   try {
-    due = await db.getCallsDueForRetry();
+    if (callLogId) {
+      const row = await db.getCallDueForRetryById(callLogId);
+      due = row ? [row] : [];
+    } else {
+      due = await db.getCallsDueForRetry();
+    }
   } catch (err) {
     log.error("❌ [dialerRetryEngine] Failed to fetch calls due for retry:", err.message);
     return;

@@ -1564,16 +1564,19 @@ async function claimAutoDialLead(orgId, taskId, leadId) {
   } finally { client.release(); }
 }
 
-async function recoverStaleRetryClaims() {
+async function recoverStaleRetryClaims(callLogId = null) {
   const cutoff = new Date(Date.now() - Number(process.env.DIALER_RETRY_CLAIM_LEASE_MS || 10 * 60 * 1000)).toISOString();
-  const { data, error } = await supabase
-    .from("call_logs")
-    .update({ retry_status: "pending", retry_claimed_at: null })
-    .eq("retry_status", "retrying")
-    .lte("retry_claimed_at", cutoff)
-    .select("id, org_id");
-  if (error) throw new Error(`[db.recoverStaleRetryClaims] ${error.message}`);
-  return (data || []).length;
+  // Trusted scheduler maintenance across workspaces. Keep this narrowly
+  // constrained SQL here; operational adapter writes must always carry a
+  // workspace scope. Durable per-row wake-ups recover only that row; the
+  // timer/reconciler passes null to sweep all expired leases.
+  const idFilter = callLogId ? " AND id = ?" : "";
+  const params = callLogId ? [cutoff, callLogId] : [cutoff];
+  const result = await _pool.query(
+    `UPDATE call_logs SET retry_status = 'pending', retry_claimed_at = NULL WHERE retry_status = 'retrying' AND retry_claimed_at <= ?${idFilter}`,
+    params
+  );
+  return Number(result.affectedRows || result.rowCount || 0);
 }
 
 async function claimCallForRetry(orgId, rowId) {
@@ -1638,6 +1641,28 @@ async function getCallsDueForRetry() {
     orgId: row.org_id,
     workspaceId: row.workspace_id || row.org_id,
   }));
+}
+
+// A durable queue wake-up targets one callback row. Resolve it with a
+// read-only system lookup, then let the caller establish the row's scope
+// before claiming or mutating it. A stale wake-up is an ordinary no-op.
+async function getCallDueForRetryById(callLogId) {
+  if (!callLogId) return null;
+  const nowIso = new Date().toISOString();
+  const { data, error } = await supabase.from("call_logs").select("*")
+    .systemReadOnly("Resolve one durable callback scheduler wake-up")
+    .eq("id", callLogId)
+    .in("status", ["No Answer", "Answering Machine", "Callback Scheduled"])
+    .eq("retry_status", "pending")
+    .lte("next_retry_at", nowIso)
+    .maybeSingle();
+  if (error) throw new Error(`[db.getCallDueForRetryById] ${error.message}`);
+  if (!data) return null;
+  return {
+    ...fromDbRow("calllogs", data),
+    orgId: data.org_id,
+    workspaceId: data.workspace_id || data.org_id,
+  };
 }
 
 const PENDING_SCHEDULE_STATUSES = ["Callback Scheduled", "No Answer", "Answering Machine"];
@@ -2822,6 +2847,7 @@ module.exports = {
   incrementAiMinutesUsed,
   incrementPhoneCharges,
   getCallsDueForRetry,
+  getCallDueForRetryById,
   claimAutoDialLead,
   claimCallForRetry,
   recoverStaleRetryClaims,

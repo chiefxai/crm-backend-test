@@ -111,7 +111,7 @@ function createBullMqCallbackScheduler() {
           // The DB remains the source of truth. A delayed BullMQ job only
           // wakes the durable retry engine; claimCallForRetry() decides
           // whether this exact callback is still eligible.
-          await processDueRetries();
+          await processDueRetries(job.data?.callLogId || null);
           return { callLogId: job.data?.callLogId || null };
         }
 

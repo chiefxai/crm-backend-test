@@ -1066,6 +1066,9 @@ class QueryBuilder {
     if (!orgId && this.op === "select") {
       throw new Error("Cross-organization operational reads require systemReadOnly(reason)");
     }
+    if (!orgId && this.op !== "select") {
+      throw new Error("Workspace-table writes require an organization and workspace scope");
+    }
     const scope = this.scope || (orgId ? { orgId, workspaceId: orgId } : null);
     if (!scope) return null; // Explicit cross-org system scan; never inferred from a client ID.
     if (orgId && orgId !== scope.orgId) throw new Error("Organization does not match query workspace");
