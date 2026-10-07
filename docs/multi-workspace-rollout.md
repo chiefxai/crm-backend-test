@@ -86,6 +86,10 @@ production build. No MySQL migration or end-to-end VM execution was performed.
   before signing or returning them. The legacy default workspace can resolve
   only root-level `recordings/<file>` keys; child workspaces require their
   organization/workspace path. External provider URLs remain provider-managed.
+- Retention deletes only recording objects owned by its active workspace, and
+  organization backups validate each recording against its owning workspace.
+  Backup recording filenames include workspace IDs to avoid collisions when
+  call IDs are reused across workspaces.
 - Organization retention applies its policy to each workspace sequentially,
   including suspended workspaces, and returns per-workspace plus aggregate counts.
   Fixed missing `.lt()` support in the database adapter.

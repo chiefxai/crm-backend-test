@@ -129,8 +129,7 @@ async function signedUrl(key, expiresIn = SIGNED_URL_TTL_SECONDS) {
 // Recording object keys encode their owning workspace. Never turn a key read
 // from a database row into a signed URL unless it belongs to the active
 // workspace. Legacy/default-workspace recordings remain at recordings/<file>.
-function recordingKeyBelongsToActiveWorkspace(key) {
-  const scope = getScope();
+function recordingKeyBelongsToScope(key, scope) {
   if (!scope || typeof key !== "string") return false;
   let segments;
   try { segments = key.split("/").map(segment => decodeURIComponent(segment)); }
@@ -141,6 +140,11 @@ function recordingKeyBelongsToActiveWorkspace(key) {
   }
   return segments.length === 4 && segments[0] === "recordings" &&
     segments[1] === scope.orgId && segments[2] === scope.workspaceId;
+}
+
+function recordingObjectKey(value, scope = getScope()) {
+  const key = objectKeyFromStoredValue(value);
+  return key && recordingKeyBelongsToScope(key, scope) ? key : null;
 }
 
 // Turns whatever's stored in a recording-url-style column into something
@@ -206,7 +210,7 @@ async function resolvePlaybackUrl(value, expiresIn = SIGNED_URL_TTL_SECONDS) {
   // External provider URLs that are not one of our S3-compatible objects
   // remain untouched. Known storage URLs are always refreshed in production.
   if (!key) return /^https?:\/\//i.test(raw) ? raw : null;
-  if (!recordingKeyBelongsToActiveWorkspace(key)) return null;
+  if (!recordingKeyBelongsToScope(key, getScope())) return null;
 
   try {
     if (/^https?:\/\//i.test(raw) && !useSignedUrls()) return raw;
@@ -232,4 +236,4 @@ function isConfigured() {
   );
 }
 
-module.exports = { upload, signedUrl, resolvePlaybackUrl, remove, publicUrl, isConfigured };
+module.exports = { upload, signedUrl, resolvePlaybackUrl, recordingObjectKey, remove, publicUrl, isConfigured };

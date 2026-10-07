@@ -157,15 +157,7 @@ function cutoffForDays(days) {
 }
 
 function storageKeyFromValue(value) {
-  if (!value) return null;
-  if (!/^https?:\/\//i.test(String(value))) return String(value);
-  try {
-    const url = new URL(value);
-    const bucket = process.env.STORAGE_BUCKET;
-    let pathname = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-    if (bucket && pathname.startsWith(bucket + "/")) pathname = pathname.slice(bucket.length + 1);
-    return pathname || null;
-  } catch { return null; }
+  return storage.recordingObjectKey(value);
 }
 
 async function deleteRecording(value) {
@@ -370,9 +362,10 @@ async function exportOrgBackup(orgId, orgName, backupConfig) {
       WHERE org_id=? AND recording_url IS NOT NULL`, [orgId]);
     const recordingManifest = [];
     for (const row of recordings || []) {
-      const key = storageKeyFromValue(row.recording_url);
+      const key = storage.recordingObjectKey(row.recording_url, { orgId, workspaceId: row.workspace_id || orgId });
       if (!key) continue;
-      const safeName = String(row.id).replace(/[^a-zA-Z0-9_-]/g, "_") + path.extname(key || ".audio");
+      const workspaceName = String(row.workspace_id || orgId).replace(/[^a-zA-Z0-9_-]/g, "_");
+      const safeName = `${workspaceName}-${String(row.id).replace(/[^a-zA-Z0-9_-]/g, "_")}` + path.extname(key || ".audio");
       try {
         const target = path.join(recordingsDir, safeName);
         await downloadObjectToFile(key, target);
