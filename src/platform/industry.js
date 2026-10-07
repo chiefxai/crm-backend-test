@@ -75,6 +75,21 @@ function buildDomainModel(packObjects, industryKey) {
   };
 }
 
+const BUSINESS_TYPES = {
+  lending: { personal_lending: { label: "Personal Lending" } },
+  automotive: { vehicle_dealership: { label: "Vehicle Dealership" }, used_vehicle_dealership: { label: "Used Vehicle Dealership" }, service_center: { label: "Service Center" } },
+  real_estate: { real_estate_agency: { label: "Real Estate Agency" } },
+  healthcare: { clinic: { label: "Clinic" } },
+  insurance: { insurance_agency: { label: "Insurance Agency" } },
+};
+const TAGLINES = {
+  lending: "AI-powered lending conversations and loan lifecycle automation.",
+  automotive: "AI-powered vehicle enquiries, test drives, quotations, and sales.",
+  real_estate: "AI-powered property enquiries, visits, and deal management.",
+  healthcare: "AI-powered patient communication and appointment workflows.",
+  insurance: "AI-powered insurance enquiries, follow-ups, and policy workflows.",
+};
+
 const LABELS = {
   lending: { workspace: ["Workspace", "Workspace"], lead: ["Lead", "Leads"], contact: ["Contact", "Contacts"], campaign: ["Campaign", "Campaigns"], pipeline: ["Pipeline", "Pipeline"], appointment: ["Appointment", "Appointments"], agent: ["Loan Agent", "Loan Agents"], enquiry: ["Enquiry", "Enquiries"], deal: ["Loan", "Loans"] },
   automotive: { workspace: ["Dealership", "Dealership"], lead: ["Vehicle Enquiry", "Vehicle Enquiries"], contact: ["Customer", "Customers"], campaign: ["Sales Campaign", "Sales Campaigns"], pipeline: ["Sales Pipeline", "Sales Pipeline"], appointment: ["Test Drive", "Test Drives"], agent: ["Sales Executive", "Sales Executives"], enquiry: ["Vehicle Enquiry", "Vehicle Enquiries"], deal: ["Vehicle Sale", "Vehicle Sales"] },
@@ -95,6 +110,8 @@ function getIndustryDefinition(industryKey) {
 
   return {
     key: known,
+    tagline: TAGLINES[known] || "AI-powered customer conversations and workflow automation.",
+    businessTypes: BUSINESS_TYPES[known] || {},
     label: industryPacks.listIndustries().find((item) => item.key === known)?.label || known,
     labels,
     domainObjects,
