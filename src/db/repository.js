@@ -2050,6 +2050,11 @@ async function findOrgIdForUser(userId) {
 
 // Same lookup but also returns the member's role, so request middleware
 // can do role-based access checks without a second round trip.
+  return membership ? membership.orgId : null;
+}
+
+// Same lookup but also returns the member's role, so request middleware
+// can do role-based access checks without a second round trip.
 async function findMembershipForUser(userId, email, requestedOrgId = null) {
   // First try: match by Keycloak sub (user_id column)
   const { data, error } = await supabase
@@ -2071,60 +2076,11 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
     .from("org_members")
     .select("id, org_id, role, name, feature_flags")
     .ilike("email", email.toLowerCase())
-    .is("user_id", null)
+    .is("user_id", null);
   if (emailErr) throw new Error(`[db.findMembershipForUser email] ${emailErr.message}`);
   const byEmailRows = byEmail || [];
   const byEmailSelected = requestedOrgId
-    ? byEmailRows.find((row) => row.org_id === requestedOrgId)
-    : byEmailRows[0];
-  if (!byEmailSelected) return null;
-  const byEmail = byEmailSelected;
-
-  // Claim the legacy email-only membership atomically. The NULL predicate is
-  // essential: two concurrent logins must not both believe they linked the row.
-  const { data: linkedRows, error: linkErr } = await supabase
-    .from("org_members")
-    .update({ user_id: userId })
-    .eq("id", byEmail.id)
-    .is("user_id", null)
-    .select("id, org_id, role, name, feature_flags")
-    .limit(1);
-
-  if (linkErr) {
-    // A unique user_id collision means this auth identity is already linked.
-    // Never fall back to the email row because that could cross organizations.
-    log.error(`[db.findMembershipForUser] auto-link failed: ${linkErr.message}`);
-    const { data: existing, error: existingErr } = await supabase
-      .from("org_members")
-      .select("id, org_id, role, name, feature_flags")
-      .eq("user_id", userId)
-      .limit(2);
-    if (existingErr) throw new Error(`[db.findMembershipForUser existing] ${existingErr.message}`);
-    if (existing?.length > 1) throw new Error("[db.findMembershipForUser] auth user has multiple organization memberships");
-    if (existing?.[0]) return { orgId: existing[0].org_id, role: existing[0].role, name: existing[0].name, featureFlags: existing[0].feature_flags || [] };
-    return null;
-  }
-
-  const linked = linkedRows?.[0];
-  if (linked) {
-    log.info(`🔗 Linked auth user ${userId} to org_member ${linked.id}`);
-    return { orgId: linked.org_id, role: linked.role, name: linked.name, featureFlags: linked.feature_flags || [] };
-  }
-
-  // Another request won the race. Re-read by the immutable auth subject and
-  // use that row only; never trust the originally selected email row.
-  const { data: existing, error: existingErr } = await supabase
-    .from("org_members")
-    .select("id, org_id, role, name, feature_flags")
-    .eq("user_id", userId)
-    .limit(2);
-  if (existingErr) throw new Error(`[db.findMembershipForUser existing] ${existingErr.message}`);
-  if (existing?.length > 1) throw new Error("[db.findMembershipForUser] auth user has multiple organization memberships");
-  if (!existing?.[0]) return null;
-  return { orgId: existing[0].org_id, role: existing[0].role, name: existing[0].name, featureFlags: existing[0].feature_flags || [] };
-}
-
-// ------------------------------------------------------------
+    ? byEmailRows.find((row) => row.org_id === requestedOrgId)// ------------------------------------------------------------
 // Questionnaire (singleton per org) — the voice-agent's list of
 // lead-qualification questions for the insurance/lending vertical
 // ------------------------------------------------------------
