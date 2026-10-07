@@ -152,8 +152,8 @@ const PACKS = {
     ] },
     { key: "vehicle_sale", label: "Vehicle Sales", icon: "BadgeDollarSign", description: "Completed vehicle sales", fields: [
       { key: "vehicleId", label: "Vehicle", type: "relation", relationObjectKey: "vehicle" }, { key: "contactId", label: "Customer", type: "relation", relationObjectKey: "contact" }, { key: "amount", label: "Sale Amount", type: "currency" }
-    }
-  ]
+      ] },
+    ],
   it_sales: [
     {
       key: "it_lead",
