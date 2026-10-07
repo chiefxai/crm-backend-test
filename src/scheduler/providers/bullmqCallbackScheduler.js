@@ -36,31 +36,46 @@ function callbackJobId(row) {
 }
 
 async function schedulePendingCallbacks(queue) {
-  const rows = await db.getPendingRetriesForScheduler(MAX_SCHEDULE_AHEAD);
   const now = Date.now();
+  let cursor = null;
+  let found = 0;
   let scheduled = 0;
 
-  for (const row of rows) {
-    const dueAt = new Date(row.nextRetryAt).getTime();
-    if (!row.id || !Number.isFinite(dueAt)) continue;
+  do {
+    const page = await db.getPendingRetriesForScheduler(MAX_SCHEDULE_AHEAD, cursor);
+    const rows = page.rows || [];
+    found += rows.length;
+    const jobs = [];
+    for (const row of rows) {
+      const dueAt = new Date(row.nextRetryAt).getTime();
+      if (!row.id || !Number.isFinite(dueAt)) continue;
+      jobs.push({
+        name: "callback-due",
+        data: { callLogId: row.id, scheduledFor: new Date(dueAt).toISOString() },
+        opts: {
+          jobId: callbackJobId(row),
+          delay: Math.max(0, dueAt - now),
+          attempts: 5,
+          backoff: { type: "exponential", delay: 5000 },
+          removeOnComplete: 1000,
+          removeOnFail: 5000,
+        },
+      });
+    }
+    if (jobs.length) {
+      await queue.addBulk(jobs);
+      scheduled += jobs.length;
+    }
 
-    const delay = Math.max(0, dueAt - now);
-    await queue.add(
-      "callback-due",
-      { callLogId: row.id, scheduledFor: new Date(dueAt).toISOString() },
-      {
-        jobId: callbackJobId(row),
-        delay,
-        attempts: 5,
-        backoff: { type: "exponential", delay: 5000 },
-        removeOnComplete: 1000,
-        removeOnFail: 5000,
-      }
-    );
-    scheduled += 1;
+    const nextCursor = page.nextCursor || null;
+    if (nextCursor && cursor && nextCursor.nextRetryAt === cursor.nextRetryAt && nextCursor.id === cursor.id) {
+      throw new Error("Callback scheduler pagination did not advance");
+    }
+    cursor = nextCursor;
   }
+  while (cursor);
 
-  return { found: rows.length, scheduled };
+  return { found, scheduled };
 }
 
 function createBullMqCallbackScheduler() {

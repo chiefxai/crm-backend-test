@@ -1779,18 +1779,24 @@ async function getScheduledCallbacks(orgId) {
 
 // Cross-org pending retry scan used only by the durable callback scheduler.
 // MySQL remains the source of truth; BullMQ only stores durable wake-up jobs.
-async function getPendingRetriesForScheduler(limit = 5000) {
+async function getPendingRetriesForScheduler(limit = 5000, after = null) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 5000, 10000));
-  const { data, error } = await supabase
-    .from("call_logs")
-    .select("*")
-    .systemReadOnly("Schedule pending callbacks across organizations")
-    .in("status", ["Callback Scheduled", "No Answer", "Answering Machine"])
-    .eq("retry_status", "pending")
-    .order("next_retry_at", { ascending: true })
-    .limit(safeLimit);
-  if (error) throw new Error(`[db.getPendingRetriesForScheduler] ${error.message}`);
-  return (data || []).map((row) => fromDbRow("calllogs", row));
+  const params = ["Callback Scheduled", "No Answer", "Answering Machine", "pending"];
+  let cursorFilter = "";
+  if (after?.nextRetryAt && after?.id) {
+    cursorFilter = " AND (next_retry_at > ? OR (next_retry_at = ? AND id > ?))";
+    params.push(after.nextRetryAt, after.nextRetryAt, after.id);
+  }
+  params.push(safeLimit);
+  // Trusted scheduler-only cross-organization scan. Keyset pagination avoids
+  // OFFSET rescans and guarantees callbacks beyond the first batch are seen.
+  const { rows } = await _pool.query(`SELECT * FROM call_logs
+    WHERE status IN (?,?,?) AND retry_status=? AND next_retry_at IS NOT NULL AND next_retry_at<>''
+    ${cursorFilter} ORDER BY next_retry_at ASC,id ASC LIMIT ?`, params);
+  const nextCursor = rows.length === safeLimit
+    ? { nextRetryAt: rows[rows.length - 1].next_retry_at, id: rows[rows.length - 1].id }
+    : null;
+  return { rows: rows.map((row) => fromDbRow("calllogs", row)), nextCursor };
 }
 
 // Cross-org scan for dialer tasks currently in auto-dial mode — see
