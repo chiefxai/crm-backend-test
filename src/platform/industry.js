@@ -115,6 +115,7 @@ function getIndustryDefinition(industryKey) {
           ecommerce: "Orders",
           field_services: "Service Jobs",
           it_sales: "Sales Opportunities",
+          recruitment: "Recruitment & Hiring",
         }[known] || `${INDUSTRY_CONFIG[known]?.label || known} Records`, "/objects", "objects", "layers", "objects"]]
     ).map(([key, label, route, tabId, iconKey, featureFlag]) => ({ key, label, route, ...(tabId ? { tabId } : {}), ...(iconKey ? { iconKey } : {}), ...(featureFlag ? { featureFlag } : {}), domainSpecific: true })),
   };

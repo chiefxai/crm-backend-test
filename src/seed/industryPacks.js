@@ -252,6 +252,43 @@ const PACKS = {
         { key: "cancelled", label: "Cancelled", color: "#ef4444" }
       ]
     }
+  ],
+  recruitment: [
+    {
+      key: "application", label: "Applications", icon: "BriefcaseBusiness",
+      description: "Candidate applications through screening, interviews, and offers", hasPipeline: true,
+      fields: [
+        { key: "candidateName", label: "Candidate Name", type: "text", required: true },
+        { key: "candidateEmail", label: "Candidate Email", type: "email" },
+        { key: "jobTitle", label: "Job Title", type: "text", required: true },
+        { key: "appliedAt", label: "Applied On", type: "date" },
+        { key: "rating", label: "Rating", type: "number" },
+        { key: "notes", label: "Recruiter Notes", type: "textarea" }
+      ],
+      stages: [
+        { key: "new", label: "New", color: "#6366f1" }, { key: "screening", label: "Screening", color: "#0ea5e9" },
+        { key: "interview", label: "Interview", color: "#14b8a6" }, { key: "offer", label: "Offer", color: "#f59e0b" },
+        { key: "hired", label: "Hired", color: "#22c55e" }, { key: "rejected", label: "Rejected", color: "#ef4444" }
+      ]
+    },
+    {
+      key: "job_opening", label: "Job Openings", icon: "Briefcase", description: "Positions, requirements, and hiring status",
+      fields: [
+        { key: "title", label: "Job Title", type: "text", required: true }, { key: "department", label: "Department", type: "text" },
+        { key: "location", label: "Location", type: "text" },
+        { key: "employmentType", label: "Employment Type", type: "select", options: ["Full-time", "Part-time", "Contract", "Internship"] },
+        { key: "openings", label: "Open Positions", type: "number" }, { key: "description", label: "Job Description", type: "textarea" }
+      ]
+    },
+    {
+      key: "candidate", label: "Candidates", icon: "Users", description: "Candidate profiles and experience",
+      fields: [
+        { key: "name", label: "Full Name", type: "text", required: true }, { key: "email", label: "Email", type: "email" },
+        { key: "phone", label: "Phone", type: "phone" }, { key: "skills", label: "Skills", type: "textarea" },
+        { key: "experienceYears", label: "Experience (Years)", type: "number" }, { key: "currentCompany", label: "Current Company", type: "text" },
+        { key: "source", label: "Source", type: "select", options: ["Referral", "Career Site", "Job Board", "Agency", "Other"] }
+      ]
+    }
   ]
 };
 
@@ -278,6 +315,7 @@ const INDUSTRY_CONFIG = {
   ecommerce: { label:"E-commerce / D2C", tagline:"AI-powered customer conversations from enquiry through delivery.", businessTypes:{online_store:{label:"Online Store"}}, labels:{workspace:["Store","Stores"],lead:["Order Lead","Order Leads"],contact:["Customer","Customers"],campaign:["Campaign","Campaigns"],pipeline:["Order Pipeline","Order Pipeline"],appointment:["Appointment","Appointments"],agent:["Sales Agent","Sales Agents"],enquiry:["Product Enquiry","Product Enquiries"],deal:["Order","Orders"]} },
   field_services: { label:"Field Services", tagline:"AI-powered service enquiries, scheduling, and job management.", businessTypes:{service_business:{label:"Service Business"}}, labels:{workspace:["Service Business","Service Businesses"],lead:["Service Lead","Service Leads"],contact:["Customer","Customers"],campaign:["Service Campaign","Service Campaigns"],pipeline:["Service Pipeline","Service Pipeline"],appointment:["Service Appointment","Service Appointments"],agent:["Field Agent","Field Agents"],enquiry:["Service Enquiry","Service Enquiries"],deal:["Job","Jobs"]} },
   it_sales: { label:"IT / SaaS Sales", tagline:"AI-powered B2B sales conversations and deal workflows.", businessTypes:{software_company:{label:"Software Company"}}, labels:{workspace:["Company","Companies"],lead:["Sales Lead","Sales Leads"],contact:["Contact","Contacts"],campaign:["Sales Campaign","Sales Campaigns"],pipeline:["Sales Pipeline","Sales Pipeline"],appointment:["Demo","Demos"],agent:["Sales Executive","Sales Executives"],enquiry:["Product Enquiry","Product Enquiries"],deal:["Deal","Deals"]} },
+  recruitment: { label:"Recruitment / Staffing", tagline:"Manage job openings, candidate profiles, and hiring pipelines.", businessTypes:{staffing_agency:{label:"Staffing Agency"},in_house_talent:{label:"In-house Talent Acquisition"}}, labels:{workspace:["Recruitment Team","Recruitment Teams"],lead:["Candidate","Candidates"],contact:["Candidate","Candidates"],campaign:["Hiring Campaign","Hiring Campaigns"],pipeline:["Hiring Pipeline","Hiring Pipeline"],appointment:["Interview","Interviews"],agent:["Recruiter","Recruiters"],enquiry:["Candidate Enquiry","Candidate Enquiries"],deal:["Placement","Placements"]} },
 };
 
 const LENDING_PACK = [
@@ -341,7 +379,8 @@ function listIndustries() {
     { key: "ecommerce", label: "E-commerce / D2C" },
     { key: "automotive", label: "Automotive" },
     { key: "field_services", label: "Field Services" },
-    { key: "it_sales", label: "IT / SaaS Sales" }
+    { key: "it_sales", label: "IT / SaaS Sales" },
+    { key: "recruitment", label: "Recruitment / Staffing" }
   ];
 }
 
@@ -397,6 +436,12 @@ const DEFAULT_QUESTIONS = {
     "Endha product illa service-la interested-a irukeenga?",
     "Unga company size epdi irukum — approximate team size sollunga?",
     "Demo-ku eppo convenient-a irukum?"
+  ],
+  recruitment: [
+    "What role are you hiring for, and where is the position based?",
+    "Is this role full-time, part-time, contract, or an internship?",
+    "What experience and skills should candidates have?",
+    "How many positions are you looking to fill?"
   ]
 };
 
@@ -597,6 +642,13 @@ const COMPANY_PROFILE_CONFIG = {
       placeholder: "e.g. Real Estate",
       default: []
     }
+  },
+  recruitment: {
+    taxIdLabel: "GST / Tax Identification Number", taxIdPlaceholder: "Tax ID",
+    license: { key: "staffingLicenseId", label: "Recruitment / Staffing License", placeholder: "License number (if applicable)" },
+    rate: null, risk: null, bioPlaceholder: "Describe your hiring, staffing, or talent acquisition services...",
+    sectors: { key: "rolesFilled", label: "Roles / Job Families", hint: "Role types your team recruits for.", placeholder: "e.g. Software Engineering", default: [] },
+    jurisdictions: { key: "recruitingLocations", label: "Recruiting Locations", hint: "Cities or regions where you recruit.", placeholder: "e.g. Chennai", default: [] }
   }
 };
 
@@ -628,6 +680,7 @@ const PIPELINE_STAGE_LABELS = {
   automotive:     { contact: "Contact", campaign: "Campaign", lead: "Lead", opportunity: "Opportunity", client: "Buyer" },
   field_services: { contact: "Contact", campaign: "Campaign", lead: "Lead", opportunity: "Opportunity", client: "Customer" },
   it_sales:       { contact: "Contact", campaign: "Campaign", lead: "Lead", opportunity: "Opportunity", client: "Client" },
+  recruitment:   { contact: "Candidate", campaign: "Hiring Campaign", lead: "Application", opportunity: "Interview", client: "Hire" },
 };
 
 // Ordered [{key,label}] for the given industry (falls back to lending's

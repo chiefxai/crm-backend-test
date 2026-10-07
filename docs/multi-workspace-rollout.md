@@ -287,6 +287,10 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
    sharing. Copies preserve source records; record deletion permits a later
    re-copy, while grant revocation does not erase existing copy history. True
    transfers need separate rules for source deletion, relationships, and files.
+8. Recruitment / Staffing is available as an industry pack for newly provisioned
+   workspaces, with candidates, job openings, and an application pipeline.
+   Existing workspaces are not retroactively seeded; full recruitment
+   automations and integrations remain future work.
 
 ### Data-access audit snapshot (2026-10-07)
 
