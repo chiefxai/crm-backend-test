@@ -66,7 +66,10 @@ async function requireAuth(req, res, next) {
     const userId    = payload.sub;
     const userEmail = payload.email || null;
 
-    const membership = await db.findMembershipForUser(userId, userEmail);
+    // The workspace switcher sends the selected organization explicitly.
+    // The database membership lookup remains the authorization boundary.
+    const requestedOrgId = String(req.get("X-Organization-Id") || "").trim() || null;
+    const membership = await db.findMembershipForUser(userId, userEmail, requestedOrgId);
     if (!membership?.orgId) {
       return res.status(403).json({ error: "This account is not a member of any organization" });
     }
