@@ -96,7 +96,8 @@ router.patch("/:key/records/:id", requireAuth, requireValidRecordId, async (req,
 
 router.delete("/:key/records/:id", requireAuth, requireValidRecordId, async (req, res) => {
   try {
-    await engine.removeRecord(req.orgId, req.params.key, req.params.id);
+    const removed = await engine.removeRecord(req.orgId, req.params.key, req.params.id);
+    if (!removed) return res.status(404).json({ error: "Record not found" });
     res.json({ success: true });
   } catch (err) {
     handleEngineError(err, res);
