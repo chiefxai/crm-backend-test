@@ -373,7 +373,7 @@ router.post("/organizations", async (req, res) => {
         return res.status(409).json({ error: "This call-provider number is already assigned to another organization." });
       }
       const { data: existingCallChannel } = await require("../db/client")
-        .from("channels").select("org_id").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
+        .from("channels").select("org_id").systemReadOnly("Check global call-provider channel ownership during organization setup").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
       if (existingCallChannel) {
         return res.status(409).json({ error: "This call-provider number is already connected to another organization." });
       }

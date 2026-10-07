@@ -27,7 +27,7 @@ async function listOrganizations() {
 
   const [{ data: members }, { data: leads }] = await Promise.all([
     db.supabase.from("org_members").select("org_id"),
-    db.supabase.from("leads").select("org_id")
+    db.supabase.from("leads").select("org_id").systemReadOnly("Aggregate lead counts for the platform organization list")
   ]);
 
   const memberCounts = {};
@@ -91,6 +91,7 @@ async function listAuditLog(limit = 200) {
   const { data, error } = await db.supabase
     .from("audit_log")
     .select("*, organizations(name)")
+    .systemReadOnly("List audit events for platform administrators")
     .order("created_at", { ascending: false })
     .limit(limit);
   if (error) throw new Error(`[platformAdmin.listAuditLog] ${error.message}`);
@@ -110,7 +111,7 @@ async function listAuditLog(limit = 200) {
 async function getStats() {
   const [{ count: orgCount }, { count: callCount }, { count: userCount }, orgsRes, aiRowsRes, providers, archive, selfManagedRes] = await Promise.all([
     db.supabase.from("organizations").select("id", { count: "exact", head: true }),
-    db.supabase.from("call_logs").select("id", { count: "exact", head: true }),
+    db.supabase.from("call_logs").select("id", { count: "exact", head: true }).systemReadOnly("Count calls for platform statistics"),
     db.supabase.from("org_members").select("user_id", { count: "exact", head: true }),
     // Platform-wide cost: summed in JS from the same per-org accrued
     // figures each org's own Billing & Usage page shows (organizations.
@@ -128,7 +129,7 @@ async function getStats() {
     // isCallProviderSelfManaged) — the platform never paid for their
     // calls, so their phone_charges is an estimate for their own
     // reference only and must not count toward what the platform is owed.
-    db.supabase.from("channels").select("org_id").eq("type", "vobiz").eq("status", "connected"),
+    db.supabase.from("channels").select("org_id").systemReadOnly("Identify platform customers using self-managed Vobiz").eq("type", "vobiz").eq("status", "connected"),
   ]);
 
   const selfManagedOrgIds = new Set((selfManagedRes.data || []).map((c) => c.org_id));
@@ -181,7 +182,7 @@ async function getTimeSeries(days = 30) {
 
   const [{ data: orgs, error: orgErr }, { data: calls, error: callErr }, { data: allOrgs }] = await Promise.all([
     db.supabase.from("organizations").select("created_at").gte("created_at", sinceIso),
-    db.supabase.from("call_logs").select("created_at").gte("created_at", sinceIso),
+    db.supabase.from("call_logs").select("created_at").systemReadOnly("Aggregate call volume for platform statistics").gte("created_at", sinceIso),
     db.supabase.from("organizations").select("subscription_plan, industry")
   ]);
   if (orgErr) throw new Error(`[platformAdmin.getTimeSeries] orgs: ${orgErr.message}`);
@@ -221,11 +222,11 @@ async function getOrganizationDetail(orgId) {
   ] = await Promise.all([
     db.supabase.from("organizations").select("*").eq("id", orgId).maybeSingle(),
     db.supabase.from("org_members").select("*").eq("org_id", orgId).order("created_at", { ascending: false }),
-    db.supabase.from("call_logs").select("id, lead_name, duration, sentiment, created_at").eq("org_id", orgId).order("created_at", { ascending: false }).limit(10),
-    db.supabase.from("audit_log").select("*").eq("org_id", orgId).order("created_at", { ascending: false }).limit(10),
-    db.supabase.from("leads").select("id", { count: "exact", head: true }).eq("org_id", orgId),
-    db.supabase.from("workflows").select("id", { count: "exact", head: true }).eq("org_id", orgId),
-    db.supabase.from("campaigns").select("id", { count: "exact", head: true }).eq("org_id", orgId)
+    db.supabase.from("call_logs").select("id, lead_name, duration, sentiment, created_at").systemReadOnly("Show platform-admin organization-wide call history").eq("org_id", orgId).order("created_at", { ascending: false }).limit(10),
+    db.supabase.from("audit_log").select("*").systemReadOnly("Show platform-admin organization-wide audit history").eq("org_id", orgId).order("created_at", { ascending: false }).limit(10),
+    db.supabase.from("leads").select("id", { count: "exact", head: true }).systemReadOnly("Count all workspaces in platform-admin organization detail").eq("org_id", orgId),
+    db.supabase.from("workflows").select("id", { count: "exact", head: true }).systemReadOnly("Count all workspaces in platform-admin organization detail").eq("org_id", orgId),
+    db.supabase.from("campaigns").select("id", { count: "exact", head: true }).systemReadOnly("Count all workspaces in platform-admin organization detail").eq("org_id", orgId)
   ]);
   if (orgErr) throw new Error(`[platformAdmin.getOrganizationDetail] ${orgErr.message}`);
   if (!org) {

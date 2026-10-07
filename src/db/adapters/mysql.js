@@ -1063,6 +1063,9 @@ class QueryBuilder {
     if (!WORKSPACE_TABLES.has(this.table)) return null;
     const orgFilter = this.filters.find(([kind, column]) => kind === "eq" && column === "`org_id`");
     const orgId = row?.org_id || orgFilter?.[2] || this.scope?.orgId;
+    if (!orgId && this.op === "select") {
+      throw new Error("Cross-organization operational reads require systemReadOnly(reason)");
+    }
     const scope = this.scope || (orgId ? { orgId, workspaceId: orgId } : null);
     if (!scope) return null; // Explicit cross-org system scan; never inferred from a client ID.
     if (orgId && orgId !== scope.orgId) throw new Error("Organization does not match query workspace");

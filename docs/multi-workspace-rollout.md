@@ -90,6 +90,10 @@ production build. No MySQL migration or end-to-end VM execution was performed.
   organization backups validate each recording against its owning workspace.
   Backup recording filenames include workspace IDs to avoid collisions when
   call IDs are reused across workspaces.
+- Unscoped operational-table scans now require an explicit read-only system
+  access reason. Durable retry/auto-dial scans and platform-admin aggregates
+  declare their cross-workspace purpose; unmarked cross-organization reads fail
+  before reaching MySQL.
 - Organization retention applies its policy to each workspace sequentially,
   including suspended workspaces, and returns per-workspace plus aggregate counts.
   Fixed missing `.lt()` support in the database adapter.
@@ -224,8 +228,8 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
 
 ## Remaining implementation order
 
-1. Finish the data-access audit, remove implicit system scans and contract nullable scope
-   columns only after legacy writers have been retired.
+1. Finish the data-access audit and classify the remaining raw SQL/system scans;
+   contract nullable scope columns only after legacy writers have been retired.
 2. Confirm private-bucket policy and finish signed-URL/storage policy review,
    remaining provider/callback-service paths,
    durable call ownership and backup pagination/snapshot consistency. Vobiz

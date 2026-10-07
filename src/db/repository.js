@@ -1627,6 +1627,7 @@ async function getCallsDueForRetry() {
   const { data, error } = await supabase
     .from("call_logs")
     .select("*")
+    .systemReadOnly("Scan due retry callbacks across organizations")
     .in("status", ["No Answer", "Answering Machine", "Callback Scheduled"])
     .eq("retry_status", "pending")
     .lte("next_retry_at", nowIso);
@@ -1782,6 +1783,7 @@ async function getPendingRetriesForScheduler(limit = 5000) {
   const { data, error } = await supabase
     .from("call_logs")
     .select("*")
+    .systemReadOnly("Schedule pending callbacks across organizations")
     .in("status", ["Callback Scheduled", "No Answer", "Answering Machine"])
     .eq("retry_status", "pending")
     .order("next_retry_at", { ascending: true })
@@ -1804,7 +1806,8 @@ async function getActiveAutoDialTasks() {
   // can't be expressed in one call. Dialer task row counts are small
   // (one row per campaign-dial task, not per lead), so filtering the full
   // table in JS is simpler and cheap.
-  const { data, error } = await supabase.from("dialer_tasks").select("*");
+  const { data, error } = await supabase.from("dialer_tasks").select("*")
+    .systemReadOnly("Scan auto-dial tasks across organizations");
   if (error) throw new Error(`[db.getActiveAutoDialTasks] ${error.message}`);
   return (data || [])
     .filter((row) => row.auto_dial_enabled || row.current_provider_call_sid)
