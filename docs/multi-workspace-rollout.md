@@ -282,9 +282,11 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
    stack before enabling the sharing flag.
 7. Restricted edit proposals with record-version checks are implemented.
    One-time mapped copies are implemented with field type/required-field checks
-   and a unique source fingerprint for retry safety. Verify the proposal and
-   copy flows against MySQL and the full application stack before enabling
-   sharing; transfers and recruitment workflows remain future work.
+   and a source plus mapping fingerprint for retry safety. Verify the proposal
+   and copy flows against MySQL and the full application stack before enabling
+   sharing. Copies preserve source records; record deletion permits a later
+   re-copy, while grant revocation does not erase existing copy history. True
+   transfers need separate rules for source deletion, relationships, and files.
 
 ### Data-access audit snapshot (2026-10-07)
 

@@ -291,22 +291,20 @@ async function copySharedRecord(orgId,targetWorkspaceId,grantId,recordRef,target
     const missing=targetFields.find(field=>field.required&&(copiedData[field.key]===undefined||copiedData[field.key]===null||copiedData[field.key]===''));
     if(missing) throw Object.assign(new Error(`Map a value for required target field "${missing.label}"`),{statusCode:400});
     const sourceFingerprint=crypto.createHmac('sha256',shareSecret()).update(`${grantId}:${reference.recordId}`).digest('hex');
-    const {rows:existing}=await client.query(`SELECT target_record_id FROM workspace_share_imports
-      WHERE org_id=? AND grant_id=? AND source_fingerprint=? AND target_workspace_id=? FOR UPDATE`,[orgId,grantId,sourceFingerprint,targetWorkspaceId]);
-    if(existing[0]) { await client.query('COMMIT'); return {status:'already_copied'}; }
+    const canonicalMapping=Object.fromEntries(mappings.map(([sourceKey,targetKey])=>[sourceKey,targetKey.trim()]).sort(([a],[b])=>a.localeCompare(b)));
+    const mappingFingerprint=crypto.createHash('sha256').update(JSON.stringify({targetObjectKey,fieldMapping:canonicalMapping})).digest('hex');
+    const {rows:existing}=await client.query(`SELECT i.target_record_id,r.id AS live_record_id FROM workspace_share_imports i
+      LEFT JOIN object_records r ON r.id=i.target_record_id AND r.org_id=i.org_id AND r.workspace_id=i.target_workspace_id AND r.object_id=i.target_object_id
+      WHERE i.org_id=? AND i.grant_id=? AND i.source_fingerprint=? AND i.mapping_fingerprint=? AND i.target_workspace_id=? FOR UPDATE`,[orgId,grantId,sourceFingerprint,mappingFingerprint,targetWorkspaceId]);
+    if(existing[0]?.live_record_id) { await client.query('COMMIT'); return {status:'already_copied'}; }
+    if(existing[0]) await client.query('DELETE FROM workspace_share_imports WHERE org_id=? AND grant_id=? AND source_fingerprint=? AND mapping_fingerprint=? AND target_workspace_id=?',[orgId,grantId,sourceFingerprint,mappingFingerprint,targetWorkspaceId]);
     const {rows:stages}=await client.query(`SELECT id FROM object_stages WHERE org_id=? AND workspace_id=? AND object_id=? ORDER BY position,id LIMIT 1`,[orgId,targetWorkspaceId,targetObjects[0].id]);
     const targetRecordId=crypto.randomUUID(), stageId=stages[0]?.id||null;
     await client.query(`INSERT INTO object_records (id,org_id,workspace_id,object_id,stage_id,data,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?)`,[targetRecordId,orgId,targetWorkspaceId,targetObjects[0].id,stageId,JSON.stringify(copiedData),now,now]);
-    try {
-      await client.query(`INSERT INTO workspace_share_imports
-        (id,org_id,grant_id,target_workspace_id,source_fingerprint,target_object_id,target_record_id,copied_by_member_id,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)`,[crypto.randomUUID(),orgId,grantId,targetWorkspaceId,sourceFingerprint,targetObjects[0].id,targetRecordId,memberId,now]);
-    } catch(error) {
-      if(error.code!=='ER_DUP_ENTRY') throw error;
-      await client.query('ROLLBACK');
-      return {status:'already_copied'};
-    }
+    await client.query(`INSERT INTO workspace_share_imports
+      (id,org_id,grant_id,target_workspace_id,source_fingerprint,mapping_fingerprint,target_object_id,target_record_id,copied_by_member_id,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`,[crypto.randomUUID(),orgId,grantId,targetWorkspaceId,sourceFingerprint,mappingFingerprint,targetObjects[0].id,targetRecordId,memberId,now]);
     await client.query('COMMIT');
     return {status:'copied'};
   } catch(error) {
