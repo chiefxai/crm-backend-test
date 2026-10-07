@@ -11,9 +11,10 @@ FORCE_RECREATE=false
 ALL_LOGS=false
 FOLLOW_LOGS=false
 SERVICE=""
+ALWAYS_BUILD=false
 
 usage() {
-  echo "Usage: $0 [--dev|--uat|--prod] [--pull] [--build] [--service NAME] [--force-recreate] [--trace] [--all-logs] [--follow-logs] [--foreground] [--dry-run]"
+  echo "Usage: $0 [--dev|--uat|--prod] [--pull] [--build] [--service NAME] [--force-recreate] [--always-build] [--trace] [--all-logs] [--follow-logs] [--foreground] [--dry-run]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -29,9 +30,11 @@ while [[ $# -gt 0 ]]; do
     --force-recreate) FORCE_RECREATE=true; shift ;;
     --all-logs) ALL_LOGS=true; shift ;;
     --follow-logs) FOLLOW_LOGS=true; shift ;;
+    --always-build) ALWAYS_BUILD=true; shift ;;
     --service)
       [[ $# -ge 2 && -n "$2" ]] || { echo "ERROR: --service requires a Compose service name."; usage; exit 1; }
       SERVICE="$2"
+      [[ "$SERVICE" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "ERROR: Invalid Compose service name: $SERVICE"; exit 1; }
       shift 2
       ;;
     -h|--help) usage; exit 0 ;;
@@ -59,6 +62,24 @@ fi
 
 COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" "${COMPOSE[@]}")
 
+show_status_and_logs() {
+  "${COMPOSE_CMD[@]}" ps
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
+      echo "API health check: OK"
+    else
+      echo "API health check: unavailable"
+    fi
+  fi
+  echo "Recent deployment logs:"
+  LOG_ARGS=(logs --tail=200)
+  $FOLLOW_LOGS && LOG_ARGS+=(-f)
+  if ! $ALL_LOGS; then
+    LOG_ARGS+=("${SERVICE:-app}")
+  fi
+  "${COMPOSE_CMD[@]}" "${LOG_ARGS[@]}"
+}
+
 if $TRACE; then
   set -x
 fi
@@ -77,6 +98,23 @@ fi
 if $PULL; then
   echo "Pulling latest source..."
   git pull --ff-only
+  if ! "${COMPOSE_CMD[@]}" config -q; then
+    echo "ERROR: Updated Docker Compose configuration is invalid."
+    exit 1
+  fi
+fi
+
+# Remember successful deployments per environment and target so an API-only
+# rollout does not incorrectly mark the rest of the stack as deployed.
+DEPLOY_TARGET=${SERVICE:-all}
+DEPLOY_MARKER="$(git rev-parse --git-path "chiefvoice-last-deployed-${ENV}-${DEPLOY_TARGET}")"
+if $PULL && ! $ALWAYS_BUILD && ! $FORCE_RECREATE; then
+  CURRENT_COMMIT="$(git rev-parse HEAD)"
+  if [[ -f "$DEPLOY_MARKER" ]] && [[ "$(cat "$DEPLOY_MARKER")" == "$CURRENT_COMMIT" ]]; then
+    printf 'No new commit to deploy for %s/%s (%s); skipping build and restart.\n' "$ENV" "$DEPLOY_TARGET" "${CURRENT_COMMIT:0:12}"
+    show_status_and_logs
+    exit 0
+  fi
 fi
 
 ARGS=(up)
@@ -105,10 +143,9 @@ fi
 
 "${COMPOSE_CMD[@]}" ps
 
-echo "Recent deployment logs:"
-LOG_ARGS=(logs --tail=200)
-$FOLLOW_LOGS && LOG_ARGS+=(-f)
-if ! $ALL_LOGS; then
-  LOG_ARGS+=("${SERVICE:-app}")
-fi
-"${COMPOSE_CMD[@]}" "${LOG_ARGS[@]}"
+# Record success after Compose reports the stack and the health check above
+# has passed. Store under .git so the marker never appears as a source change.
+mkdir -p "$(dirname "$DEPLOY_MARKER")"
+git rev-parse HEAD > "$DEPLOY_MARKER"
+
+show_status_and_logs
