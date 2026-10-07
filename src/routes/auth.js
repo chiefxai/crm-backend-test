@@ -8,7 +8,7 @@
 
 const express = require("express");
 const db = require("../db/repository");
-const { requireAuth } = require("../middleware/auth");
+const { requireAuth, requireAuthIdentityOnly } = require("../middleware/auth");
 const industryPacks = require("../seed/industryPacks");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.auth");
@@ -54,6 +54,19 @@ router.get("/login-url", (req, res) => {
 // GET /api/auth/industries — public
 router.get("/industries", (_req, res) => {
   res.json(industryPacks.listIndustries());
+});
+
+// GET /api/auth/workspaces — every workspace the current user belongs to.
+// This endpoint intentionally ignores the selected-workspace header so a
+// stale workspace selection can never hide the user's other workspaces.
+router.get("/workspaces", requireAuthIdentityOnly, async (req, res) => {
+  try {
+    const workspaces = await db.listMembershipsForUser(req.userId, req.userEmail);
+    res.json(workspaces);
+  } catch (err) {
+    log.error("❌ /api/auth/workspaces:", err.message);
+    res.status(500).json({ error: "Failed to load workspaces" });
+  }
 });
 
 // GET /api/auth/me — returns the authenticated user and their org
