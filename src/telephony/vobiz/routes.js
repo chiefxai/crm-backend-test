@@ -255,8 +255,41 @@ router.post("/machine-detection", requireVobizWebhook, async (req, res) => {
   const CallUUID = req.body.CallUUID || req.body.RequestUUID;
   const isMachine = req.body.Machine === "true" || /machine|fax/i.test(req.body.MachineDetection || req.body.Result || "");
   if (CallUUID && isMachine) {
-    vobizMachineDetectedCalls.add(CallUUID);
-    setTimeout(() => vobizMachineDetectedCalls.delete(CallUUID), 1800000);
+    try {
+      const aliases = [CallUUID, ...collectVobizCallIds(req.body), ...collectVobizCallIds(req.query)];
+      let owner = vobizCallOrgs.has(CallUUID) ? {
+        orgId: vobizCallOrgs.get(CallUUID),
+        workspaceId: vobizCallWorkspaces.get(CallUUID) || vobizCallOrgs.get(CallUUID),
+      } : await db.findWorkspaceForVobizCallIds(aliases);
+
+      if (!owner) {
+        const fromOwner = req.body.From || req.query.From
+          ? await db.findWorkspaceForNumber(req.body.From || req.query.From) : null;
+        const toOwner = req.body.To || req.query.To
+          ? await db.findWorkspaceForNumber(req.body.To || req.query.To) : null;
+        if (fromOwner && toOwner && (fromOwner.orgId !== toOwner.orgId || fromOwner.workspaceId !== toOwner.workspaceId)) {
+          return res.status(409).send("Ambiguous call ownership");
+        }
+        owner = fromOwner || toOwner;
+      }
+
+      if (!owner) {
+        log.warn(`Ignoring machine-detection result for unresolved Vobiz call ${CallUUID}`);
+        return res.sendStatus(200);
+      }
+      const cachedOrgId = vobizCallOrgs.get(CallUUID);
+      const cachedWorkspaceId = vobizCallWorkspaces.get(CallUUID) || cachedOrgId;
+      if (cachedOrgId && (cachedOrgId !== owner.orgId || cachedWorkspaceId !== owner.workspaceId)) {
+        log.warn(`Ignoring machine-detection result with conflicting workspace owner for Vobiz call ${CallUUID}`);
+        return res.sendStatus(200);
+      }
+
+      vobizMachineDetectedCalls.add(CallUUID);
+      setTimeout(() => vobizMachineDetectedCalls.delete(CallUUID), 1800000);
+    } catch (err) {
+      log.error(`Failed to resolve machine-detection workspace for Vobiz call ${CallUUID}: ${err.message}`);
+      return res.status(err.statusCode || 503).send("Unable to resolve call workspace");
+    }
   }
   res.sendStatus(200);
 });

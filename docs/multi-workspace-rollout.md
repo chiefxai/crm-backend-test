@@ -73,6 +73,9 @@ production build. No MySQL migration or end-to-end VM execution was performed.
 - Vobiz can recover an active outbound campaign call's workspace after an API
   restart from the exact provider Call ID stored on its workspace-scoped task;
   ambiguous owner matches are rejected before callback processing.
+- Vobiz machine-detection callbacks resolve the call's cached, leased, or
+  telephone-number owner before mutating process-wide call state; unresolved or
+  conflicting owners are ignored/rejected.
 - Meta WhatsApp and Instagram callbacks resolve their channel by provider ID,
   then run conversation, message, and AI-context work in that channel's stored
   workspace. Cross-tenant provider ownership checks are explicit read-only scans.
