@@ -194,7 +194,7 @@ router.post("/numbers/sync", requireAuth, requireRole(ADMIN_ROLES), async (req, 
 router.get("/me", requireAuth, async (req, res) => {
   try {
     const [membership, org] = await Promise.all([
-      db.findMembershipForUser(req.userId, req.userEmail),
+      db.findMembershipForUser(req.userId, req.userEmail, req.orgId),
       db.getOrg(req.orgId),
     ]);
     const orgFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(Array.isArray(org?.featureFlags) ? org.featureFlags : []);

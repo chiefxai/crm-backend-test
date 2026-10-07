@@ -42,7 +42,9 @@ function extractToken(req) {
   return null;
 }
 
-async function isPlatformAdminIdentity(payload, email) {
+// This predicate must return a Boolean. Returning a Promise makes a false
+// administrator decision truthy at synchronous authorization call sites.
+function isPlatformAdminIdentity(payload, email) {
   if (payload?.platformAdmin === true || payload?.admin === true) return true;
   if (Array.isArray(payload?.realm_access?.roles) && payload.realm_access.roles.includes("platform-admin")) return true;
   const allowed = (process.env.PLATFORM_ADMIN_EMAILS || "")
@@ -209,20 +211,7 @@ function requireRole(allowedRoles) {
 
 function requirePlatformAdmin(req, res, next) {
   log.info("🔐 requirePlatformAdmin check", { userId: req.userId, provider: process.env.AUTH_PROVIDER || "cognito" });
-  // Identity Platform custom claims are provider-neutral and are suitable for
-  // platform-level privileges. The CRM membership role remains the source of
-  // truth for customer-organization authorization.
-  if (req.authClaims?.platformAdmin === true || req.authClaims?.admin === true) {
-    return next();
-  }
-  // Keycloak development compatibility.
-  if (Array.isArray(req.keycloakRoles) && req.keycloakRoles.includes("platform-admin")) {
-    return next();
-  }
-  // Fall back to email allowlist
-  const allowed = (process.env.PLATFORM_ADMIN_EMAILS || "")
-    .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
-  if (allowed.length && req.userEmail && allowed.includes(req.userEmail.toLowerCase())) {
+  if (isPlatformAdminIdentity(req.authClaims, req.userEmail)) {
     return next();
   }
   return res.status(403).json({
