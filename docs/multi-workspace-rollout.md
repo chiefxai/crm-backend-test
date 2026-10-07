@@ -76,6 +76,10 @@ production build. No MySQL migration or end-to-end VM execution was performed.
   and agent caches are partitioned by workspace; hangup requires matching scope.
 - New child recording keys include organization/workspace IDs. Historical
   default recording keys are preserved. Signed-URL/storage policy audit remains.
+- Recording playback now checks known object keys against the active workspace
+  before signing or returning them. The legacy default workspace can resolve
+  only root-level `recordings/<file>` keys; child workspaces require their
+  organization/workspace path. External provider URLs remain provider-managed.
 - Organization retention applies its policy to each workspace sequentially,
   including suspended workspaces, and returns per-workspace plus aggregate counts.
   Fixed missing `.lt()` support in the database adapter.
@@ -212,7 +216,8 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
 
 1. Finish the data-access audit, remove implicit system scans and contract nullable scope
    columns only after legacy writers have been retired.
-2. Finish signed-URL/storage policies, remaining provider/callback-service paths,
+2. Confirm private-bucket policy and finish signed-URL/storage policy review,
+   remaining provider/callback-service paths,
    durable call ownership and backup pagination/snapshot consistency. Vobiz
    context, workspace voice settings and per-workspace retention are implemented.
 3. Confirm the migration and cross-workspace behavior against MySQL and the full

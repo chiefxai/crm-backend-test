@@ -25,7 +25,10 @@ router.get("/calls", requireAuth, async (req, res) => {
       .order("created_at", { ascending: false })
       .limit(100);
     if (error) throw error;
-    res.json(data || []);
+    res.json(await Promise.all((data || []).map(async row => ({
+      ...row,
+      recording_url: await storage.resolvePlaybackUrl(row.recording_url),
+    }))));
   } catch (err) {
     log.error("❌ /api/calls error:", err.message);
     res.status(500).json({ error: safeErrorMessage(err) });
@@ -40,7 +43,10 @@ router.get("/calls/:id/transcript", requireAuth, async (req, res) => {
       .select("id, caller_number, agent_name, duration_seconds, sentiment, recording_url, created_at, transcript")
       .eq("id", req.params.id).eq("org_id", req.orgId).maybeSingle();
     if (error) throw error;
-    res.json(data || {});
+    res.json(data ? {
+      ...data,
+      recording_url: await storage.resolvePlaybackUrl(data.recording_url),
+    } : {});
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 

@@ -7,6 +7,7 @@
 const { PutObjectCommand, DeleteObjectCommand, GetObjectCommand, CreateBucketCommand, HeadBucketCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const { getClient } = require("./client");
+const { getScope } = require("../workspaces/scope");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("storage.index");
 
@@ -125,6 +126,23 @@ async function signedUrl(key, expiresIn = SIGNED_URL_TTL_SECONDS) {
   return getSignedUrl(getClient(), cmd, { expiresIn });
 }
 
+// Recording object keys encode their owning workspace. Never turn a key read
+// from a database row into a signed URL unless it belongs to the active
+// workspace. Legacy/default-workspace recordings remain at recordings/<file>.
+function recordingKeyBelongsToActiveWorkspace(key) {
+  const scope = getScope();
+  if (!scope || typeof key !== "string") return false;
+  let segments;
+  try { segments = key.split("/").map(segment => decodeURIComponent(segment)); }
+  catch { return false; }
+  if (segments.some(segment => !segment || segment === "." || segment === "..")) return false;
+  if (scope.workspaceId === scope.orgId) {
+    return segments.length === 2 && segments[0] === "recordings";
+  }
+  return segments.length === 4 && segments[0] === "recordings" &&
+    segments[1] === scope.orgId && segments[2] === scope.workspaceId;
+}
+
 // Turns whatever's stored in a recording-url-style column into something
 // actually playable right now. A full http(s) URL (the default mode's
 // upload() return value, or any historical row saved before signed mode
@@ -188,6 +206,7 @@ async function resolvePlaybackUrl(value, expiresIn = SIGNED_URL_TTL_SECONDS) {
   // External provider URLs that are not one of our S3-compatible objects
   // remain untouched. Known storage URLs are always refreshed in production.
   if (!key) return /^https?:\/\//i.test(raw) ? raw : null;
+  if (!recordingKeyBelongsToActiveWorkspace(key)) return null;
 
   try {
     if (/^https?:\/\//i.test(raw) && !useSignedUrls()) return raw;
