@@ -899,7 +899,9 @@ async function runSchemaMigration(client) {
       await client.query(`
         UPDATE enquiries e
         INNER JOIN call_logs cl
-          ON cl.org_id = e.org_id AND cl.id = e.call_id
+          ON cl.org_id = e.org_id
+         AND COALESCE(cl.workspace_id, cl.org_id) = COALESCE(e.workspace_id, e.org_id)
+         AND cl.id = e.call_id
         SET e.lead_id = cl.lead_id
         WHERE e.lead_id IS NULL AND cl.lead_id IS NOT NULL
       `);

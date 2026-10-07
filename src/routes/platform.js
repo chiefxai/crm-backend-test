@@ -500,7 +500,8 @@ router.post("/organizations", async (req, res) => {
     });
   } catch (err) {
     if (err?.code === "ER_DUP_ENTRY" || err?.code === "23505") {
-      const constraint = String(err.constraint || "");
+      const constraint = String(err.constraint || err.message || "");
+      if (constraint.includes("idx_channels_type_external_id")) return res.status(409).json({ error: "This call-provider number is already connected to another organization." });
       if (constraint.includes("workspace")) return res.status(409).json({ error: "Workspace slug is already taken." });
       if (constraint.includes("name")) return res.status(409).json({ error: "An organization with this name already exists." });
       if (constraint.includes("org_members") || constraint.includes("email")) return res.status(409).json({ error: "A member with this email already belongs to an organization." });

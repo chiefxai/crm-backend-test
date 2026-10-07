@@ -61,7 +61,11 @@ async function createOrganizationSetup({
     await require("./workspaceRepository").ensureDefault(orgId, client);
     await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
     if (callProvider) {
-      await client.query(`INSERT INTO channels (id,org_id,workspace_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$2,$3,$4,$5,$6,'connected',$7) ON DUPLICATE KEY UPDATE external_id=VALUES(external_id),config=VALUES(config),credentials_encrypted=VALUES(credentials_encrypted),status=VALUES(status)`, [crypto.randomUUID(),orgId,callProvider.provider,callProvider.phoneNumber,JSON.stringify({phoneNumber:callProvider.phoneNumber}),encryptJson({authId:callProvider.authId,authToken:callProvider.authToken}),now]);
+      // The route checks number availability, but a concurrent setup can
+      // claim it before this transaction inserts. Let the unique constraint
+      // reject that race; updating on duplicate would replace another
+      // organization's provider credentials.
+      await client.query(`INSERT INTO channels (id,org_id,workspace_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$2,$3,$4,$5,$6,'connected',$7)`, [crypto.randomUUID(),orgId,callProvider.provider,callProvider.phoneNumber,JSON.stringify({phoneNumber:callProvider.phoneNumber}),encryptJson({authId:callProvider.authId,authToken:callProvider.authToken}),now]);
       // Connecting the call-provider channel above only makes the number
       // usable for placing calls — it does not show up in the org's own
       // Virtual Numbers list (a separate `virtual_numbers` table) until
