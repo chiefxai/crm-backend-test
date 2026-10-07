@@ -42,7 +42,15 @@ function extractToken(req) {
   return null;
 }
 
-async function resolvePayload(req, token) {
+async function isPlatformAdminIdentity(payload, email) {
+  if (payload?.platformAdmin === true || payload?.admin === true) return true;
+  if (Array.isArray(payload?.realm_access?.roles) && payload.realm_access.roles.includes("platform-admin")) return true;
+  const allowed = (process.env.PLATFORM_ADMIN_EMAILS || "")
+    .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+  return allowed.length > 0 && !!email && allowed.includes(String(email).toLowerCase());
+}
+
+function resolvePayload(req, token) {
   return provider.verifyToken(token);
 }
 
@@ -69,7 +77,16 @@ async function requireAuth(req, res, next) {
     // The workspace switcher sends the selected organization explicitly.
     // The database membership lookup remains the authorization boundary.
     const requestedOrgId = String(req.get("X-Organization-Id") || "").trim() || null;
-    const membership = await db.findMembershipForUser(userId, userEmail, requestedOrgId);
+    let membership = await db.findMembershipForUser(userId, userEmail, requestedOrgId);
+
+    // Platform admins can explicitly switch into any active customer workspace.
+    // Normal users remain restricted to their own org memberships.
+    if (!membership?.orgId && requestedOrgId && isPlatformAdminIdentity(payload, userEmail)) {
+      const selectedOrg = await db.getOrg(requestedOrgId);
+      if (!selectedOrg) return res.status(404).json({ error: "Selected workspace not found" });
+      membership = { orgId: selectedOrg.id, role: "Super Admin", name: payload.name || userEmail, featureFlags: selectedOrg.featureFlags || [] };
+    }
+
     if (!membership?.orgId) {
       return res.status(403).json({ error: "This account is not a member of any organization" });
     }
@@ -213,4 +230,4 @@ function requirePlatformAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAuth, requireAuthIdentityOnly, requireInternalService, requireAuthOrInternal, requireRole, createSseTicket, requireSseTicket, createWebSocketTicket, verifyWebSocketTicket, requirePlatformAdmin, ADMIN_ROLES, DEV_ORG_ID, DEV_USER_ID };
+module.exports = { isPlatformAdminIdentity, requireAuth, requireAuthIdentityOnly, requireInternalService, requireAuthOrInternal, requireRole, createSseTicket, requireSseTicket, createWebSocketTicket, verifyWebSocketTicket, requirePlatformAdmin, ADMIN_ROLES, DEV_ORG_ID, DEV_USER_ID };
