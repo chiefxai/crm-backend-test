@@ -190,6 +190,7 @@ additional workspaces are enabled.
 - `2026100703_workspace_settings` adds operational workspace preferences.
 - `2026100704_workspace_role_authority` adds assignment provenance/reconciliation state.
 - `2026100705_workspace_configuration_keys` moves questionnaire and channel-type uniqueness to workspace scope.
+- `2026100706_scheduler_workspace_indexes` adds keyset-scan indexes for durable callback and active auto-dial scheduling.
 - The same connection holds the existing MySQL advisory lock throughout.
 - MySQL DDL is not transactional. Migration steps must be retry-safe, and a
   migration is recorded only after every step succeeds.
