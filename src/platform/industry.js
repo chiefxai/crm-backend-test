@@ -74,6 +74,19 @@ function getIndustryDefinition(industryKey) {
   const domainModel = buildDomainModel(pack);
   const domainObjects = domainModel.objects;
 
+  // Non-lending industries define their real pipeline on the primary
+  // pipeline-enabled domain object. Lending keeps its legacy universal
+  // lifecycle until its migration to generic objects is complete.
+  const pipelineSource = known === "lending"
+    ? industryPacks.getPipelineStageLabels(known)
+    : (pack.find((object) => object.hasPipeline && Array.isArray(object.stages))?.stages || [])
+      .map((stage) => ({ key: stage.key, label: stage.label }));
+  const pipelineStages = pipelineSource.map((stage, index, stages) => ({
+    ...stage,
+    order: (index + 1) * 10,
+    terminal: stage.key === "client" || stage.key === "converted" || stage.key === "sold" || stage.key === "enrolled" || stage.key === "discharged" || stage.key === "policy_issued" || stage.key === "settled" || stage.key === "completed" || stage.key === "delivered" || stage.key === "won" ? "won" : stage.key === "lost" || stage.key === "rejected" || stage.key === "returned" || stage.key === "cancelled" ? "lost" : undefined,
+  }));
+
   return {
     key: known,
     tagline: INDUSTRY_CONFIG[known]?.tagline || "AI-powered customer conversations and workflow automation.",
@@ -85,11 +98,7 @@ function getIndustryDefinition(industryKey) {
     pipeline: {
       key: known,
       label: labels.pipeline.plural,
-      stages: industryPacks.getPipelineStageLabels(known).map((stage, index, stages) => ({
-        ...stage,
-        order: (index + 1) * 10,
-        terminal: stage.key === "client" || stage.key === "converted" || stage.key === "sold" || stage.key === "enrolled" || stage.key === "discharged" || stage.key === "policy_issued" || stage.key === "settled" || stage.key === "completed" || stage.key === "delivered" || stage.key === "won" ? "won" : stage.key === "lost" || stage.key === "rejected" || stage.key === "returned" || stage.key === "cancelled" ? "lost" : undefined,
-      })),
+      stages: pipelineStages,
     },
     modules: (known === "lending"
       ? [["loan_lifecycle", "Loan Lifecycle", "/loans", "loans", "layers"]]
