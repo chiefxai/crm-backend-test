@@ -6,9 +6,14 @@ BUILD=false
 PULL=false
 DETACH=true
 DRY_RUN=false
+TRACE=false
+FORCE_RECREATE=false
+ALL_LOGS=false
+FOLLOW_LOGS=false
+SERVICE=""
 
 usage() {
-  echo "Usage: $0 [--dev|--uat|--prod] [--build] [--pull] [--foreground] [--dry-run]"
+  echo "Usage: $0 [--dev|--uat|--prod] [--pull] [--build] [--service NAME] [--force-recreate] [--trace] [--all-logs] [--follow-logs] [--foreground] [--dry-run]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -20,6 +25,15 @@ while [[ $# -gt 0 ]]; do
     --pull) PULL=true; shift ;;
     --foreground) DETACH=false; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
+    --trace) TRACE=true; shift ;;
+    --force-recreate) FORCE_RECREATE=true; shift ;;
+    --all-logs) ALL_LOGS=true; shift ;;
+    --follow-logs) FOLLOW_LOGS=true; shift ;;
+    --service)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "ERROR: --service requires a Compose service name."; usage; exit 1; }
+      SERVICE="$2"
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
   esac
@@ -45,6 +59,10 @@ fi
 
 COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" "${COMPOSE[@]}")
 
+if $TRACE; then
+  set -x
+fi
+
 if ! "${COMPOSE_CMD[@]}" config -q; then
   echo "ERROR: Docker Compose configuration is invalid."
   exit 1
@@ -63,7 +81,9 @@ fi
 
 ARGS=(up)
 $BUILD && ARGS+=(--build)
+$FORCE_RECREATE && ARGS+=(--force-recreate)
 $DETACH && ARGS+=(-d)
+[[ -n "$SERVICE" ]] && ARGS+=("$SERVICE")
 
 printf 'Deploying %s...\n' "$ENV"
 "${COMPOSE_CMD[@]}" "${ARGS[@]}"
@@ -84,3 +104,11 @@ if command -v curl >/dev/null 2>&1; then
 fi
 
 "${COMPOSE_CMD[@]}" ps
+
+echo "Recent deployment logs:"
+LOG_ARGS=(logs --tail=200)
+$FOLLOW_LOGS && LOG_ARGS+=(-f)
+if ! $ALL_LOGS; then
+  LOG_ARGS+=("${SERVICE:-app}")
+fi
+"${COMPOSE_CMD[@]}" "${LOG_ARGS[@]}"
