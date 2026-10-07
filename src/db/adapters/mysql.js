@@ -384,6 +384,7 @@ const TABLES = {
   },
   questionnaires: {
     pk: "org_id",
+    uniqueKeys: [["org_id", "workspace_id"]],
     columns: { org_id: "text", questions: "json", updated_at: "text" }
   },
   objects: {
@@ -416,7 +417,7 @@ const TABLES = {
   },
   channels: {
     pk: "id",
-    uniqueKeys: [["org_id", "type"], ["type", "external_id"]],
+    uniqueKeys: [["org_id", "workspace_id", "type"], ["type", "external_id"]],
     columns: {
       id: "text", org_id: "text", type: "text", external_id: "text", status: "text",
       config: "json", credentials_encrypted: "text", created_at: "text"
@@ -1185,7 +1186,9 @@ class QueryBuilder {
       for (const apiRow of rows) { const row=this._scopeInsert({...apiRow}); if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
         const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
         await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
-        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+        const scope = WORKSPACE_TABLES.has(table) ? this._workspaceScope(row) : null;
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?${scope ? " AND org_id=? AND COALESCE(workspace_id,org_id)=?" : ""}`,
+          [row[def.pk], ...(scope ? [scope.orgId,scope.workspaceId] : [])]); inserted.push(deserializeRow(table,r.rows[0]));
       } return this._finishWrite(inserted,mode);
     }
     if (this.op === "update") {
