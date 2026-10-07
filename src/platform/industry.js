@@ -75,30 +75,11 @@ function buildDomainModel(packObjects, industryKey) {
   };
 }
 
-const BUSINESS_TYPES = {
-  lending: { personal_lending: { label: "Personal Lending" } },
-  automotive: { vehicle_dealership: { label: "Vehicle Dealership" }, used_vehicle_dealership: { label: "Used Vehicle Dealership" }, service_center: { label: "Service Center" } },
-  real_estate: { real_estate_agency: { label: "Real Estate Agency" } },
-  healthcare: { clinic: { label: "Clinic" } },
-  insurance: { insurance_agency: { label: "Insurance Agency" } },
-};
-const TAGLINES = {
-  lending: "AI-powered lending conversations and loan lifecycle automation.",
-  automotive: "AI-powered vehicle enquiries, test drives, quotations, and sales.",
-  real_estate: "AI-powered property enquiries, visits, and deal management.",
-  healthcare: "AI-powered patient communication and appointment workflows.",
-  insurance: "AI-powered insurance enquiries, follow-ups, and policy workflows.",
-};
-
-const LABELS = {
-  lending: { workspace: ["Workspace", "Workspace"], lead: ["Lead", "Leads"], contact: ["Contact", "Contacts"], campaign: ["Campaign", "Campaigns"], pipeline: ["Pipeline", "Pipeline"], appointment: ["Appointment", "Appointments"], agent: ["Loan Agent", "Loan Agents"], enquiry: ["Enquiry", "Enquiries"], deal: ["Loan", "Loans"] },
-  automotive: { workspace: ["Dealership", "Dealership"], lead: ["Vehicle Enquiry", "Vehicle Enquiries"], contact: ["Customer", "Customers"], campaign: ["Sales Campaign", "Sales Campaigns"], pipeline: ["Sales Pipeline", "Sales Pipeline"], appointment: ["Test Drive", "Test Drives"], agent: ["Sales Executive", "Sales Executives"], enquiry: ["Vehicle Enquiry", "Vehicle Enquiries"], deal: ["Vehicle Sale", "Vehicle Sales"] },
-  real_estate: { workspace: ["Agency", "Agency"], lead: ["Property Lead", "Property Leads"], contact: ["Contact", "Contacts"], campaign: ["Campaign", "Campaigns"], pipeline: ["Sales Pipeline", "Sales Pipeline"], appointment: ["Site Visit", "Site Visits"], agent: ["Agent", "Agents"], enquiry: ["Property Enquiry", "Property Enquiries"], deal: ["Property Deal", "Property Deals"] },
-  healthcare: { workspace: ["Clinic", "Clinics"], lead: ["Patient Enquiry", "Patient Enquiries"], contact: ["Patient", "Patients"], campaign: ["Outreach Campaign", "Outreach Campaigns"], pipeline: ["Care Pipeline", "Care Pipeline"], appointment: ["Appointment", "Appointments"], agent: ["Care Representative", "Care Representatives"], enquiry: ["Patient Enquiry", "Patient Enquiries"], deal: ["Care Case", "Care Cases"] },
-  insurance: { workspace: ["Agency", "Agency"], lead: ["Policyholder Lead", "Policyholder Leads"], contact: ["Policyholder", "Policyholders"], campaign: ["Campaign", "Campaigns"], pipeline: ["Policy Pipeline", "Policy Pipeline"], appointment: ["Appointment", "Appointments"], agent: ["Insurance Agent", "Insurance Agents"], enquiry: ["Coverage Enquiry", "Coverage Enquiries"], deal: ["Policy", "Policies"] },
-};
-
+const INDUSTRY_CONFIG = industryPacks.INDUSTRY_CONFIG || {};
 function pair([singular, plural]) { return { singular, plural }; }
+function normalizeLabels(raw = {}) {
+  return Object.fromEntries(Object.entries(raw).map(([name, value]) => [name, pair(value)]));
+}
 
 function getIndustryDefinition(industryKey) {
   const key = industryKey || "lending";
@@ -110,10 +91,10 @@ function getIndustryDefinition(industryKey) {
 
   return {
     key: known,
-    tagline: TAGLINES[known] || "AI-powered customer conversations and workflow automation.",
-    businessTypes: BUSINESS_TYPES[known] || {},
-    label: industryPacks.listIndustries().find((item) => item.key === known)?.label || known,
-    labels,
+    tagline: INDUSTRY_CONFIG[known]?.tagline || "AI-powered customer conversations and workflow automation.",
+    businessTypes: INDUSTRY_CONFIG[known]?.businessTypes || {},
+    label: INDUSTRY_CONFIG[known]?.label || known,
+    labels: normalizeLabels(INDUSTRY_CONFIG[known]?.labels),
     domainObjects,
     domainModel,
     pipeline: {
