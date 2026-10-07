@@ -105,14 +105,10 @@ function getIndustryDefinition(industryKey) {
       ? [["loan_lifecycle", "Loan Lifecycle", "/loans", "loans", "layers"]]
       : known === "automotive"
       ? [
-          ["vehicle_inventory", "Vehicle Inventory", "/vehicles"],
-          ["test_drives", "Test Drives", "/test-drives"],
-          ["quotations", "Quotations", "/quotations"],
-          ["bookings", "Bookings", "/bookings"],
-          ["vehicle_sales", "Vehicle Sales", "/vehicle-sales"],
+          ["automotive_records", "Vehicle Operations", "/objects", "objects", "layers", "objects"],
         ]
       : domainObjects.map((object) => [object.key, object.pluralLabel, `/${object.key}`])
-    ).map(([key, label, route, tabId, iconKey]) => ({ key, label, route, ...(tabId ? { tabId } : {}), ...(iconKey ? { iconKey } : {}), domainSpecific: true })),
+    ).map(([key, label, route, tabId, iconKey, featureFlag]) => ({ key, label, route, ...(tabId ? { tabId } : {}), ...(iconKey ? { iconKey } : {}), ...(featureFlag ? { featureFlag } : {}), domainSpecific: true })),
   };
 }
 

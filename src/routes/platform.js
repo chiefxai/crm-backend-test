@@ -410,7 +410,12 @@ router.post("/organizations", async (req, res) => {
       if (emailExists) return res.status(409).json({ error: `A member with email "${adminEmail}" already belongs to an organization.` });
     }
 
-    const orgFeatureFlags = await platformAdmin.sanitizeFeatureKeys(Array.isArray(featureFlags) ? featureFlags : []);
+    const organizationIndustry = String(industry || "lending").trim().toLowerCase();
+    const defaultIndustryFeatureKeys = Object.keys(require("../platform/featureFlags").APP_FEATURE_DEFINITIONS)
+      .filter((key) => organizationIndustry === "lending" || key !== "loan_lifecycle");
+    const orgFeatureFlags = await platformAdmin.sanitizeFeatureKeys(
+      Array.isArray(featureFlags) ? featureFlags : defaultIndustryFeatureKeys
+    );
     if (!["pay_as_you_go", "recharge_based"].includes(billingMethod)) {
       return res.status(400).json({ error: "Invalid billing method." });
     }
