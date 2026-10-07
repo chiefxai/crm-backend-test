@@ -8,8 +8,9 @@
 
 const express = require("express");
 const db = require("../db/repository");
-const { requireAuth, requireAuthIdentityOnly } = require("../middleware/auth");
+const { requireAuth, requireAuthIdentityOnly, isPlatformAdminIdentity } = require("../middleware/auth");
 const industryPacks = require("../seed/industryPacks");
+const platformAdmin = require("../platform/admin");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.auth");
 
@@ -61,6 +62,24 @@ router.get("/industries", (_req, res) => {
 // stale workspace selection can never hide the user's other workspaces.
 router.get("/workspaces", requireAuthIdentityOnly, async (req, res) => {
   try {
+    if (isPlatformAdminIdentity(req.authClaims, req.userEmail)) {
+      const organizations = await platformAdmin.listOrganizations();
+      return res.json((organizations || []).map((org) => ({
+        membershipId: null,
+        orgId: org.id,
+        role: "Super Admin",
+        name: req.userName || req.userEmail || "Platform Admin",
+        featureFlags: org.featureFlags || [],
+        organization: {
+          id: org.id,
+          name: org.name,
+          workspaceName: org.workspaceName,
+          industry: org.industry,
+          status: org.status,
+        },
+      })));
+    }
+
     const workspaces = await db.listMembershipsForUser(req.userId, req.userEmail);
     res.json(workspaces);
   } catch (err) {
