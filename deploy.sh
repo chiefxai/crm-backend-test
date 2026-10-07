@@ -62,6 +62,12 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: Node.js is required to validate workspace scope before deployment."
+  exit 1
+fi
+node scripts/check-workspace-scope.js
+
 if [[ "$ENV" == prod ]] && grep -n 'CHANGE_ME' "$ENV_FILE" >/tmp/chiefvoice_change_me 2>/dev/null; then
   echo "ERROR: Production .env still contains CHANGE_ME placeholders:"
   cat /tmp/chiefvoice_change_me

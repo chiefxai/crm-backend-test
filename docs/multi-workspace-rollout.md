@@ -290,6 +290,7 @@ limited to one of the categories below:
 | `systemReadOnly(reason)` calls in repository/channel/platform code | Explicit global ownership checks, platform aggregates, or background-job scans | Review each new reason; system mode is select-only and must never be used to mutate tenant data |
 | `src/db/repositories/organizationRepository.js` | Organization metadata and organization bootstrap transaction; bootstrap creates exactly one default workspace | Organization-wide fields stay here; child workspace settings belong in `workspaceRepository` |
 | `src/db/repositories/workspaceRepository.js` | Workspace directory, settings, assignments and authorization state, keyed by both organization and workspace | Provisioning must use one transaction for workspace creation plus initial admin assignment and audit event |
+| `src/db/repositories/workspaceSharingRepository.js` | Organization-scoped sharing control rows; record reads bind the active grant, source workspace, target workspace and object | Keep grant rows outside operational query-builder scope only while explicit source/target predicates and the transactional active-grant lock remain in place |
 | `src/platform/dataRetention.js` retention | Iterates every workspace under organization policy and restores that workspace scope for each retention pass | Preserve per-workspace scope; destructive operations must remain within the active loop's workspace |
 | `src/platform/dataRetention.js` backup | Intentional organization-wide export under a repeatable-read snapshot; row queries constrain `org_id` and recordings preserve workspace ownership | Keep separate from customer workspace reads; validate private storage and paged snapshot behavior before enabling child workspaces |
 | `src/storage/index.js` playback resolution | Internal object URLs are accepted only from the configured public URL, AWS S3 bucket host, or configured S3-compatible endpoint; recording keys are checked against active workspace ownership before signing | External URLs with signature-like query parameters are not sufficient to identify objects in our bucket; actual bucket privacy and signed playback still require provider-side verification |
@@ -299,7 +300,9 @@ limited to one of the categories below:
 Remaining concrete audit work is to check every raw SQL statement touching an
 operational table for `org_id` plus workspace ownership, check storage bucket
 and signed-URL policy, and review every provider callback and worker entry point
-for restored async scope. This inventory is not runtime proof: MySQL migrations,
+for restored async scope. Run `npm run check:workspace-scope` when changing the
+operational table inventory; it compares runtime scope, migration, and adapter
+metadata without connecting to MySQL. This inventory is not runtime proof: MySQL migrations,
 full-stack cross-workspace isolation, provider callbacks, and storage policy
 still need deployment-environment validation. Do not enable provisioning until
 those checks pass.

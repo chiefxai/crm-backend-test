@@ -10,6 +10,7 @@
     "migrate:channel-credentials": "node scripts/migrate-channel-credentials.js",
     "test:mysql": "MYSQL_INTEGRATION_TESTS=1 jest tests/mysqlIntegration.test.js --runInBand --forceExit",
     "check:deps": "node scripts/check-dependency-lock.js",
+    "check:workspace-scope": "node scripts/check-workspace-scope.js",
     "start:callback-scheduler": "node callback-scheduler.js"
   },
   "jest": {
