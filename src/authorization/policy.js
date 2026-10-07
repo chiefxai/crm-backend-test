@@ -41,6 +41,7 @@ function requestPermission(req) {
   const path = new URL(req.originalUrl || req.url,'http://local').pathname.toLowerCase().replace(/\/+$/,'');
   const read = ['GET','HEAD','OPTIONS'].includes(req.method);
   if (['/api/auth/me','/api/auth/roles','/api/settings/me'].includes(path)) return null;
+  if (path === '/api/settings/workspaces') return read ? 'organization.read' : 'organization.manage';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';
   if (/^\/api\/settings\/workspace\/members(?:\/|$)/.test(path)) return 'workspace.members.manage';
   if (/^\/api\/settings\/team(?:\/|$)/.test(path)) return read ? 'organization.members.read' : 'organization.members.manage';

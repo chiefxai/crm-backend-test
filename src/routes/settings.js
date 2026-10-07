@@ -19,6 +19,7 @@ const telephony = require("../telephony/registry");
 const channelsEngine = require("../channels/engine");
 const { getIndustryDefinition } = require("../platform/industry");
 const { WORKSPACE_ROLES } = require("../authorization/policy");
+const { multipleWorkspacesEnabled } = require("../workspaces/capabilities");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
@@ -254,6 +255,36 @@ router.delete("/workspace/members/:memberId", requireAuth, requirePermission("wo
     auditLog.record(req.orgId,req,"workspace.member.revoke","workspace_member",req.params.memberId,{ workspaceId:req.workspaceId,role:existing.role });
     res.json(assignment);
   } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
+});
+
+router.get("/workspaces", requireAuth, async (req,res) => {
+  if (!multipleWorkspacesEnabled()) return res.status(404).json({ error:"Workspace provisioning is not enabled" });
+  try {
+    const membership = await db.findMembershipForUser(req.userId,req.userEmail,req.orgId);
+    const workspaces = hasPermission(req,"organization.manage")
+      ? await workspaceRepository.listForOrg(req.orgId)
+      : membership?.memberId ? await workspaceRepository.listForMember(req.orgId,membership.memberId) : [];
+    res.json(workspaces);
+  } catch (err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
+});
+
+router.post("/workspaces", requireAuth, requirePermission("organization.manage"), async (req,res) => {
+  if (!multipleWorkspacesEnabled()) return res.status(404).json({ error:"Workspace provisioning is not enabled" });
+  const name = String(req.body?.name || "").trim();
+  const industry = String(req.body?.industry || "").trim();
+  const branchName = String(req.body?.branchName || "").trim() || null;
+  if (!name || name.length > 120) return res.status(400).json({ error:"Workspace name must contain 1 to 120 characters" });
+  if (branchName && branchName.length > 160) return res.status(400).json({ error:"Branch name must be 160 characters or fewer" });
+  if (!industryPacks.listIndustries().some(item => item.key === industry)) {
+    return res.status(400).json({ error:"Select a supported workspace industry" });
+  }
+  try {
+    const membership = await db.findMembershipForUser(req.userId,req.userEmail,req.orgId);
+    if (!membership?.memberId) return res.status(403).json({ error:"An active organization membership is required" });
+    const workspace = await workspaceRepository.createWorkspace(req.orgId,{ name,industry,branchName },membership.memberId);
+    await auditLog.record(req.orgId,req,"workspace.create","workspace",workspace.id,{ name,industry,branchName });
+    res.status(201).json(workspace);
+  } catch (err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
 });
 
 // Returns the logged-in user's own membership info including granted feature flags.

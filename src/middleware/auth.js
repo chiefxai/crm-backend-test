@@ -16,6 +16,7 @@ const { runWithScope } = require("../workspaces/scope");
 
 const policy = require('../authorization/policy');
 const workspaces = require('../db/repositories/workspaceRepository');
+const { multipleWorkspacesEnabled } = require('../workspaces/capabilities');
 const jwt      = require("jsonwebtoken");
 const db       = require("../db/repository");
 const provider = require("../auth");        // plug-and-play provider
@@ -61,13 +62,13 @@ function resolvePayload(req, token) {
 
 async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdmin = false,membership: knownMembership }) {
   if (isDevMode() && orgId === DEV_ORG_ID && userId === DEV_USER_ID) return policy.authorization({ orgRole: 'Organization Admin',workspaceRole: 'Workspace Admin' });
-  if (workspaceId !== orgId) throw Object.assign(new Error('Workspace is unavailable during the isolation migration'),{ statusCode: 403 });
+  if (workspaceId !== orgId && !multipleWorkspacesEnabled()) throw Object.assign(new Error('Workspace is unavailable until multi-workspace isolation is enabled'),{ statusCode: 403 });
   const membership = knownMembership === undefined ? await db.findMembershipForUser(userId,email,orgId) : knownMembership;
   if (!membership && !platformAdmin) throw Object.assign(new Error('Active organization membership required'),{ statusCode: 403 });
   let state = await workspaces.getAuthorizationState(orgId,workspaceId,membership?.memberId);
   if (!state) { await workspaces.getDefault(orgId); state = await workspaces.getAuthorizationState(orgId,workspaceId,membership?.memberId); }
   if (!state || state.workspace_status !== 'Active' || state.organization_status === 'Suspended') throw Object.assign(new Error('Active workspace required'),{ statusCode: 403 });
-  if (membership?.memberId && !state.role) {
+  if (membership?.memberId && !state.role && workspaceId === orgId) {
     // Only legacy imports without any assignment are reconciled. Inactive
     // assignments are preserved and never reactivated by authentication.
     await workspaces.ensureDefaultMembership(orgId,membership.memberId);
@@ -140,10 +141,10 @@ async function requireAuth(req, res, next) {
     // routable. Reject child IDs explicitly rather than silently serving
     // organization-wide data under a different workspace label.
     const requestedWorkspaceId = String(req.get("X-Workspace-Id") || "").trim();
-    if (requestedWorkspaceId && requestedWorkspaceId !== membership.orgId) {
-      return res.status(403).json({ error: "Workspace is unavailable during the isolation migration" });
+    if (requestedWorkspaceId && requestedWorkspaceId !== membership.orgId && !multipleWorkspacesEnabled()) {
+      return res.status(403).json({ error: "Workspace is unavailable until multi-workspace isolation is enabled" });
     }
-    req.workspaceId = membership.orgId;
+    req.workspaceId = requestedWorkspaceId || membership.orgId;
     req.userId    = userId;
     req.userEmail = userEmail;
     req.userName  = payload.name || membership.name || null;

@@ -1,7 +1,8 @@
-// Child workspace persistence. No second workspace provisioning is exposed
-// until all operational repositories and background jobs enforce its scope.
+// Workspace persistence and provisioning boundary.
 const db = require('../client');
 const { pool } = require('../pool');
+const crypto = require('crypto');
+const industryPacks = require('../../seed/industryPacks');
 function parseSettings(value) {
   if (typeof value === "string") { try { value = JSON.parse(value); } catch { value = {}; } }
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -51,6 +52,73 @@ async function listForOrg(orgId) {
   await ensureDefault(orgId);
   const { rows } = await pool.query('SELECT * FROM workspaces WHERE org_id=? ORDER BY is_default DESC,id', [orgId]);
   return rows.map(row => toApi(row));
+}
+async function listForMember(orgId, memberId) {
+  await db.ready;
+  const { rows } = await pool.query(`SELECT w.*,wm.role AS workspace_role FROM workspaces w
+    INNER JOIN workspace_members wm ON wm.org_id=w.org_id AND wm.workspace_id=w.id AND wm.member_id=?
+    INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
+    WHERE w.org_id=? AND w.status='Active' AND wm.status='Active'
+      AND COALESCE(NULLIF(m.status,''),'Active')='Active'
+    ORDER BY w.is_default DESC,w.name,w.id`,[memberId,orgId]);
+  return rows.map(row => ({ ...toApi(row), role: row.workspace_role }));
+}
+async function seedIndustryObjects(client,orgId,workspaceId,industry,createdAt) {
+  const pack = industryPacks.getPack(industry) || [];
+  for (let objectPosition=0; objectPosition<pack.length; objectPosition++) {
+    const spec = pack[objectPosition];
+    const objectId = crypto.randomUUID();
+    await client.query(`INSERT INTO objects (id,org_id,workspace_id,\`key\`,label,icon,description,has_pipeline,position,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`,[objectId,orgId,workspaceId,spec.key,spec.label,spec.icon || 'Layers',spec.description || null,spec.hasPipeline !== false,objectPosition,createdAt]);
+    for (let position=0;position<(spec.fields || []).length;position++) {
+      const field = spec.fields[position];
+      await client.query(`INSERT INTO object_fields (id,org_id,workspace_id,object_id,\`key\`,label,type,options,required,position,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,[crypto.randomUUID(),orgId,workspaceId,objectId,field.key,field.label,field.type || 'text',JSON.stringify(field.options || []),!!field.required,position,createdAt]);
+    }
+    for (let position=0;position<(spec.stages || []).length;position++) {
+      const stage = spec.stages[position];
+      await client.query(`INSERT INTO object_stages (id,org_id,workspace_id,object_id,\`key\`,label,color,position,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`,[crypto.randomUUID(),orgId,workspaceId,objectId,stage.key,stage.label,stage.color || '#6366f1',position,createdAt]);
+    }
+  }
+}
+async function createWorkspace(orgId, { name, industry, branchName = null }, initialAdminMemberId) {
+  await db.ready;
+  const client = await pool.connect();
+  const workspaceId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const maxWorkspaces = Math.max(2, Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG) || 100, 1000));
+  try {
+    await client.query('BEGIN');
+    const { rows: organizations } = await client.query(
+      'SELECT id,status FROM organizations WHERE id=? FOR UPDATE',[orgId]);
+    if (!organizations[0] || String(organizations[0].status || 'Active').toLowerCase() === 'suspended') {
+      throw Object.assign(new Error('An active organization is required'),{ statusCode:404 });
+    }
+    const { rows: countRows } = await client.query(
+      'SELECT COUNT(*) AS workspace_count FROM workspaces WHERE org_id=?',[orgId]);
+    if (Number(countRows[0]?.workspace_count || 0) >= maxWorkspaces) {
+      throw Object.assign(new Error(`Workspace limit reached (${maxWorkspaces})`),{ statusCode:409 });
+    }
+    const { rows: duplicateRows } = await client.query(
+      'SELECT id FROM workspaces WHERE org_id=? AND LOWER(name)=LOWER(?) LIMIT 1',[orgId,name]);
+    if (duplicateRows[0]) throw Object.assign(new Error('A workspace with this name already exists'),{ statusCode:409 });
+    const { rows: members } = await client.query(
+      `SELECT id FROM org_members WHERE org_id=? AND id=?
+       AND COALESCE(NULLIF(status,''),'Active')='Active' FOR UPDATE`,[orgId,initialAdminMemberId]);
+    if (!members[0]) throw Object.assign(new Error('An active organization member is required to administer the workspace'),{ statusCode:403 });
+
+    await client.query(`INSERT INTO workspaces (id,org_id,name,industry,branch_name,status,is_default,created_at)
+      VALUES (?,?,?,?,?,'Active',0,?)`,[workspaceId,orgId,name,industry,branchName,now]);
+    await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,role_source,created_at)
+      VALUES (?,?,?,'Workspace Admin','Active','manual',?)`,[workspaceId,orgId,initialAdminMemberId,now]);
+    await seedIndustryObjects(client,orgId,workspaceId,industry,now);
+    await client.query('COMMIT');
+    return { id:workspaceId,orgId,name,industry,branchName,status:'Active',isDefault:false };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw error;
+  } finally { client.release(); }
 }
 async function updateSettings(orgId, workspaceId, patch) {
   await db.ready;
@@ -158,4 +226,4 @@ async function getAuthorizationState(orgId,workspaceId,memberId) {
     WHERE w.org_id=? AND w.id=?`,[memberId || null,orgId,workspaceId]);
   return rows[0] || null;
 }
-module.exports = { getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };
+module.exports = { getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };

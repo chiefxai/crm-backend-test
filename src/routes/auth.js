@@ -14,6 +14,7 @@ const workspaceRepository = require("../db/repositories/workspaceRepository");
 const policy = require("../authorization/policy");
 const platformAdmin = require("../platform/admin");
 const { getLogger } = require("../observability/logger");
+const { multipleWorkspacesEnabled } = require("../workspaces/capabilities");
 const log = getLogger("routes.auth");
 
 const router = express.Router();
@@ -66,30 +67,35 @@ router.get("/workspaces", requireAuthIdentityOnly, async (req, res) => {
   try {
     if (isPlatformAdminIdentity(req.authClaims, req.userEmail)) {
       const organizations = await platformAdmin.listOrganizations();
-      return res.json((organizations || []).map((org) => ({
-        membershipId: null,
-        orgId: org.id,
-        workspaceId: org.id,
-        workspace: { id: org.id, orgId: org.id, name: org.workspaceName || org.name, industry: org.industry, isDefault: true },
-        role: "Super Admin",
-        name: req.userName || req.userEmail || "Platform Admin",
-        featureFlags: org.featureFlags || [],
-        organization: {
-          id: org.id,
-          name: org.name,
-          workspaceName: org.workspaceName,
-          industry: org.industry,
-          status: org.status,
-        },
-      })));
+      const rows = [];
+      for (const org of organizations || []) {
+        const workspaces = multipleWorkspacesEnabled()
+          ? await workspaceRepository.listForOrg(org.id)
+          : [await workspaceRepository.getDefault(org.id)];
+        for (const workspace of workspaces.filter(Boolean)) rows.push({
+          membershipId: null, orgId: org.id, workspaceId: workspace.id, workspace,
+          role: "Super Admin", workspaceRole: "Workspace Admin",
+          name: req.userName || req.userEmail || "Platform Admin",
+          featureFlags: org.featureFlags || [],
+          organization: { id: org.id,name: org.name,workspaceName: org.workspaceName,industry: org.industry,status: org.status },
+        });
+      }
+      return res.json(rows);
     }
 
     const workspaces = await db.listMembershipsForUser(req.userId, req.userEmail);
-    res.json(await Promise.all(workspaces.map(async (membership) => {
-      const workspace = await workspaceRepository.getDefault(membership.orgId);
+    const rows = [];
+    for (const membership of workspaces) {
       if (membership.membershipId) await workspaceRepository.ensureDefaultMembership(membership.orgId, membership.membershipId);
-      return { ...membership, workspaceId: membership.orgId, workspace };
-    })));
+      const available = multipleWorkspacesEnabled()
+        ? await workspaceRepository.listForMember(membership.orgId,membership.membershipId)
+        : [await workspaceRepository.getDefault(membership.orgId)];
+      for (const workspace of available.filter(Boolean)) rows.push({
+        ...membership,workspaceId:workspace.id,workspace,
+        workspaceRole:workspace.role || (workspace.isDefault ? membership.role : null),
+      });
+    }
+    res.json(rows);
   } catch (err) {
     log.error("❌ /api/auth/workspaces:", err.message);
     res.status(500).json({ error: "Failed to load workspaces" });
@@ -105,13 +111,15 @@ router.get('/roles',requireAuth,(req,res) => res.json({
 router.get("/me", requireAuth, async (req, res) => {
   try {
     const org = await db.getOrg(req.orgId);
+    const activeWorkspace = await workspaceRepository.getActive(req.orgId,req.workspaceId);
+    if (activeWorkspace) delete activeWorkspace.settings;
     res.json({
       user: { id: req.userId, email: req.userEmail, name: req.userName, role: req.userRole },
       org: org ? { id: org.id,name: org.name,status: org.status,industry: org.industry,
         workspaceName: org.workspaceName,subscriptionPlan: org.subscriptionPlan } : null,
       authorization: req.authorization,
-      workspace: await workspaceRepository.getDefault(req.orgId),
-      workspaceCapabilities: { multipleWorkspaces: false, sharing: false },
+      workspace: activeWorkspace,
+      workspaceCapabilities: { multipleWorkspaces: multipleWorkspacesEnabled(), sharing: false },
     });
   } catch (err) {
     log.error("❌ /api/auth/me:", err.message);
