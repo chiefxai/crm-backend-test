@@ -136,9 +136,24 @@ const PACKS = {
         { key: "sold", label: "Sold", color: "#22c55e" },
         { key: "lost", label: "Lost", color: "#ef4444" }
       ]
+    },
+    {
+      key: "vehicle", label: "Vehicles", icon: "Car", description: "Vehicle inventory available for sale", fields: [
+        { key: "vin", label: "VIN", type: "text" }, { key: "make", label: "Make", type: "text" }, { key: "model", label: "Model", type: "text" },
+        { key: "year", label: "Year", type: "number" }, { key: "price", label: "Price", type: "currency" },
+        { key: "status", label: "Status", type: "select", options: ["available", "reserved", "sold"] }
+      ]
+    },
+    { key: "vehicle_quotation", label: "Quotations", icon: "FileText", description: "Vehicle quotations", fields: [
+      { key: "vehicleId", label: "Vehicle", type: "relation", relationObjectKey: "vehicle" }, { key: "amount", label: "Amount", type: "currency" }
+    ] },
+    { key: "vehicle_booking", label: "Bookings", icon: "CalendarCheck", description: "Vehicle bookings", fields: [
+      { key: "vehicleId", label: "Vehicle", type: "relation", relationObjectKey: "vehicle" }, { key: "contactId", label: "Customer", type: "relation", relationObjectKey: "contact" }
+    ] },
+    { key: "vehicle_sale", label: "Vehicle Sales", icon: "BadgeDollarSign", description: "Completed vehicle sales", fields: [
+      { key: "vehicleId", label: "Vehicle", type: "relation", relationObjectKey: "vehicle" }, { key: "contactId", label: "Customer", type: "relation", relationObjectKey: "contact" }, { key: "amount", label: "Sale Amount", type: "currency" }
     }
-  ],
-
+  ]
   it_sales: [
     {
       key: "it_lead",
