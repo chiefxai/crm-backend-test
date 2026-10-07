@@ -419,6 +419,9 @@ router.patch("/team/:id", requireAuth, requirePermission("organization.members.m
     if (!existing) return res.status(404).json({ error: "Team member not found" });
 
     if (isAuthPrivilegedRole(existing.role) && !req.isPlatformAdmin) return res.status(403).json({ error: 'Privileged organization memberships require platform administration' });
+    if (existing.role === "Owner" && ((patch.role && patch.role !== "Owner") || (patch.status && String(patch.status).toLowerCase() !== "active"))) {
+      return res.status(409).json({ error: "Transfer organization ownership through the owner-transfer action before changing or deactivating the Owner membership." });
+    }
     const updated = await db.patch("team", req.orgId, req.params.id, patch);
     auditLog.record(req.orgId, req, "team.update", "team_member", req.params.id, patch);
     res.json(updated);
@@ -428,11 +431,27 @@ router.patch("/team/:id", requireAuth, requirePermission("organization.members.m
 router.delete("/team/:id", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
   try {
     const existing = await db.getTeamMemberById(req.orgId,req.params.id);
+    if (existing?.role === "Owner") return res.status(409).json({ error: "Transfer organization ownership before removing the Owner membership." });
     if (existing && isAuthPrivilegedRole(existing.role) && !req.isPlatformAdmin) return res.status(403).json({ error: 'Privileged organization memberships require platform administration' });
     await db.remove("team", req.orgId, req.params.id);
     auditLog.record(req.orgId, req, "team.remove", "team_member", req.params.id, {});
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+});
+
+router.post("/team/owner-transfer", requireAuth, requirePermission("organization.members.manage"), async (req,res) => {
+  if (req.userRole !== "Owner") return res.status(403).json({ error: "Only the current organization Owner can transfer ownership." });
+  const newOwnerId = String(req.body?.memberId || "").trim();
+  if (!newOwnerId) return res.status(400).json({ error: "memberId is required" });
+  try {
+    const current = await db.findMembershipForUser(req.userId,req.userEmail,req.orgId);
+    if (!current?.memberId) return res.status(403).json({ error: "An active Owner membership is required." });
+    const result = await db.transferOrgOwner(req.orgId,current.memberId,newOwnerId);
+    auditLog.record(req.orgId,req,"organization.owner.transfer","organization_member",newOwnerId,{
+      fromMemberId:result.from.id,fromEmail:result.from.email,toMemberId:result.to.id,toEmail:result.to.email,
+    });
+    res.json({ success:true,...result });
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
 router.post("/team/sync", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {

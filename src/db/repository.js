@@ -1273,6 +1273,7 @@ const orgRowToApi = organizationRepository.toApi;
 async function createOrg(args) { return organizationRepository.create(args); }
 async function createOrganizationSetup(args) { return organizationRepository.createOrganizationSetup(args); }
 async function getOrg(orgId) { return organizationRepository.get(orgId); }
+async function transferOrgOwner(orgId,currentOwnerId,newOwnerId) { return organizationRepository.transferOwner(orgId,currentOwnerId,newOwnerId); }
 async function updateOrg(orgId, apiPatch) { return organizationRepository.update(orgId, apiPatch); }
 async function createOrgCloudProject(args) { return organizationRepository.createCloudProjectRecord(args); }
 async function getOrgCloudProject(orgId) { return organizationRepository.getCloudProject(orgId); }
@@ -2798,6 +2799,7 @@ module.exports = {
   createOrg,
   createOrganizationSetup,
   getOrg,
+  transferOrgOwner,
   updateOrg,
   updateSystemAgentPrompt,
   createOrgCloudProject,

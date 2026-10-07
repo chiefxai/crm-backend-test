@@ -163,6 +163,10 @@ remain a separate check; a feature flag is never an authorization grant.
   `manual`, preserve organization roles separately, reject invalid/inactive
   members, protect the last active Workspace Admin and write audit events.
   The settings UI exposes workspace role assignments separately from org roles.
+- Organization Owners can transfer ownership to another active organization
+  member in a locked transaction. Generic team update/delete routes cannot
+  change or remove the active Owner; the handoff records both identities in the
+  organization audit log and has a dedicated settings action.
 - Frontend navigation, page access, privileged actions and automatic sync use
   server permissions; Viewers receive a read-only notice and cannot submit
   writes through the API client or server. Billing-only users reach the billing
@@ -249,9 +253,8 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
 3. Confirm the migration and cross-workspace behavior against MySQL and the full
    application stack before allowing independent workspace data.
 4. Organization/workspace permission enforcement and workspace role assignment
-   CRUD/UI are implemented. Verify revocation and role boundaries against the
-   full stack before enabling additional workspaces; add owner handoff safeguards
-   as part of workspace management.
+   CRUD/UI and explicit owner handoff are implemented. Verify revocation and
+   role boundaries against the full stack before enabling additional workspaces.
 5. Add workspace provisioning/settings/member management and workspace industry
    configuration to both backend and frontend. Enable additional workspaces only
    after the operational-scope audit is complete.

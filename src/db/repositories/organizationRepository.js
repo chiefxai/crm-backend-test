@@ -193,6 +193,35 @@ async function markCloudProjectRetained(orgId, organizationName) {
   return data;
 }
 
+async function transferOwner(orgId, currentOwnerId, newOwnerId) {
+  if (!currentOwnerId || !newOwnerId || currentOwnerId === newOwnerId) {
+    throw Object.assign(new Error("Choose a different active organization member"),{ statusCode:400 });
+  }
+  await supabase.ready;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT id FROM organizations WHERE id=? FOR UPDATE",[orgId]);
+    const { rows } = await client.query(`SELECT id,email,role,status FROM org_members
+      WHERE org_id=? AND id IN (?,?) ORDER BY id FOR UPDATE`,[orgId,currentOwnerId,newOwnerId]);
+    const current = rows.find(row => row.id === currentOwnerId);
+    const target = rows.find(row => row.id === newOwnerId);
+    if (!current || current.role !== "Owner" || String(current.status || "Active").toLowerCase() !== "active") {
+      throw Object.assign(new Error("An active organization Owner is required to transfer ownership"),{ statusCode:409 });
+    }
+    if (!target || String(target.status || "Active").toLowerCase() !== "active") {
+      throw Object.assign(new Error("The new Owner must be an active member of this organization"),{ statusCode:404 });
+    }
+    await client.query("UPDATE org_members SET role='Organization Admin' WHERE org_id=? AND id=?",[orgId,currentOwnerId]);
+    await client.query("UPDATE org_members SET role='Owner' WHERE org_id=? AND id=?",[orgId,newOwnerId]);
+    await client.query("COMMIT");
+    return { from:{ id:current.id,email:current.email,role:"Organization Admin" },to:{ id:target.id,email:target.email,role:"Owner" } };
+  } catch (error) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    throw error;
+  } finally { client.release(); }
+}
+
 async function updateSystemAgentPrompt(orgId, agentId, prompt) {
   const client = await pool.connect();
   try {
@@ -207,4 +236,4 @@ async function updateSystemAgentPrompt(orgId, agentId, prompt) {
   } finally { client.release(); }
 }
 
-module.exports = { CORE_FIELDS, create, createOrganizationSetup, get, update, toApi, createCloudProjectRecord, getCloudProject, getCloudProjectWithCredentials, toApiCloudProject, updateCloudProject, markCloudProjectRetained, listCloudProjectsByStatus, updateSystemAgentPrompt };
+module.exports = { CORE_FIELDS, create, createOrganizationSetup, get, update, toApi, createCloudProjectRecord, getCloudProject, getCloudProjectWithCredentials, toApiCloudProject, updateCloudProject, markCloudProjectRetained, listCloudProjectsByStatus, updateSystemAgentPrompt, transferOwner };
