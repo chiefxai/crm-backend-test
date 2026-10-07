@@ -1,5 +1,6 @@
 const router=require('express').Router();
 const { requireAuth,requirePermission }=require('../middleware/auth');
+const db=require('../db/repository');
 const workspaceSharing=require('../db/repositories/workspaceSharingRepository');
 const auditLog=require('../platform/auditLog');
 const { workspaceSharingEnabled }=require('../workspaces/capabilities');
@@ -48,6 +49,37 @@ router.delete('/grants/:id',requirePermission('workspace.settings.manage'),requi
     await auditLog.record(req.orgId,req,'workspace.share.revoke','workspace_share',req.params.id,{});
     res.json({success:true});
   } catch(error) { res.status(error.statusCode||500).json({error:'Could not revoke workspace sharing grant'}); }
+});
+
+router.get('/proposals',requirePermission('workspace.settings.manage'),requireWorkspaceAdmin,async(req,res)=>{
+  try { res.json(await workspaceSharing.listProposals(req.orgId,req.workspaceId)); }
+  catch(error) { res.status(error.statusCode||500).json({error:'Could not load workspace edit proposals'}); }
+});
+
+router.post('/records/:grantId/proposals',requirePermission('workspace.share.propose'),async(req,res)=>{
+  const recordRef=String(req.body?.recordRef||'');
+  const patch=req.body?.patch;
+  if (!recordRef || !patch || typeof patch!=='object' || Array.isArray(patch)) return res.status(400).json({error:'A shared record reference and field changes are required'});
+  try {
+    const membership=await db.findMembershipForUser(req.userId,req.userEmail,req.orgId);
+    if (!membership?.memberId) return res.status(403).json({error:'Active organization membership required'});
+    const id=await workspaceSharing.createProposal(req.orgId,req.workspaceId,req.params.grantId,recordRef,patch,membership.memberId);
+    await auditLog.record(req.orgId,req,'workspace.share.proposal.create','workspace_share_proposal',id,{grantId:req.params.grantId,fieldKeys:Object.keys(patch)});
+    res.status(201).json({id,status:'pending'});
+  } catch(error) { res.status(error.statusCode||500).json({error:error.statusCode?error.message:'Could not submit edit proposal'}); }
+});
+
+router.post('/proposals/:id/review',requirePermission('workspace.settings.manage'),requireWorkspaceAdmin,async(req,res)=>{
+  const decision=String(req.body?.decision||'').trim();
+  if (!['approved','rejected'].includes(decision)) return res.status(400).json({error:'Choose approve or reject'});
+  try {
+    const membership=await db.findMembershipForUser(req.userId,req.userEmail,req.orgId);
+    if (!membership?.memberId) return res.status(403).json({error:'Active organization membership required'});
+    const result=await workspaceSharing.reviewProposal(req.orgId,req.workspaceId,req.params.id,decision,membership.memberId);
+    await auditLog.record(req.orgId,req,`workspace.share.proposal.${result.status}`,'workspace_share_proposal',req.params.id,{decision});
+    if (result.status==='stale') return res.status(409).json({status:'stale',error:'Source record changed; this proposal was closed without applying it.'});
+    res.json(result);
+  } catch(error) { res.status(error.statusCode||500).json({error:error.statusCode?error.message:'Could not review edit proposal'}); }
 });
 
 router.get('/records/:grantId',requirePermission('workspace.read'),async(req,res)=>{

@@ -17,8 +17,9 @@ access is checked before permissions and operational data load.
 Workspace provisioning and same-organization read sharing are implemented
 behind independent environment gates. Both `MULTI_WORKSPACE_ENABLED=true` and
 `WORKSPACE_ISOLATION_VERIFIED=true` are required for child workspace access;
-sharing additionally requires `WORKSPACE_SHARING_ENABLED=true`. Keep these off
-until the VM's isolation audit and MySQL migration have been reviewed.
+sharing additionally requires `WORKSPACE_SHARING_ENABLED=true` and a private
+`WORKSPACE_SHARE_TOKEN_SECRET` of at least 32 characters. Keep these off until
+the VM's isolation audit and MySQL migration have been reviewed.
 
 ## Implemented in the isolation release
 
@@ -115,12 +116,19 @@ are read-only, limited to an explicit field allowlist, expire within at most one
 year, and can be revoked by a Workspace Admin of the source workspace. The
 target can read projected records only while the grant is active; it cannot
 edit source data. Record IDs, stages, timestamps, and fields outside the
-allowlist are not included in the shared response; the shared list uses bounded
-keyset pagination. Grant validation and page reads hold a shared row lock in
+allowlist are not included in the shared response; opaque encrypted record
+references and page cursors hide source IDs and timestamps while the list uses
+bounded keyset pagination. Grant validation and page reads hold a shared row lock in
 one transaction, so revocation waits for any already-started page read and
 prevents later reads. Suspended source workspaces invalidate their grants. The
-sharing UI/API remains disabled unless all three gates are enabled. Full MySQL
-and VM behavior still needs to be verified before turning on either gate.
+target may propose changes to allowlisted fields using an encrypted record
+reference. The source Workspace Admin reviews each proposal; approval checks
+the source record version, preserves its previous data on the proposal history,
+and updates the record atomically. Stale proposals are closed without applying
+their patch. The
+sharing UI/API remains disabled unless all three feature flags and the private
+token secret are configured. Full MySQL and VM behavior still needs to be
+verified before enabling sharing.
 
 ## Role enforcement release
 
@@ -290,7 +298,7 @@ limited to one of the categories below:
 | `systemReadOnly(reason)` calls in repository/channel/platform code | Explicit global ownership checks, platform aggregates, or background-job scans | Review each new reason; system mode is select-only and must never be used to mutate tenant data |
 | `src/db/repositories/organizationRepository.js` | Organization metadata and organization bootstrap transaction; bootstrap creates exactly one default workspace | Organization-wide fields stay here; child workspace settings belong in `workspaceRepository` |
 | `src/db/repositories/workspaceRepository.js` | Workspace directory, settings, assignments and authorization state, keyed by both organization and workspace | Provisioning must use one transaction for workspace creation plus initial admin assignment and audit event |
-| `src/db/repositories/workspaceSharingRepository.js` | Organization-scoped sharing control rows; record reads bind the active grant, source workspace, target workspace and object | Keep grant rows outside operational query-builder scope only while explicit source/target predicates and the transactional active-grant lock remain in place |
+| `src/db/repositories/workspaceSharingRepository.js` | Organization-scoped grant and proposal rows; record reads/writes bind the active grant, source workspace, target workspace and object | Keep these control rows outside operational query-builder scope only while explicit source/target predicates and transactional locks remain in place; proposal snapshots are source-admin-only |
 | `src/platform/dataRetention.js` retention | Iterates every workspace under organization policy and restores that workspace scope for each retention pass | Preserve per-workspace scope; destructive operations must remain within the active loop's workspace |
 | `src/platform/dataRetention.js` backup | Intentional organization-wide export under a repeatable-read snapshot; row queries constrain `org_id` and recordings preserve workspace ownership | Keep separate from customer workspace reads; validate private storage and paged snapshot behavior before enabling child workspaces |
 | `src/storage/index.js` playback resolution | Internal object URLs are accepted only from the configured public URL, AWS S3 bucket host, or configured S3-compatible endpoint; recording keys are checked against active workspace ownership before signing | External URLs with signature-like query parameters are not sufficient to identify objects in our bucket; actual bucket privacy and signed playback still require provider-side verification |

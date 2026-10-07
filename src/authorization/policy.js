@@ -10,9 +10,9 @@ const ORG_PERMISSIONS = {
   Member: [],
 };
 const WORKSPACE_PERMISSIONS = {
-  'Workspace Admin': ['workspace.read','workspace.write','workspace.delete','workspace.settings.manage','workspace.members.manage','workspace.audit.read','workspace.call'],
-  Manager: ['workspace.read','workspace.write','workspace.delete','workspace.call'],
-  Member: ['workspace.read','workspace.write','workspace.call'],
+  'Workspace Admin': ['workspace.read','workspace.write','workspace.delete','workspace.settings.manage','workspace.members.manage','workspace.audit.read','workspace.call','workspace.share.propose'],
+  Manager: ['workspace.read','workspace.write','workspace.delete','workspace.call','workspace.share.propose'],
+  Member: ['workspace.read','workspace.write','workspace.call','workspace.share.propose'],
   Viewer: ['workspace.read'],
 };
 function organizationRole(role) {
@@ -42,6 +42,8 @@ function requestPermission(req) {
   const read = ['GET','HEAD','OPTIONS'].includes(req.method);
   if (['/api/auth/me','/api/auth/roles','/api/settings/me'].includes(path)) return null;
   if (path === '/api/settings/workspaces') return read ? 'organization.read' : 'organization.manage';
+  if (path === '/api/workspace-sharing/proposals' || /^\/api\/workspace-sharing\/proposals\/[^/]+\/review$/.test(path)) return 'workspace.settings.manage';
+  if (/^\/api\/workspace-sharing\/records\/[^/]+\/proposals$/.test(path)) return 'workspace.share.propose';
   if (/^\/api\/workspace-sharing\/records(?:\/|$)/.test(path)) return 'workspace.read';
   if (/^\/api\/workspace-sharing\/grants(?:\/|$)/.test(path)) return read ? 'workspace.read' : 'workspace.settings.manage';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';

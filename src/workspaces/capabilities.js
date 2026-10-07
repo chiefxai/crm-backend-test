@@ -7,7 +7,9 @@ function multipleWorkspacesEnabled() {
 }
 
 function workspaceSharingEnabled() {
-  return multipleWorkspacesEnabled() && process.env.WORKSPACE_SHARING_ENABLED === "true";
+  const hasShareSecret=typeof process.env.WORKSPACE_SHARE_TOKEN_SECRET==='string'
+    && process.env.WORKSPACE_SHARE_TOKEN_SECRET.length>=32;
+  return multipleWorkspacesEnabled() && process.env.WORKSPACE_SHARING_ENABLED === "true" && hasShareSecret;
 }
 
 module.exports = { multipleWorkspacesEnabled, workspaceSharingEnabled };
