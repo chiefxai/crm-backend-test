@@ -99,14 +99,18 @@ migrate_database() {
   fi
 }
 
+check_api_ready() {
+  # Probe this Compose project's API, never an unrelated process publishing
+  # the same host port. Node is guaranteed to exist in the application image.
+  "${COMPOSE_CMD[@]}" exec -T app node -e 'fetch("http://127.0.0.1:3000/ready", {signal: AbortSignal.timeout(3000)}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))' >/dev/null 2>&1
+}
+
 show_status_and_logs() {
   "${COMPOSE_CMD[@]}" ps
-  if command -v curl >/dev/null 2>&1; then
-    if curl --max-time 3 -fsS http://127.0.0.1:3000/ready >/dev/null 2>&1; then
-      echo "API readiness check: OK"
-    else
-      echo "API readiness check: unavailable"
-    fi
+  if check_api_ready; then
+    echo "API container readiness check: OK"
+  else
+    echo "API container readiness check: unavailable"
   fi
   echo "Recent deployment logs:"
   LOG_ARGS=(logs --tail=200)
@@ -130,11 +134,6 @@ if $DRY_RUN; then
   echo "Compose configuration is valid for $ENV."
   "${COMPOSE_CMD[@]}" config >/dev/null
   exit 0
-fi
-
-if ! command -v curl >/dev/null 2>&1; then
-  echo "ERROR: curl is required to confirm API readiness before recording deployment success."
-  exit 1
 fi
 
 if $PULL; then
@@ -179,22 +178,27 @@ $DETACH && ARGS+=(-d)
 ARGS+=("${TARGET_SERVICES[@]}")
 
 printf 'Deploying %s...\n' "$ENV"
-"${COMPOSE_CMD[@]}" "${ARGS[@]}"
-
-if command -v curl >/dev/null 2>&1; then
-  for i in {1..90}; do
-    if curl --max-time 3 -fsS http://127.0.0.1:3000/ready >/dev/null 2>&1; then
-      echo "API readiness check: OK"
-      break
-    fi
-    if [[ $i -eq 90 ]]; then
-      echo "API readiness check failed. Showing recent app logs:"
-      "${COMPOSE_CMD[@]}" logs --tail=100 app || true
-      exit 1
-    fi
-    sleep 2
-  done
+if ! "${COMPOSE_CMD[@]}" "${ARGS[@]}"; then
+  echo "ERROR: Compose startup failed; deployment has not been marked successful."
+  echo "Published container ports (check for another service owning the API port):"
+  docker ps --format 'table {{.Names}}\t{{.Ports}}' || true
+  echo "To use another API host port, set APP_HOST_PORT=3001 in the environment file."
+  echo "Caddy continues to reach app:3000 on the internal Docker network."
+  exit 1
 fi
+
+for i in {1..90}; do
+  if check_api_ready; then
+    echo "API readiness check: OK"
+    break
+  fi
+  if [[ $i -eq 90 ]]; then
+    echo "API readiness check failed. Showing recent app logs:"
+    "${COMPOSE_CMD[@]}" logs --tail=100 app || true
+    exit 1
+  fi
+  sleep 2
+done
 
 "${COMPOSE_CMD[@]}" ps
 for target in "${TARGET_SERVICES[@]}"; do

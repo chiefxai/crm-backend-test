@@ -129,7 +129,6 @@ const pool = mysql.createPool({
   ...mysqlConfig,
   waitForConnections: true,
   connectionLimit: Number(process.env.MYSQL_POOL_MAX || 10),
-  minIdle: Number(process.env.MYSQL_POOL_MIN || 0),
   idleTimeout: Number(process.env.MYSQL_POOL_IDLE_TIMEOUT_MS || 10000),
   connectTimeout: Number(process.env.MYSQL_POOL_CONNECTION_TIMEOUT_MS || 10000),
   enableKeepAlive: true,

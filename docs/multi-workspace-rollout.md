@@ -227,3 +227,21 @@ previous bootstrap. Keep the VM's MySQL configuration and backups available.
 
 The additive foundation can coexist with the old application. Once independent
 workspace data exists, rollback to an organization-only backend is forbidden.
+
+## Recovering from an occupied VM API port
+
+`Bind for 0.0.0.0:3000 failed: port is already allocated` means another
+container or host process owns the published port. It does not indicate a
+migration failure. Do not remove database volumes or stop an unidentified
+service to reclaim that port.
+
+Set `APP_HOST_PORT=3001` (or another free port) in the deployment environment
+file and rerun with `--force-recreate`. The API still listens on port 3000
+inside Docker; the bundled Caddy proxy still targets `app:3000`. An external
+proxy outside this Compose stack may need its upstream changed to the chosen
+host port. Check the existing proxy configuration before changing public
+traffic routing. Readiness checks now execute in the actual API container,
+so an unrelated service on host port 3000 cannot produce a false success.
+
+The MySQL2 `minIdle` option was unsupported and has been removed; connection
+limits and idle timeout remain configured.
