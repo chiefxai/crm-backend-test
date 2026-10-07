@@ -311,11 +311,14 @@ async function copySharedRecord(orgId,targetWorkspaceId,grantId,recordRef,target
     const sourceFingerprint=crypto.createHmac('sha256',shareSecret()).update(`${grantId}:${reference.recordId}`).digest('hex');
     const canonicalMapping=Object.fromEntries(mappings.map(([sourceKey,targetKey])=>[sourceKey,targetKey.trim()]).sort(([a],[b])=>a.localeCompare(b)));
     const mappingFingerprint=crypto.createHash('sha256').update(JSON.stringify({targetObjectKey,fieldMapping:canonicalMapping})).digest('hex');
-    const {rows:existing}=await client.query(`SELECT i.target_record_id,r.id AS live_record_id FROM workspace_share_imports i
-      LEFT JOIN object_records r ON r.id=i.target_record_id AND r.org_id=i.org_id AND r.workspace_id=i.target_workspace_id AND r.object_id=i.target_object_id
-      WHERE i.org_id=? AND i.grant_id=? AND i.source_fingerprint=? AND i.mapping_fingerprint=? AND i.target_workspace_id=? FOR UPDATE`,[orgId,grantId,sourceFingerprint,mappingFingerprint,targetWorkspaceId]);
-    if(existing[0]?.live_record_id) { await client.query('COMMIT'); return {status:'already_copied'}; }
-    if(existing[0]) await client.query('DELETE FROM workspace_share_imports WHERE org_id=? AND grant_id=? AND source_fingerprint=? AND mapping_fingerprint=? AND target_workspace_id=?',[orgId,grantId,sourceFingerprint,mappingFingerprint,targetWorkspaceId]);
+    const {rows:existing}=await client.query(`SELECT target_record_id,target_object_id,mapping_fingerprint FROM workspace_share_imports
+      WHERE org_id=? AND grant_id=? AND source_fingerprint=? AND mapping_fingerprint IN (?,REPEAT('0',64)) AND target_workspace_id=? FOR UPDATE`,[orgId,grantId,sourceFingerprint,mappingFingerprint,targetWorkspaceId]);
+    if(existing[0]) {
+      const {rows:liveRecord}=await client.query(`SELECT id FROM object_records
+        WHERE id=? AND org_id=? AND workspace_id=? AND object_id=? FOR UPDATE`,[existing[0].target_record_id,orgId,targetWorkspaceId,existing[0].target_object_id]);
+      if(liveRecord[0]) { await client.query('COMMIT'); return {status:'already_copied'}; }
+      await client.query(`DELETE FROM workspace_share_imports WHERE org_id=? AND grant_id=? AND source_fingerprint=? AND mapping_fingerprint=? AND target_workspace_id=?`,[orgId,grantId,sourceFingerprint,existing[0].mapping_fingerprint,targetWorkspaceId]);
+    }
     const {rows:stages}=await client.query(`SELECT id FROM object_stages WHERE org_id=? AND workspace_id=? AND object_id=? ORDER BY position,id LIMIT 1`,[orgId,targetWorkspaceId,targetObjects[0].id]);
     const targetRecordId=crypto.randomUUID(), stageId=stages[0]?.id||null;
     await client.query(`INSERT INTO object_records (id,org_id,workspace_id,object_id,stage_id,data,created_at,updated_at)
