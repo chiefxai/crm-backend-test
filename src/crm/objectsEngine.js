@@ -161,6 +161,7 @@ function recordRowToApi(row, object) {
   const stage = object?.stages?.find((candidate) => candidate.id === row.stage_id) || null;
   const values = { ...(row.data || {}) };
   return {
+    ...values,
     id: row.id,
     objectId: row.object_id,
     objectKey: object?.key || null,
@@ -169,7 +170,6 @@ function recordRowToApi(row, object) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     values,
-    ...values,
   };
 }
 
