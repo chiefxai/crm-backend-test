@@ -83,9 +83,9 @@ function normalizeLabels(raw = {}) {
 
 function getIndustryDefinition(industryKey) {
   const key = industryKey || "lending";
-  const known = LABELS[key] ? key : "lending";
+  const known = INDUSTRY_CONFIG[key] ? key : "lending";
   const pack = industryPacks.getPack(known) || [];
-  const labels = Object.fromEntries(Object.entries(LABELS[known]).map(([name, value]) => [name, pair(value)]));
+  const labels = normalizeLabels(INDUSTRY_CONFIG[known]?.labels);
   const domainModel = buildDomainModel(pack, known);
   const domainObjects = domainModel.objects;
 
