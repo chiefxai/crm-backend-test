@@ -52,9 +52,9 @@ function normalizeWorkspacePlans(input, currentVersion) {
     return {
       id, name, active: plan.active, defaultMode: plan.defaultMode,
       pricing: {
-        baseMonthlyInr: money(pricing.baseMonthlyInr, "organization monthly price"),
+        baseMonthlyInr: money(pricing.baseMonthlyInr, "organization monthly price", true),
         includedWorkspaces,
-        extraWorkspaceMonthlyInr: money(pricing.extraWorkspaceMonthlyInr, "additional workspace monthly price"),
+        extraWorkspaceMonthlyInr: money(pricing.extraWorkspaceMonthlyInr, "additional workspace monthly price", true),
         additionalIndustryMonthlyInr: money(pricing.additionalIndustryMonthlyInr, "additional industry monthly price"),
       },
     };
