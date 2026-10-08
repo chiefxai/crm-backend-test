@@ -34,14 +34,32 @@ function getTransporter() {
   return _transporter;
 }
 
-async function sendMail({ to, subject, html, text }) {
+async function sendMailResult({ to, subject, html, text }) {
   if (!isConfigured()) {
     log.warn("⚠️  SMTP not configured — email skipped:", subject, "→", to);
-    return;
+    return { status: "skipped_unconfigured", providerMessageId: null, retryable: false, errorCode: null };
   }
   const from = process.env.SMTP_FROM || process.env.SMTP_USER;
-  await getTransporter().sendMail({ from, to, subject, html, text });
-  log.info(`📧 Email sent: "${subject}" → ${to}`);
+  try {
+    const result = await getTransporter().sendMail({ from, to, subject, html, text });
+    log.info(`📧 Email accepted: "${subject}" → ${to}`);
+    return { status: "submitted", providerMessageId: result?.messageId || null, retryable: false, errorCode: null };
+  } catch (error) {
+    const code = String(error?.code || "SMTP_SEND_FAILED").replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 96);
+    const retryable = error?.responseCode >= 400 && error?.responseCode < 500 || ["ETIMEDOUT", "ECONNECTION", "ECONNRESET", "EHOSTUNREACH", "ESOCKET"].includes(error?.code);
+    log.warn(`Email submission failed (${code}) for ${to}`);
+    return { status: "failed", providerMessageId: null, retryable, errorCode: code };
+  }
 }
 
-module.exports = { sendMail, isConfigured };
+async function sendMail(message) {
+  const result = await sendMailResult(message);
+  if (result.status === "failed") {
+    const error = new Error(`Email submission failed: ${result.errorCode}`);
+    error.code = result.errorCode;
+    throw error;
+  }
+  return result;
+}
+
+module.exports = { sendMail, sendMailResult, isConfigured };

@@ -4,6 +4,15 @@ const { getPublicAppUrl, escapeHtml } = require("./appUrl");
 
 const PRODUCT_NAME = process.env.EMAIL_PRODUCT_NAME || "ChiefVoice";
 
+function simpleEmail({ subject, heading, paragraphs = [], actionUrl = null, actionLabel = "Open ChiefVoice", footer = null }) {
+  const safeHeading = escapeHtml(heading);
+  const body = paragraphs.map((paragraph) => `<p style="margin:0 0 14px;color:#334155;font-size:15px;line-height:1.6">${escapeHtml(paragraph)}</p>`).join("");
+  const action = actionUrl ? `<p style="margin:24px 0"><a href="${escapeHtml(actionUrl)}" style="display:inline-block;padding:12px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px;font-weight:700">${escapeHtml(actionLabel)}</a></p>` : "";
+  const footerText = footer || `This message was sent by ${PRODUCT_NAME}.`;
+  return { subject, html: `<!doctype html><html><body style="margin:0;background:#f1f5f9;font-family:Arial,sans-serif"><main style="max-width:600px;margin:24px auto;padding:28px;background:#fff;border-radius:12px"><p style="color:#4f46e5;font-weight:700">${escapeHtml(PRODUCT_NAME)}</p><h1 style="font-size:22px;color:#0f172a">${safeHeading}</h1>${body}${action}<p style="margin-top:28px;color:#64748b;font-size:12px">${escapeHtml(footerText)}</p></main></body></html>`,
+    text: [heading, ...paragraphs, actionUrl ? `${actionLabel}: ${actionUrl}` : "", footerText].filter(Boolean).join("\n\n") };
+}
+
 function welcomeEmail({ orgName, adminEmail, tempPassword, role }) {
   const appUrl = getPublicAppUrl();
   const safeOrg = escapeHtml(orgName || "your organization");
@@ -112,4 +121,72 @@ function welcomeOrganization(opts) {
   return welcomeEmail({ ...opts, role: "Organization Admin" });
 }
 
-module.exports = { welcomeEmail, welcomeOrganization };
+function formatMoney(amount, currency = "INR") {
+  if (!amount || amount.units == null) return "the amount shown in your billing details";
+  const units = String(amount.units);
+  const scale = Number(amount.scale || 0);
+  if (!Number.isInteger(scale) || scale < 0 || scale > 9 || !/^-?\d+$/.test(units)) return `${currency} ${units}`;
+  const negative = units.startsWith("-");
+  const digits = negative ? units.slice(1) : units;
+  const padded = digits.padStart(scale + 1, "0");
+  const value = scale ? `${padded.slice(0, -scale)}.${padded.slice(-scale)}` : padded;
+  return `${negative ? "-" : ""}${amount.asset || currency} ${value}`;
+}
+
+function billingNotificationEmail({ title, message, actionUrl }) {
+  return simpleEmail({ subject: title, heading: title, paragraphs: [message], actionUrl, actionLabel: "Review billing" });
+}
+
+function renewalReminderEmail({ orgName, periodEndsAt, amount, currency = "INR", paymentUrl, pendingVerification = false, needsInformation = false }) {
+  const date = new Date(periodEndsAt);
+  const displayDate = Number.isFinite(date.getTime()) ? date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }) + " UTC" : String(periodEndsAt || "the scheduled expiry date");
+  let status = "Your subscription renewal is due soon. Submit payment for the next billing period to keep service active.";
+  if (pendingVerification) status = "Your renewal payment is awaiting manual verification. Your existing subscription period is still active until its recorded end date.";
+  if (needsInformation) status = "Your renewal payment needs additional information. Please review the request and update your submission before the current period ends.";
+  const price = formatMoney(amount, amount?.asset || currency);
+  return simpleEmail({ subject: `Subscription renewal due for ${orgName || "your organization"}`,
+    heading: "Subscription renewal reminder", paragraphs: [`${orgName || "Your organization"} subscription period ends on ${displayDate}.`, status, `Renewal amount: ${price}.`], actionUrl: paymentUrl, actionLabel: pendingVerification || needsInformation ? "Review payment" : "Pay for next period" });
+}
+
+function paymentConfirmedEmail({ orgName, purpose, amount, currency = "INR", funding = {}, status }) {
+  const value = formatMoney(amount, amount?.asset || currency);
+  let detail = "Your payment was reviewed and approved.";
+  if (purpose === "subscription") detail = funding.status === "scheduled"
+    ? `Your next subscription period is scheduled from ${funding.startsAt || "the confirmed renewal date"} through ${funding.endsAt || "the period end date"}. Credits become available when that period starts.`
+    : "Your subscription payment was approved.";
+  else if (purpose === "topup") detail = "Your top-up payment was approved and the credits were added to the organization admin pool.";
+  else if (purpose === "invoice") detail = `Your invoice payment was approved. Invoice status: ${status || funding.status || "updated"}.`;
+  return simpleEmail({ subject: "Payment approved", heading: "Payment confirmed",
+    paragraphs: [`${orgName || "Your organization"} payment of ${value} was approved.`, detail], actionUrl: getPublicAppUrl(), actionLabel: "View billing" });
+}
+
+function contactVerificationEmail({ verificationUrl, expiresAt, orgName }) {
+  const expiry = expiresAt ? new Date(expiresAt).toISOString() : "soon";
+  return simpleEmail({ subject: "Verify your billing notification email", heading: "Verify your email address",
+    paragraphs: [`Confirm this address to receive billing notifications for ${orgName || "your organization"}.`, `This link expires at ${expiry}.`],
+    actionUrl: verificationUrl, actionLabel: "Verify email" });
+}
+
+function backupReadyEmail({ downloadUrl, retentionText }) {
+  return simpleEmail({ subject: "Your ChiefVoice backup is ready", heading: "Your backup is ready",
+    paragraphs: ["Your requested CRM backup has finished processing.", retentionText || "The private download link may expire."],
+    actionUrl: downloadUrl, actionLabel: "Download backup" });
+}
+
+const TEMPLATE_VERSIONS = Object.freeze({
+  "account.welcome.v1": welcomeEmail,
+  "billing.notification.v1": billingNotificationEmail,
+  "billing.renewal_reminder.v1": renewalReminderEmail,
+  "billing.payment_confirmed.v1": paymentConfirmedEmail,
+  "billing.contact_verification.v1": contactVerificationEmail,
+  "backup.ready.v1": backupReadyEmail,
+});
+
+function renderTemplate(templateKey, data) {
+  const renderer = TEMPLATE_VERSIONS[templateKey];
+  if (!renderer) throw new TypeError(`Unknown email template: ${templateKey}`);
+  return renderer(data || {});
+}
+
+module.exports = { welcomeEmail, welcomeOrganization, billingNotificationEmail, renewalReminderEmail,
+  paymentConfirmedEmail, contactVerificationEmail, backupReadyEmail, formatMoney, TEMPLATE_VERSIONS, renderTemplate };

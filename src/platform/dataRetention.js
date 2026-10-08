@@ -19,6 +19,7 @@ const platformSettings = require("./settings");
 const storage = require("../storage");
 const { getClient } = require("../storage/client");
 const mailer = require("../email/mailer");
+const emailTemplates = require("../email/templates");
 const auditLog = require("./auditLog");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("platform.data-retention");
@@ -501,9 +502,9 @@ async function performBackup(org) {
       lastDownloadUrl: result.downloadUrl,
       lastBackup: result.backupRecord,
     });
-    const subject = `${org.name} — CRM backup ready`;
-    const html = `<p>Your CRM backup for <strong>${org.name}</strong> is ready.</p><p>Size: ${Math.round(result.sizeBytes / 1024 / 1024 * 100) / 100} MB</p><p><a href="${result.downloadUrl}">Download backup</a> (link expires in 7 days).</p>`;
-    await mailer.sendMail({ to: config.email, subject, html, text: `Your CRM backup for ${org.name} is ready. Download: ${result.downloadUrl}` });
+    const template = emailTemplates.backupReadyEmail({ downloadUrl: result.downloadUrl,
+      retentionText: `The private download link expires in 7 days. Backup size: ${Math.round(result.sizeBytes / 1024 / 1024 * 100) / 100} MB.` });
+    await mailer.sendMail({ to: config.email, ...template });
     await purgeExpiredBackups(org.id, config.retentionDays || 365);
     return result;
   } catch (err) {

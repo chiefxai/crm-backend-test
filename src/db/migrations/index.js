@@ -43,7 +43,7 @@ const migrations = [{
       INNER JOIN workspaces w ON w.org_id=m.org_id AND w.id=m.org_id
       ON DUPLICATE KEY UPDATE member_id=workspace_members.member_id`, now: true },
   ],
-}, require("./2026100702-operational-workspace-scope"), require("./2026100703-workspace-settings"), require("./2026100704-workspace-role-authority"), require("./2026100705-workspace-configuration-keys"), require("./2026100706-scheduler-workspace-indexes"), require("./2026100707-workspace-sharing"), require("./2026100708-workspace-share-proposals"), require("./2026100709-workspace-share-imports"), require("./2026100710-workspace-share-import-idempotency"), require("./2026100711-workspace-billing")];
+}, require("./2026100702-operational-workspace-scope"), require("./2026100703-workspace-settings"), require("./2026100704-workspace-role-authority"), require("./2026100705-workspace-configuration-keys"), require("./2026100706-scheduler-workspace-indexes"), require("./2026100707-workspace-sharing"), require("./2026100708-workspace-share-proposals"), require("./2026100709-workspace-share-imports"), require("./2026100710-workspace-share-import-idempotency"), require("./2026100711-workspace-billing"), require("./2026100712-billing-foundation"), require("./2026100713-billing-credit-allocation"), require("./2026100714_billing_operations"), require("./2026100715-billing-credit-account-purpose"), require("./2026100716-billing-payment-submission-fields"), require("./2026100717-billing-payment-decision-evidence"), require("./2026100718-billing-lifecycle-scan-indexes"), require("./2026100719-billing-contact-verification-expiry"), require("./2026100720-billing-email-delivery")];
 
 async function ensureJournal(client) {
   await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
