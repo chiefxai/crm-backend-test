@@ -40,6 +40,7 @@ async function createOrganizationSetup({
   name, workspaceName, industry, subscriptionPlan, featureFlags, adminEmail, adminName, gcpProject, callProvider,
   billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
   dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
+  workspacePolicy, initialWorkspaces = [], firstBranchName = null,
 }) {
   await supabase.ready;
   const client = await pool.connect(); const orgId = crypto.randomUUID();
@@ -50,6 +51,7 @@ async function createOrganizationSetup({
     const normalizedChargeScope = chargeScope === "ai_and_call_provider" ? "ai_and_call_provider" : "ai_only";
     const initialBalance = normalizedBillingMethod === "recharge_based" ? Math.max(0, Number(initialRechargeAmountInr) || 0) : 0;
     const orgSettings = {
+      ...(workspacePolicy ? { workspacePolicy } : {}),
       dataRetention: {
         mode: dataRetentionMode === "custom" ? "custom" : "default",
         overrides: dataRetentionMode === "custom" && dataRetentionOverrides && typeof dataRetentionOverrides === "object" ? dataRetentionOverrides : {},
@@ -78,6 +80,17 @@ async function createOrganizationSetup({
     if (adminEmail) await client.query(`INSERT INTO org_members (id,org_id,user_id,email,name,role,feature_flags,created_at) VALUES ($1,$2,NULL,$3,$4,'Organization Admin',$5,$6)`, [memberId,orgId,adminEmail.toLowerCase(),adminName||adminEmail,JSON.stringify(featureFlags||[]),now]);
     if (memberId) await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,created_at) VALUES (?,?,?,'Workspace Admin','Active',?)`, [orgId,orgId,memberId,now]);
     if (memberId) await client.query('UPDATE org_members SET workspace_assignments_initialized=1 WHERE org_id=? AND id=?',[orgId,memberId]);
+    const workspaceRepository = require('./workspaceRepository');
+    if (firstBranchName) await client.query('UPDATE workspaces SET name=?,branch_name=? WHERE org_id=? AND id=?',[firstBranchName,firstBranchName,orgId,orgId]);
+    for (const branch of initialWorkspaces) {
+      const workspaceId = crypto.randomUUID();
+      await client.query(`INSERT INTO workspaces (id,org_id,name,industry,branch_name,status,is_default,created_at)
+        VALUES (?,?,?,?,?,'Active',0,?)`,[workspaceId,orgId,branch.name,branch.industry,branch.branchName || null,now]);
+      await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,role_source,created_at)
+        VALUES (?,?,?,'Workspace Admin','Active','manual',?)`,[workspaceId,orgId,memberId,now]);
+      await workspaceRepository.seedIndustryObjects(client,orgId,workspaceId,branch.industry,now);
+    }
+
     await client.query("COMMIT");
     const orgResult=await client.query(`SELECT * FROM organizations WHERE id = $1`,[orgId]); const cloudResult=await client.query(`SELECT * FROM organization_cloud_projects WHERE id = $1`,[cloudProjectId]);
     return {org:toApi(orgResult.rows[0]),cloudProject:toApiCloudProject(cloudResult.rows[0]),memberId};

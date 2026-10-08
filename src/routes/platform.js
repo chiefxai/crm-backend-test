@@ -335,9 +335,27 @@ router.post("/organizations", async (req, res) => {
       name, workspaceName, industry, subscriptionPlan, adminEmail, adminName, featureFlags,
       gcpProjectMode = "existing", gcpProject, callProvider,
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
-      dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null
+      dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
+      workspacePolicy: requestedWorkspacePolicy, initialWorkspaces: requestedWorkspaces = [], firstBranchName = null
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
+    const policyTools = require('../workspaces/organizationPolicy');
+    const industryKeys = require('../seed/industryPacks').listIndustries().map(i=>i.key);
+    const workspacePolicy = policyTools.validatePolicy(requestedWorkspacePolicy,String(industry || 'lending').trim().toLowerCase(),industryKeys);
+    if (!Array.isArray(requestedWorkspaces) || requestedWorkspaces.length >= Math.max(2,Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG)||100,1000))) throw policyTools.invalid('Workspace count exceeds the configured organization limit.');
+    if (workspacePolicy.mode==='single' && requestedWorkspaces.length) throw policyTools.invalid('Single workspace mode permits only the initial workspace.');
+    if (requestedWorkspaces.length && !require('../workspaces/capabilities').multipleWorkspacesEnabled()) throw policyTools.invalid('Multi-workspace provisioning is not enabled.',409);
+    if (requestedWorkspaces.length && !adminEmail) throw policyTools.invalid('An initial organization administrator is required for additional workspaces.');
+    if (firstBranchName !== null && (typeof firstBranchName!=='string' || !firstBranchName.trim() || firstBranchName.length>120)) throw policyTools.invalid('Enter a first branch name of up to 120 characters.');
+    const initialWorkspaces = requestedWorkspaces.map(branch=>({ name:String(branch?.name || '').trim(),industry:String(branch?.industry || workspacePolicy.primaryIndustry).trim(),branchName:String(branch?.branchName || '').trim() || null }));
+    const branchNames = new Set([(firstBranchName || workspaceName).trim().toLowerCase()]);
+    for (const branch of initialWorkspaces) {
+      if (!branch.name || branch.name.length>120 || (branch.branchName && branch.branchName.length>160) || !industryKeys.includes(branch.industry)) throw policyTools.invalid('Enter supported industries and valid names for all workspaces.');
+      if (workspacePolicy.mode!=='mixed_industry' && branch.industry!==workspacePolicy.primaryIndustry) throw policyTools.invalid('All branches must use the primary industry.');
+      if (branchNames.has(branch.name.toLowerCase())) throw policyTools.invalid('Workspace names must be unique within the organization.');
+      branchNames.add(branch.name.toLowerCase());
+    }
+
 
     if (!["existing", "automatic"].includes(gcpProjectMode)) {
       return res.status(400).json({ error: "Invalid Google Cloud project mode." });
@@ -412,7 +430,7 @@ router.post("/organizations", async (req, res) => {
 
     const organizationIndustry = String(industry || "lending").trim().toLowerCase();
     const defaultIndustryFeatureKeys = Object.keys(require("../platform/featureFlags").APP_FEATURE_DEFINITIONS)
-      .filter((key) => organizationIndustry === "lending" || key !== "loan_lifecycle");
+      .filter((key) => organizationIndustry === "lending" || workspacePolicy.mode === 'mixed_industry' || key !== "loan_lifecycle");
     const orgFeatureFlags = await platformAdmin.sanitizeFeatureKeys(
       Array.isArray(featureFlags) ? featureFlags : defaultIndustryFeatureKeys
     );
@@ -424,7 +442,8 @@ router.post("/organizations", async (req, res) => {
     }
     const initialRecharge = Math.max(0, Number(initialRechargeAmountInr) || 0);
     const { org, cloudProject, memberId } = await db.createOrganizationSetup({
-      name, workspaceName, industry, subscriptionPlan,
+      name, workspaceName, industry: workspacePolicy.primaryIndustry, subscriptionPlan,
+      workspacePolicy, initialWorkspaces, firstBranchName: firstBranchName?.trim() || null,
       featureFlags: orgFeatureFlags,
       adminEmail, adminName,
       gcpProject: {
@@ -485,7 +504,7 @@ router.post("/organizations", async (req, res) => {
         name, workspaceName, adminEmail, gcpProjectMode: "existing", gcpProjectId: validatedGcp.project.projectId,
         callProvider: validatedCallProvider?.provider || null,
         callProviderPhoneNumber: validatedCallProvider?.phoneNumber || null,
-        billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge
+        billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge, workspacePolicy, initialWorkspaceCount: initialWorkspaces.length + 1
       });
 
     res.status(201).json({
@@ -508,6 +527,30 @@ router.post("/organizations", async (req, res) => {
     }
     handleError(err, res);
   }
+});
+
+router.get('/organizations/:id/workspace-setup', async(req,res)=>{
+  try { res.json(await require('../db/repositories/workspaceRepository').getWorkspaceSetup(req.params.id)); }
+  catch(error) {handleError(error,res);}
+});
+router.put('/organizations/:id/workspace-setup', async(req,res)=>{
+  try {
+    const result=await require('../db/repositories/workspaceRepository').setWorkspacePolicy(req.params.id,req.body);
+    await auditLog.record(null,req,'platform.organization.workspace_policy.update','organization',req.params.id,result.policy);
+    res.json(result);
+  } catch(error) {handleError(error,res);}
+});
+router.post('/organizations/:id/workspaces', async(req,res)=>{
+  try {
+    if (!require('../workspaces/capabilities').multipleWorkspacesEnabled()) return res.status(409).json({error:'Multi-workspace provisioning is not enabled.'});
+    const {rows:admins}=await db.pool.query(`SELECT id FROM org_members WHERE org_id=? AND role IN ('Owner','Organization Admin','Super Admin') AND COALESCE(status,'Active')='Active' ORDER BY created_at,id LIMIT 1`,[req.params.id]);
+    if (!admins[0]) return res.status(409).json({error:'Assign an active organization administrator before creating a workspace.'});
+    const workspace=await require('../db/repositories/workspaceRepository').createWorkspace(req.params.id,{
+      name:String(req.body?.name || '').trim(),industry:String(req.body?.industry || '').trim(),branchName:String(req.body?.branchName || '').trim() || null,
+    },admins[0].id,{platformAdmin:true});
+    await auditLog.record(null,req,'platform.workspace.create','workspace',workspace.id,{organizationId:req.params.id,industry:workspace.industry});
+    res.status(201).json(workspace);
+  } catch(error) {handleError(error,res);}
 });
 
 // PATCH /api/platform/organizations/:id/billing

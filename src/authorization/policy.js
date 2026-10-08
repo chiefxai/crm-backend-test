@@ -41,6 +41,7 @@ function requestPermission(req) {
   const path = new URL(req.originalUrl || req.url,'http://local').pathname.toLowerCase().replace(/\/+$/,'');
   const read = ['GET','HEAD','OPTIONS'].includes(req.method);
   if (['/api/auth/me','/api/auth/roles','/api/settings/me'].includes(path)) return null;
+  if (path === '/api/settings/workspace-policy') return 'organization.read';
   if (path === '/api/settings/workspaces') return read ? 'organization.read' : 'organization.manage';
   if (path === '/api/workspace-sharing/proposals' || /^\/api\/workspace-sharing\/proposals\/[^/]+\/review$/.test(path)) return 'workspace.settings.manage';
   if (/^\/api\/workspace-sharing\/records\/[^/]+\/proposals$/.test(path)) return 'workspace.share.propose';

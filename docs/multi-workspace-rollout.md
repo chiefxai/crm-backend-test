@@ -398,3 +398,42 @@ Deploy with the normal production migration flow, then confirm
 spend is based on stored call billing records, so existing calls are allocated
 to their historical workspace where a matching `call_logs` row exists; any
 unmatched legacy charge remains assigned to the initial workspace.
+
+## Organization workspace structure and pricing
+
+Platform Create Org now requires a structure and explicit monthly INR prices:
+`single`, `same_industry`, or `mixed_industry`. The organization settings JSON
+stores `workspacePolicy` with its immutable primary industry and pricing:
+base monthly amount, included workspace count, extra workspace monthly amount,
+and a fee per additional distinct industry. No schema migration is needed for
+this policy. Fixed monthly prices are quoted separately from variable usage;
+these values do not create a second wallet or debit subscription fees from it.
+
+Initial child workspaces, industry objects, and administrator assignments are
+created in the organization setup transaction. The platform organization detail
+panel supports policy/pricing configuration and further workspace provisioning.
+Mixed-industry mode is required before a platform administrator can create a
+workspace outside the primary industry. Organization administrators can only
+create branches in the primary industry, including within a mixed organization.
+Existing workspace industries cannot be changed through profile saves or the
+legacy organization settings endpoint.
+
+Organization administrators see the new monthly total before creating a branch.
+They accept a quote token bound to the current policy and workspace inventory;
+creation checks it under the organization lock. A stale quote is rejected.
+Adding the second workspace automatically upgrades single mode to same-industry
+mode. The workspace stores the accepted pricing snapshot and creation audit.
+
+Legacy organizations infer their existing structure without modifying historical
+workspaces or balances. Their branch pricing remains unconfigured until a
+platform administrator sets it. Adding a branch is blocked until that price has
+been configured. The platform cannot downgrade a multi-workspace organization
+to single mode or remove mixed mode while different-industry workspaces exist.
+
+API surfaces: GET `/api/settings/workspace-policy`, platform GET/PUT
+`/api/platform/organizations/:id/workspace-setup`, and platform POST
+`/api/platform/organizations/:id/workspaces`. The organization workspace POST
+requires `pricingAcceptanceToken`. Deploy the backend before using the updated
+Create Org form. Use the usual application-services deployment and migration
+flags, then inspect application logs; the existing workspace feature gates
+remain required for child provisioning.

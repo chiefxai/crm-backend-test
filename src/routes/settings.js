@@ -142,7 +142,7 @@ router.post('/workspace',requireAuth,requirePermission("workspace.settings.manag
     }
     auditLog.record(req.orgId,req,'workspace_settings.update','workspace',req.workspaceId,patch);
     res.json(updated);
-  } catch(err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+  } catch(err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
 // ── Industry configuration ──
@@ -268,6 +268,11 @@ router.get("/workspaces", requireAuth, async (req,res) => {
   } catch (err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
 });
 
+router.get('/workspace-policy', requireAuth, requirePermission('organization.read'), async(req,res)=>{
+  try {res.json(await workspaceRepository.getWorkspaceSetup(req.orgId));}
+  catch(error) {res.status(error.statusCode || 500).json({error:safeErrorMessage(error)});}
+});
+
 router.post("/workspaces", requireAuth, requirePermission("organization.manage"), async (req,res) => {
   if (!multipleWorkspacesEnabled()) return res.status(404).json({ error:"Workspace provisioning is not enabled" });
   const name = String(req.body?.name || "").trim();
@@ -281,8 +286,8 @@ router.post("/workspaces", requireAuth, requirePermission("organization.manage")
   try {
     const membership = await db.findMembershipForUser(req.userId,req.userEmail,req.orgId);
     if (!membership?.memberId) return res.status(403).json({ error:"An active organization membership is required" });
-    const workspace = await workspaceRepository.createWorkspace(req.orgId,{ name,industry,branchName },membership.memberId);
-    await auditLog.record(req.orgId,req,"workspace.create","workspace",workspace.id,{ name,industry,branchName });
+    const workspace = await workspaceRepository.createWorkspace(req.orgId,{ name,industry,branchName, pricingAcceptanceToken:req.body?.pricingAcceptanceToken },membership.memberId);
+    await auditLog.record(req.orgId,req,"workspace.create","workspace",workspace.id,{ name,industry,branchName,organizationPricing:workspace.organizationPricing });
     res.status(201).json(workspace);
   } catch (err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
 });
@@ -534,6 +539,7 @@ router.get("/pipeline-stages", requireAuth, async (req, res) => {
 router.post("/org", requireAuth, requirePermission("organization.manage"), async (req, res) => {
   try {
     const before = await db.getOrg(req.orgId);
+    require('../workspaces/organizationPolicy').validateIndustryChange(before.industry,req.body?.industry);
     const orgPatch = Object.fromEntries(Object.entries(req.body || {}).filter(([key]) => WORKSPACE_PROFILE_FIELDS.has(key)));
     if (Object.keys(orgPatch).some(key => key !== 'name') && !hasPermission(req,'workspace.settings.manage')) return res.status(403).json({ error: 'Workspace settings permission required for legacy profile fields' });
     const updated = await db.updateOrg(req.orgId, orgPatch);
@@ -551,7 +557,7 @@ router.post("/org", requireAuth, requirePermission("organization.manage"), async
     global.broadcastLog(`⚙️ Updated organization settings: ${updated.name}`, { type: "settings" });
     auditLog.record(req.orgId, req, "org_settings.update", "organization", req.orgId, req.body);
     res.json(updated);
-  } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
 module.exports = router;

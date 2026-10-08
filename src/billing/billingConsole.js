@@ -102,6 +102,7 @@ async function getOrganizationBillingConsole(orgId) {
   return {
     orgId,
     workspaceBilling,
+    organizationPricing: (await require('../db/repositories/workspaceRepository').getWorkspaceSetup(orgId)).currentQuote,
     services,
     overview,
     billingPeriod: period,
