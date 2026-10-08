@@ -332,7 +332,7 @@ router.delete("/feature-groups/:key", async (req, res) => {
 router.post("/organizations", async (req, res) => {
   try {
     const {
-      name, workspaceName, industry, subscriptionPlan, adminEmail, adminName, featureFlags,
+      name, workspaceName, industry, subscriptionPlan: requestedPlan, workspacePlanId, workspacePlanVersion, adminEmail, adminName, featureFlags,
       gcpProjectMode = "existing", gcpProject, callProvider,
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
       dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
@@ -341,7 +341,23 @@ router.post("/organizations", async (req, res) => {
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
     const policyTools = require('../workspaces/organizationPolicy');
     const industryKeys = require('../seed/industryPacks').listIndustries().map(i=>i.key);
-    const workspacePolicy = policyTools.validatePolicy(requestedWorkspacePolicy,String(industry || 'lending').trim().toLowerCase(),industryKeys);
+    const billingSettings = require('../platform/billingSettings');
+    const workspacePlans = await billingSettings.getWorkspacePlans();
+    if (workspacePlanVersion !== undefined && workspacePlanVersion !== workspacePlans.version) {
+      throw Object.assign(new Error('Workspace plan defaults changed. Reload the plans before creating this organization.'), { statusCode: 409, code: 'VERSION_CONFLICT' });
+    }
+    const selectedPlan = workspacePlans.plans.find(plan => plan.active && (plan.id === workspacePlanId
+      || plan.id === String(requestedPlan || '').trim().toLowerCase() || plan.name.toLowerCase() === String(requestedPlan || '').trim().toLowerCase()));
+    if (!selectedPlan) throw policyTools.invalid('Select an active workspace plan from Admin > Plans & Pricing.');
+    if (selectedPlan.pricing.baseMonthlyInr === null || selectedPlan.pricing.extraWorkspaceMonthlyInr === null
+      || selectedPlan.pricing.additionalIndustryMonthlyInr === null) {
+      throw Object.assign(new Error(`Configure all monthly prices for the ${selectedPlan.name} plan before creating an organization.`), { statusCode: 409 });
+    }
+    const workspacePolicy = policyTools.validatePolicy({
+      ...(requestedWorkspacePolicy || {}), planId: selectedPlan.id, planVersion: workspacePlans.version,
+      mode: requestedWorkspacePolicy?.mode || selectedPlan.defaultMode, pricing: selectedPlan.pricing,
+    },String(industry || 'lending').trim().toLowerCase(),industryKeys);
+    const subscriptionPlan = selectedPlan.name;
     if (!Array.isArray(requestedWorkspaces) || requestedWorkspaces.length >= Math.max(2,Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG)||100,1000))) throw policyTools.invalid('Workspace count exceeds the configured organization limit.');
     if (workspacePolicy.mode==='single' && requestedWorkspaces.length) throw policyTools.invalid('Single workspace mode permits only the initial workspace.');
     if (requestedWorkspaces.length && !require('../workspaces/capabilities').multipleWorkspacesEnabled()) throw policyTools.invalid('Multi-workspace provisioning is not enabled.',409);
@@ -636,6 +652,23 @@ router.patch("/organizations/:id/minimum-balance", async (req, res) => {
       minimumBalance: settings.billing.minimumBalance || null,
     });
     res.json(updated);
+  } catch (err) { handleError(err, res); }
+});
+
+router.get("/billing/workspace-plans", async (req, res) => {
+  try {
+    const billingSettings = require("../platform/billingSettings");
+    res.json(await billingSettings.getWorkspacePlans());
+  } catch (err) { handleError(err, res); }
+});
+
+router.put("/billing/workspace-plans", async (req, res) => {
+  try {
+    const billingSettings = require("../platform/billingSettings");
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    const next = await billingSettings.setWorkspacePlans(actor, req.body || {});
+    await auditLog.record(null, actor, "platform.billing.workspace_plans.update", "billing", "workspace_plans", next);
+    res.json(next);
   } catch (err) { handleError(err, res); }
 });
 

@@ -12,9 +12,19 @@ function validatePolicy(input, primaryIndustry, industries) {
     if (typeof pricing[key] !== 'number' || !Number.isFinite(pricing[key]) || pricing[key] < 0 || pricing[key] > 100000000) throw invalid('Monthly prices must be non-negative INR amounts.');
     result[key] = Math.round(pricing[key] * 100) / 100;
   }
-  if (!Number.isInteger(pricing.includedWorkspaces) || pricing.includedWorkspaces < 1 || pricing.includedWorkspaces > 1000) throw invalid('Included workspaces must be between 1 and 1000.');
-  result.includedWorkspaces = pricing.includedWorkspaces;
-  return { mode: input.mode, primaryIndustry, pricing: result };
+  const includedWorkspaces = input.mode === 'single' ? 1 : pricing.includedWorkspaces;
+  if (!Number.isInteger(includedWorkspaces) || includedWorkspaces < 1 || includedWorkspaces > 1000) throw invalid('Included workspaces must be between 1 and 1000 for a multi-workspace plan.');
+  result.includedWorkspaces = includedWorkspaces;
+  const policy = { mode: input.mode, primaryIndustry, pricing: result };
+  if (input.planId !== undefined) {
+    if (typeof input.planId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(input.planId)) throw invalid('Workspace plan ID is invalid.');
+    policy.planId = input.planId;
+  }
+  if (input.planVersion !== undefined) {
+    if (!Number.isSafeInteger(input.planVersion) || input.planVersion < 1) throw invalid('Workspace plan version is invalid.');
+    policy.planVersion = input.planVersion;
+  }
+  return policy;
 }
 function effectivePolicy(org, workspaces) {
   const settings = json(org.settings);
@@ -22,7 +32,7 @@ function effectivePolicy(org, workspaces) {
   const primaryIndustry = stored?.primaryIndustry || org.industry || 'lending';
   const mode = MODES.includes(stored?.mode) ? stored.mode : workspaces.some(w => w.industry !== primaryIndustry)
     ? 'mixed_industry' : workspaces.length > 1 ? 'same_industry' : 'single';
-  return { mode, primaryIndustry, pricing: stored?.pricing || null };
+  return { mode, primaryIndustry, planId: stored?.planId || null, planVersion: stored?.planVersion || null, pricing: stored?.pricing || null };
 }
 function quote(policy, workspaces) {
   if (!policy.pricing) return null;

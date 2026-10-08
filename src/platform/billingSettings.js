@@ -5,7 +5,65 @@ const KEYS = {
   globalAi: "billing.globalAi",
   industryMinimumBalance: "billing.industryMinimumBalance",
   systemMinimumBalance: "billing.systemMinimumBalance",
+  workspacePlans: "billing.workspacePlans",
 };
+
+const DEFAULT_WORKSPACE_PLANS = Object.freeze({
+  version: 1,
+  plans: [
+    { id: "starter", name: "Starter", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0 } },
+    { id: "growth", name: "Growth", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0 } },
+    { id: "enterprise", name: "Enterprise", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0 } },
+  ],
+});
+
+const WORKSPACE_PLAN_MODES = new Set(["single", "same_industry", "mixed_industry"]);
+
+function normalizeWorkspacePlans(input, currentVersion) {
+  if (!input || typeof input !== "object" || !Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 100) {
+    throw Object.assign(new Error("Provide between 1 and 100 workspace plans."), { statusCode: 400 });
+  }
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion !== currentVersion) {
+    throw Object.assign(new Error("Workspace plan settings changed. Refresh before saving."), { statusCode: 409, code: "VERSION_CONFLICT" });
+  }
+  const ids = new Set();
+  const names = new Set();
+  const plans = input.plans.map((plan, index) => {
+    const path = `Plan ${index + 1}`;
+    const id = String(plan?.id || "").trim().toLowerCase();
+    const name = String(plan?.name || "").trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw Object.assign(new Error(`${path} has an invalid plan ID.`), { statusCode: 400 });
+    if (!name || name.length > 80) throw Object.assign(new Error(`${path} name must contain 1 to 80 characters.`), { statusCode: 400 });
+    if (ids.has(id) || names.has(name.toLowerCase())) throw Object.assign(new Error("Plan IDs and names must be unique."), { statusCode: 400 });
+    if (typeof plan.active !== "boolean" || !WORKSPACE_PLAN_MODES.has(plan.defaultMode)) throw Object.assign(new Error(`${path} has invalid status or workspace mode.`), { statusCode: 400 });
+    const pricing = plan.pricing || {};
+    const money = (value, label, optional = false) => {
+      if (optional && value == null) return null;
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100000000 || Math.round(value * 100) / 100 !== value) {
+        throw Object.assign(new Error(`${path} ${label} must be an INR amount with at most two decimal places.`), { statusCode: 400 });
+      }
+      return value;
+    };
+    const includedWorkspaces = plan.defaultMode === "single" ? 1 : pricing.includedWorkspaces;
+    if (!Number.isInteger(includedWorkspaces) || includedWorkspaces < 1 || includedWorkspaces > 1000) {
+      throw Object.assign(new Error(`${path} included workspaces must be between 1 and 1000 for multi-workspace plans.`), { statusCode: 400 });
+    }
+    ids.add(id); names.add(name.toLowerCase());
+    return {
+      id, name, active: plan.active, defaultMode: plan.defaultMode,
+      pricing: {
+        baseMonthlyInr: money(pricing.baseMonthlyInr, "organization monthly price"),
+        includedWorkspaces,
+        extraWorkspaceMonthlyInr: money(pricing.extraWorkspaceMonthlyInr, "additional workspace monthly price"),
+        additionalIndustryMonthlyInr: money(pricing.additionalIndustryMonthlyInr, "additional industry monthly price"),
+      },
+    };
+  });
+  if (!plans.some((plan) => plan.active)) throw Object.assign(new Error("At least one workspace plan must remain active."), { statusCode: 400 });
+  const priorIds = new Set((input.priorPlanIds || []).map(String));
+  if ([...priorIds].some((id) => !ids.has(id))) throw Object.assign(new Error("Existing plans cannot be deleted. Archive plans that should no longer be offered."), { statusCode: 400 });
+  return plans;
+}
 
 const DEFAULT_GLOBAL_AI = {
   pricingMode: "time",
@@ -65,8 +123,23 @@ async function getSystemMinimumBalance() {
   return { ...DEFAULT_SYSTEM_MINIMUM, ...stored, source: "system_default" };
 }
 
+async function getWorkspacePlans() {
+  const stored = await platformSettings.getSetting(KEYS.workspacePlans, null);
+  if (!stored || !Array.isArray(stored.plans)) return DEFAULT_WORKSPACE_PLANS;
+  return { version: Number(stored.version) || 1, plans: stored.plans };
+}
+
+async function setWorkspacePlans(actor, input) {
+  const current = await getWorkspacePlans();
+  const plans = normalizeWorkspacePlans({ ...input, priorPlanIds: current.plans.map((plan) => plan.id) }, current.version);
+  const next = { version: current.version + 1, plans, updatedAt: new Date().toISOString(), updatedBy: actor?.userId || null };
+  await platformSettings.setSetting(KEYS.workspacePlans, next);
+  return next;
+}
+
 module.exports = {
   KEYS,
+  DEFAULT_WORKSPACE_PLANS,
   DEFAULT_GLOBAL_AI,
   DEFAULT_SYSTEM_MINIMUM,
   DEFAULT_INDUSTRY_MINIMUMS,
@@ -75,4 +148,7 @@ module.exports = {
   getIndustryMinimumBalanceMap,
   setIndustryMinimumBalanceMap,
   getSystemMinimumBalance,
+  getWorkspacePlans,
+  setWorkspacePlans,
+  normalizeWorkspacePlans,
 };
