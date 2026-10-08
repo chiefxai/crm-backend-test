@@ -15,6 +15,8 @@ const crypto = require("crypto");
 const db = require("../db/repository");
 const costProviders = require("../platform/costProviders");
 const channelsEngine = require("../channels/engine");
+const workspaceScope = require("../workspaces/scope");
+const { getCurrentBillingPeriod } = require("../billing/billingPeriod");
 
 const ENV_RESERVATION_MINUTES = Math.max(1, Number(process.env.RECHARGE_CALL_RESERVATION_MINUTES || 1));
 
@@ -50,8 +52,8 @@ async function getReservationMinutes(org) {
   }
 }
 
-async function estimateReservation(orgId, providerKey) {
-  const org = await db.getOrg(orgId);
+async function estimateReservation(orgId, providerKey, knownOrg = null) {
+  const org = knownOrg || await db.getOrg(orgId);
   if (!org) {
     const err = new Error("Organization not found");
     err.statusCode = 404;
@@ -60,8 +62,6 @@ async function estimateReservation(orgId, providerKey) {
 
   const method = normalizeBillingMethod(org.billingMethod);
   const scope = normalizeChargeScope(org.chargeScope);
-  if (method !== "recharge_based") return { allowed: true, org, billingMethod: method, chargeScope: scope, amount: 0 };
-
   const reservationMinutes = await getReservationMinutes(org);
   const [ai, call, selfManaged] = await Promise.all([
     costProviders.computeAiCost({ providerKey: "gemini", orgId, totalTokens: 0, durationSeconds: reservationMinutes * 60 }).catch(() => null),
@@ -81,64 +81,98 @@ async function estimateReservation(orgId, providerKey) {
 }
 
 async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
-  const estimate = await estimateReservation(orgId, providerKey);
-  if (estimate.billingMethod !== "recharge_based") return null;
+  const scope = workspaceScope.scopeForOrg(orgId);
+  const workspaceId = scope.workspaceId;
+  const workspaceBudgetSetting = await require("../db/repositories/workspaceRepository").getActive(orgId, workspaceId);
+  const workspaceBudget = Number(workspaceBudgetSetting?.settings?.billing?.monthlyBudgetInr);
+  const hasWorkspaceBudget = Number.isFinite(workspaceBudget) && workspaceBudget >= 0;
+  const org = await db.getOrg(orgId);
+  if (!org) throw Object.assign(new Error("Organization not found"), { statusCode: 404 });
+  const billingMethod = normalizeBillingMethod(org.billingMethod);
+  if (billingMethod !== "recharge_based" && !hasWorkspaceBudget) return null;
+  const estimate = await estimateReservation(orgId, providerKey, org);
 
   const reservationId = crypto.randomUUID();
-  const amount = estimate.amount;
+  const amount = estimate.billingMethod === "recharge_based" ? estimate.amount : 0;
   const client = await db.pool.connect();
   try {
     await client.query("BEGIN");
 
-    const { rows } = await client.query(
-      "SELECT recharge_balance_inr, recharge_reserved_inr, billing_method, charge_scope FROM organizations WHERE id = $1 FOR UPDATE",
-      [orgId]
+    const { rows: workspaceRows } = await client.query(
+      "SELECT settings FROM workspaces WHERE org_id=$1 AND id=$2 AND status='Active' FOR UPDATE",
+      [orgId, workspaceId]
     );
-    const row = rows[0];
-    if (!row) {
-      const err = new Error("Organization not found");
-      err.statusCode = 404;
-      throw err;
+    if (!workspaceRows[0]) throw Object.assign(new Error("Active workspace not found"), { statusCode: 403 });
+    let workspaceSettings = workspaceRows[0].settings || {};
+    if (typeof workspaceSettings === "string") { try { workspaceSettings = JSON.parse(workspaceSettings); } catch { workspaceSettings = {}; } }
+    const lockedBudget = Number(workspaceSettings?.billing?.monthlyBudgetInr);
+    const budgetEnabled = Number.isFinite(lockedBudget) && lockedBudget >= 0;
+    const period = getCurrentBillingPeriod(estimate.org);
+    if (budgetEnabled) {
+      const [spentRows, reservedRows] = await Promise.all([
+        client.query(`SELECT COALESCE(SUM(total_cost_inr),0) AS spent FROM call_billing_records
+          WHERE org_id=$1 AND COALESCE(workspace_id,org_id)=$2 AND created_at >= $3 AND created_at < $4`,
+          [orgId, workspaceId, period.startIso, period.endIso]),
+        client.query(`SELECT COALESCE(SUM(CASE
+            WHEN reservation_row.status='reserved' THEN COALESCE(reservation_row.workspace_estimated_amount_inr,reservation_row.estimated_amount_inr)
+            WHEN reservation_row.status='settled' AND NOT EXISTS (
+              SELECT 1 FROM call_logs call_row
+              INNER JOIN call_billing_records billing_row ON billing_row.org_id=call_row.org_id AND billing_row.call_id=call_row.id
+              WHERE call_row.org_id=reservation_row.org_id AND call_row.provider_call_sid=reservation_row.provider_call_sid
+            ) THEN COALESCE(reservation_row.actual_amount_inr,0)
+            ELSE 0 END),0) AS reserved
+          FROM recharge_billing_reservations reservation_row
+          WHERE reservation_row.org_id=$1 AND reservation_row.workspace_id=$2 AND reservation_row.status IN ('reserved','settled')`,
+          [orgId, workspaceId]),
+      ]);
+      const spend = money(spentRows.rows[0]?.spent);
+      const reservedBudget = money(reservedRows.rows[0]?.reserved);
+      if (money(spend + reservedBudget + estimate.amount) > money(lockedBudget)) {
+        const err = new Error(`Workspace monthly budget reached. Spent ₹${spend.toFixed(2)} with ₹${reservedBudget.toFixed(2)} reserved; cap is ₹${money(lockedBudget).toFixed(2)}.`);
+        err.statusCode = 402;
+        err.code = "WORKSPACE_BUDGET_EXCEEDED";
+        err.isRechargeBillingError = true;
+        throw err;
+      }
     }
 
-    const balance = money(row.recharge_balance_inr);
-    const reserved = money(row.recharge_reserved_inr);
-    const available = money(balance - reserved);
-
-    const { getEffectiveMinimumBalance } = require("../billing/minimumBalance");
-    const orgForMinimum = estimate.org || (await db.getOrg(orgId));
-    if (!orgForMinimum) {
-      const err = new Error("Organization not found");
-      err.statusCode = 404;
-      throw err;
-    }
-    const minimum = await getEffectiveMinimumBalance(orgForMinimum);
-    const requiredAvailable = money(Math.max(amount, minimum.effectiveMinimumBalanceInr || 0));
-
-    if (available < requiredAvailable) {
-      const err = new Error(
-        requiredAvailable > 0
-          ? `Insufficient recharge balance. Available ₹${available.toFixed(2)}, need at least ₹${requiredAvailable.toFixed(2)} (reservation + minimum call balance).`
-          : "Recharge balance is empty. Please recharge the organization before placing outbound calls."
+    if (estimate.billingMethod === "recharge_based") {
+      const { rows } = await client.query(
+        "SELECT recharge_balance_inr, recharge_reserved_inr, billing_method, charge_scope FROM organizations WHERE id = $1 FOR UPDATE",
+        [orgId]
       );
-      // Keep a stable machine-readable reason all the way through the
-      // telephony connector and background dialer. Some error wrappers
-      // preserve the message but drop statusCode, so auto-dial must not
-      // depend on HTTP semantics to recognize a wallet block.
-      err.statusCode = 402;
-      err.code = "INSUFFICIENT_RECHARGE_BALANCE";
-      err.isRechargeBillingError = true;
-      throw err;
+      const row = rows[0];
+      if (!row) throw Object.assign(new Error("Organization not found"), { statusCode: 404 });
+
+      const balance = money(row.recharge_balance_inr);
+      const reserved = money(row.recharge_reserved_inr);
+      const available = money(balance - reserved);
+      const { getEffectiveMinimumBalance } = require("../billing/minimumBalance");
+      const orgForMinimum = estimate.org || (await db.getOrg(orgId));
+      if (!orgForMinimum) throw Object.assign(new Error("Organization not found"), { statusCode: 404 });
+      const minimum = await getEffectiveMinimumBalance(orgForMinimum);
+      const requiredAvailable = money(Math.max(amount, minimum.effectiveMinimumBalanceInr || 0));
+
+      if (available < requiredAvailable) {
+        const err = new Error(requiredAvailable > 0
+          ? `Insufficient recharge balance. Available ₹${available.toFixed(2)}, need at least ₹${requiredAvailable.toFixed(2)} (reservation + minimum call balance).`
+          : "Recharge balance is empty. Please recharge the organization before placing outbound calls.");
+        err.statusCode = 402;
+        err.code = "INSUFFICIENT_RECHARGE_BALANCE";
+        err.isRechargeBillingError = true;
+        throw err;
+      }
+
+      await client.query(
+        "UPDATE organizations SET recharge_reserved_inr = COALESCE(recharge_reserved_inr, 0) + $1 WHERE id = $2",
+        [amount, orgId]
+      );
     }
 
     await client.query(
-      "UPDATE organizations SET recharge_reserved_inr = COALESCE(recharge_reserved_inr, 0) + $1 WHERE id = $2",
-      [amount, orgId]
-    );
-
-    await client.query(
-      "INSERT INTO recharge_billing_reservations (id,org_id,provider,estimated_amount_inr,status,created_at) VALUES ($1,$2,$3,$4,'reserved',$5)",
-      [reservationId, orgId, providerKey, amount, new Date().toISOString()]
+      `INSERT INTO recharge_billing_reservations (id,org_id,workspace_id,workspace_estimated_amount_inr,billing_method,provider,estimated_amount_inr,status,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'reserved',$8)`,
+      [reservationId, orgId, workspaceId, budgetEnabled ? estimate.amount : 0, estimate.billingMethod, providerKey, amount, new Date().toISOString()]
     );
 
     await client.query("COMMIT");
@@ -233,20 +267,24 @@ async function settleReservation({ reservationId, durationSeconds = 0, aiCostInr
     actual = money(actual);
 
     const reserved = money(reservation.estimated_amount_inr);
+    const usesWallet = reservation.billing_method !== "pay_as_you_go";
     const balance = money(org.recharge_balance_inr);
-    const newBalance = money(Math.max(0, balance - actual));
-    const newReserved = money(Math.max(0, money(org.recharge_reserved_inr) - reserved));
+    const newBalance = usesWallet ? money(Math.max(0, balance - actual)) : balance;
+    const newReserved = usesWallet ? money(Math.max(0, money(org.recharge_reserved_inr) - reserved)) : money(org.recharge_reserved_inr);
 
-    await client.query(
-      "UPDATE organizations SET recharge_balance_inr=$1, recharge_reserved_inr=$2 WHERE id=$3",
-      [newBalance, newReserved, reservation.org_id]
-    );
+    if (usesWallet) {
+      await client.query(
+        "UPDATE organizations SET recharge_balance_inr=$1, recharge_reserved_inr=$2 WHERE id=$3",
+        [newBalance, newReserved, reservation.org_id]
+      );
+    }
     await client.query(
       "UPDATE recharge_billing_reservations SET status='settled', actual_amount_inr=$1, duration_seconds=$2, finalized_at=$3, updated_at=$3 WHERE id=$4",
       [actual, Number(durationSeconds) || 0, new Date().toISOString(), reservationId]
     );
     await client.query("COMMIT");
     try {
+      if (!usesWallet) return { balanceInr: newBalance, actualAmountInr: actual, workspaceId: reservation.workspace_id };
       const ledgerService = require("../billing/ledgerService");
       const releaseDelta = money(reserved - actual);
       if (releaseDelta > 0) {

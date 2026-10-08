@@ -34,6 +34,26 @@ router.get("/billing/console", requireAuth, requirePermission("billing.read"), a
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
+router.patch("/billing/workspace-budget", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
+  try {
+    const value = req.body?.monthlyBudgetInr;
+    if (value !== null && (!Number.isFinite(Number(value)) || Number(value) < 0)) {
+      return res.status(400).json({ error: "Monthly workspace budget must be a non-negative INR amount or null." });
+    }
+    const workspaceRepository = require("../db/repositories/workspaceRepository");
+    const workspace = await workspaceRepository.getActive(req.orgId, req.workspaceId);
+    if (!workspace) return res.status(404).json({ error: "Workspace not found" });
+    const billing = { ...(workspace.settings?.billing || {}) };
+    if (value === null) delete billing.monthlyBudgetInr;
+    else billing.monthlyBudgetInr = Math.round(Number(value) * 100) / 100;
+    await workspaceRepository.updateSettings(req.orgId, req.workspaceId, { billing });
+    await auditLog.record(req.orgId, req, "workspace.billing.budget.update", "workspace", req.workspaceId, {
+      monthlyBudgetInr: billing.monthlyBudgetInr ?? null,
+    });
+    res.json({ workspaceId: req.workspaceId, monthlyBudgetInr: billing.monthlyBudgetInr ?? null });
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
+});
+
 // Legacy metrics from flat-file store — used by the demo kirana dashboard.
 router.get("/metrics", requireAuth, requirePermission("platform.manage"), async (req, res) => {
   // Legacy/demo metrics are global flat-file data, not tenant-scoped CRM data.

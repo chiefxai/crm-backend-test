@@ -14,11 +14,13 @@ async function sumCallBillingForPeriod(orgId, startIso, endIso) {
   let phone = 0;
   let total = 0;
   let count = 0;
+  let durationSeconds = 0;
   const byProvider = {};
   for (const row of rows) {
     const t = new Date(row.createdAt || 0).getTime();
     if (t < start || t >= end) continue;
     count += 1;
+    durationSeconds += Number(row.durationSeconds) || 0;
     ai += Number(row.aiCostInr) || 0;
     phone += Number(row.providerCostInr) || 0;
     total += Number(row.totalCostInr) || 0;
@@ -33,6 +35,7 @@ async function sumCallBillingForPeriod(orgId, startIso, endIso) {
     aiSpendInr: round2(ai),
     phoneSpendInr: round2(phone),
     totalSpendInr: round2(total),
+    durationSeconds,
     byProvider: Object.values(byProvider).map((p) => ({ ...p, providerCostInr: round2(p.providerCostInr) })),
   };
 }
@@ -49,6 +52,23 @@ async function getOrganizationBillingConsole(orgId) {
   const billingMethod = rechargeBilling.normalizeBillingMethod(org.billingMethod);
   const period = getCurrentBillingPeriod(org);
   const periodSpend = await sumCallBillingForPeriod(orgId, period.startIso, period.endIso);
+  const workspaceId = require('../workspaces/scope').getScope()?.workspaceId || orgId;
+  const workspace = await require('../db/repositories/workspaceRepository').getActive(orgId, workspaceId);
+  const configuredWorkspaceBudget = workspace?.settings?.billing?.monthlyBudgetInr;
+  const workspaceBudgetInr = configuredWorkspaceBudget !== undefined && configuredWorkspaceBudget !== null
+    && Number.isFinite(Number(configuredWorkspaceBudget)) ? Number(configuredWorkspaceBudget) : null;
+  const workspaceBilling = {
+    workspaceId,
+    workspaceName: workspace?.name || 'Workspace',
+    monthlyBudgetInr: workspaceBudgetInr,
+    periodSpendInr: periodSpend.totalSpendInr,
+    aiMinutesUsed: round2(periodSpend.durationSeconds / 60),
+    aiSpendInr: periodSpend.aiSpendInr,
+    phoneSpendInr: periodSpend.phoneSpendInr,
+    remainingBudgetInr: workspaceBudgetInr !== null
+      ? round2(Math.max(0, workspaceBudgetInr - periodSpend.totalSpendInr)) : null,
+    budgetPeriod: period,
+  };
 
   const [effectiveAi, globalAi, minimumBalance, industryDefault, wallet] = await Promise.all([
     getEffectiveAiPricing(org),
@@ -81,6 +101,7 @@ async function getOrganizationBillingConsole(orgId) {
 
   return {
     orgId,
+    workspaceBilling,
     services,
     overview,
     billingPeriod: period,

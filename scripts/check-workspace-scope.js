@@ -5,10 +5,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { WORKSPACE_TABLES } = require('../src/workspaces/tables');
 const migration = require('../src/db/migrations/2026100702-operational-workspace-scope');
+const billingMigration = require('../src/db/migrations/2026100711-workspace-billing');
 
-const migrationTables = new Set(migration.steps.flatMap(step => {
+const migrationTables = new Set([...migration.steps, ...billingMigration.steps].flatMap(step => {
   const match = step.sql.match(/^ALTER TABLE `([a-z0-9_]+)` ADD COLUMN workspace_id/m);
-  return match ? [match[1]] : [];
+  // Billing reservations carry attribution for cap enforcement but remain
+  // organization-owned; only the usage/cost ledger tables become scoped.
+  return match && WORKSPACE_TABLES.has(match[1]) ? [match[1]] : [];
 }));
 const mismatches = [];
 for (const table of WORKSPACE_TABLES) if (!migrationTables.has(table)) mismatches.push(`Scope table missing workspace_id migration: ${table}`);

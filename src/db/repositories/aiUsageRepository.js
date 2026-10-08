@@ -2,6 +2,7 @@
 // the legacy monolithic repository while preserving the existing return shape.
 const supabase = require("../client");
 const { pool } = require("../pool");
+const { getRequestAuthority } = require('../../authorization/policy');
 
 const FIELDS = {
   id: "id", orgId: "org_id", adminId: "admin_id", callId: "call_id", sessionId: "session_id", provider: "provider",
@@ -24,7 +25,8 @@ async function getSession(id, orgId) {
 }
 
 async function getSummary(orgId, { fromIso = null, toIso = null } = {}) {
-  const clauses = ["org_id = $1"]; const params = [orgId]; let i = 2;
+  const scope = getRequestAuthority();
+  const clauses = ["org_id = $1", "COALESCE(workspace_id,org_id) = $2"]; const params = [orgId, scope?.workspaceId || orgId]; let i = 3;
   if (fromIso) { clauses.push(`created_at >= $${i++}`); params.push(fromIso); }
   if (toIso) { clauses.push(`created_at <= $${i++}`); params.push(toIso); }
   const { rows } = await pool.query(`SELECT COUNT(*) session_count, COUNT(DISTINCT call_id) call_count,
@@ -46,7 +48,8 @@ async function getSummary(orgId, { fromIso = null, toIso = null } = {}) {
 }
 
 async function getByAdmin(orgId, { fromIso = null, toIso = null } = {}) {
-  const clauses = ["org_id = $1"]; const params = [orgId]; let i = 2;
+  const scope = getRequestAuthority();
+  const clauses = ["org_id = $1", "COALESCE(workspace_id,org_id) = $2"]; const params = [orgId, scope?.workspaceId || orgId]; let i = 3;
   if (fromIso) { clauses.push(`created_at >= $${i++}`); params.push(fromIso); }
   if (toIso) { clauses.push(`created_at <= $${i++}`); params.push(toIso); }
   const { rows } = await pool.query(`SELECT admin_id, COUNT(*) session_count, COALESCE(SUM(total_tokens),0) total_tokens,

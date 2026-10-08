@@ -379,3 +379,22 @@ so an unrelated service on host port 3000 cannot produce a false success.
 
 The MySQL2 `minIdle` option was unsupported and has been removed; connection
 limits and idle timeout remain configured.
+
+## Workspace billing allocation and monthly caps
+
+The organization keeps one subscription, invoice, and recharge wallet.
+Migration `2026100711_workspace_billing` attributes AI sessions and call cost
+records to their call's workspace, backfills historical rows from `call_logs`,
+and adds workspace attribution to outbound-call reservations. The Billing &
+Usage page shows current-workspace spend and lets Workspace Admins and
+organization billing administrators set a monthly INR cap. A cap reserves
+the estimated cost before an outbound Vobiz call; concurrent call starts lock
+the workspace row so they cannot each spend the same remaining amount. Calls
+already in progress can finish above the cap. This enforcement currently
+covers the Vobiz outbound call path; the organization wallet remains shared.
+
+Deploy with the normal production migration flow, then confirm
+`2026100711_workspace_billing` appears in `schema_migrations`. Workspace
+spend is based on stored call billing records, so existing calls are allocated
+to their historical workspace where a matching `call_logs` row exists; any
+unmatched legacy charge remains assigned to the initial workspace.

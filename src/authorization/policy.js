@@ -10,7 +10,7 @@ const ORG_PERMISSIONS = {
   Member: [],
 };
 const WORKSPACE_PERMISSIONS = {
-  'Workspace Admin': ['workspace.read','workspace.write','workspace.delete','workspace.settings.manage','workspace.members.manage','workspace.audit.read','workspace.call','workspace.share.propose','workspace.share.copy'],
+  'Workspace Admin': ['workspace.read','workspace.write','workspace.delete','workspace.settings.manage','workspace.members.manage','workspace.audit.read','workspace.call','workspace.share.propose','workspace.share.copy','billing.read'],
   Manager: ['workspace.read','workspace.write','workspace.delete','workspace.call','workspace.share.propose','workspace.share.copy'],
   Member: ['workspace.read','workspace.write','workspace.call','workspace.share.propose','workspace.share.copy'],
   Viewer: ['workspace.read'],
@@ -47,6 +47,7 @@ function requestPermission(req) {
   if (/^\/api\/workspace-sharing\/records\/[^/]+\/copies$/.test(path)) return 'workspace.share.copy';
   if (/^\/api\/workspace-sharing\/records(?:\/|$)/.test(path)) return 'workspace.read';
   if (/^\/api\/workspace-sharing\/grants(?:\/|$)/.test(path)) return read ? 'workspace.read' : 'workspace.settings.manage';
+  if (path === '/api/billing/workspace-budget' && !read) return 'workspace.settings.manage';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';
   if (/^\/api\/settings\/workspace\/members(?:\/|$)/.test(path)) return 'workspace.members.manage';
   if (/^\/api\/settings\/team(?:\/|$)/.test(path)) return read ? 'organization.members.read' : 'organization.members.manage';

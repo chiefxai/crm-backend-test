@@ -105,7 +105,7 @@ const TABLES = {
   recharge_billing_reservations: {
     pk: "id",
     columns: {
-      id: "text", org_id: "text", provider: "text", estimated_amount_inr: "real",
+      id: "text", org_id: "text", workspace_id: "text", workspace_estimated_amount_inr: "real", billing_method: "text", provider: "text", estimated_amount_inr: "real",
       actual_amount_inr: "real", duration_seconds: "real", status: "text",
       provider_call_sid: "text", created_at: "text", updated_at: "text",
       released_at: "text", finalized_at: "text"
@@ -492,7 +492,7 @@ const TABLES = {
   ai_session_usage: {
     pk: "id",
     columns: {
-      id: "text", org_id: "text", admin_id: "text", call_id: "text", session_id: "text",
+      id: "text", org_id: "text", workspace_id: "text", admin_id: "text", call_id: "text", session_id: "text",
       provider: "text", gcp_project_id: "text", gcp_location: "text", model: "text",
       session_started_at: "text", session_ended_at: "text", duration_seconds: "real",
       input_tokens: "int", output_tokens: "int", total_tokens: "int",
@@ -531,7 +531,7 @@ const TABLES = {
   call_billing_records: {
     pk: "id",
     columns: {
-      id: "text", org_id: "text", call_id: "text", duration_seconds: "real",
+      id: "text", org_id: "text", workspace_id: "text", call_id: "text", duration_seconds: "real",
       billing_method: "text", pricing_mode: "text",
       voice_agent_cost_inr: "real", post_call_agent_cost_inr: "real", ai_cost_inr: "real",
       telephony_provider: "text", provider_pricing_version: "text",

@@ -7,5 +7,6 @@ const WORKSPACE_TABLES = new Set([
   'catalog_items', 'orders', 'questionnaires', 'objects', 'object_fields',
   'object_stages', 'object_records', 'channels', 'conversations', 'messages',
   'workflow_runs', 'dnc_entries', 'knowledge_documents', 'knowledge_chunks', 'audit_log',
+  'ai_session_usage', 'call_billing_records',
 ]);
 module.exports = { WORKSPACE_TABLES };
