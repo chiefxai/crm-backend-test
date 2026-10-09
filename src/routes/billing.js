@@ -49,4 +49,7 @@ router.get('/payments', requireAuth, requirePermission('billing.read'), async (r
   }
 });
 
+// Financial submission routes remain disabled unless explicitly enabled.
+router.use(require('../billing/paymentSubmissionRouter').router);
+
 module.exports = router;
