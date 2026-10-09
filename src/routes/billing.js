@@ -49,7 +49,7 @@ router.get('/payments', requireAuth, requirePermission('billing.read'), async (r
   }
 });
 
-// Financial submission routes remain disabled unless explicitly enabled.
+// Organization top-up quote creation is separately feature gated.\nrouter.use(require('../billing/topupQuoteRouter').router);\n\n// Financial submission routes remain disabled unless explicitly enabled.
 router.use(require('../billing/paymentSubmissionRouter').router);
 
 module.exports = router;
