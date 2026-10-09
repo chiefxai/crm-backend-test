@@ -73,3 +73,44 @@ test('connection rolls back and releases on read errors', async () => {
   assert.ok(history.some(q => q.sql === 'ROLLBACK'));
   assert.equal(history.at(-1).sql, 'RELEASE');
 });
+
+
+test('maps persisted clarification status to the frontend payment contract', async () => {
+  const { pool } = fixture([
+    [{ org_id: 'org_123' }],
+    [],
+    [{ id: 'payment_1', purpose: 'topup', status: 'needs_clarification',
+      expected_amount_units: '100', received_amount_units: null, asset: 'INR', scale: 2,
+      submitted_at: '2026-10-09 00:00:00', reviewed_at: null }],
+    [], [], [],
+  ]);
+  const overview = await readBillingOverview('org_123', {
+    pool, orgReader: async () => ({ billingMethod: 'recharge_based' }),
+  });
+  assert.equal(overview.recentPayments[0].status, 'needs_information');
+});
+
+test('snapshot queries are awaited one at a time on the same connection', async () => {
+  let inFlight = false;
+  let overlapped = false;
+  const calls = [];
+  const connection = {
+    async query(sql) {
+      if (inFlight) overlapped = true;
+      inFlight = true;
+      await Promise.resolve();
+      calls.push(sql);
+      inFlight = false;
+      return { rows: sql.includes('FROM organization_billing_accounts')
+        ? [{ org_id: 'org_123' }] : [] };
+    },
+    release() {},
+  };
+  await readBillingOverview('org_123', {
+    pool: { async connect() { return connection; } },
+    orgReader: async () => ({ billingMethod: 'recharge_based' }),
+  });
+  assert.equal(overlapped, false);
+  assert.equal(calls.filter(sql => /^SELECT/.test(sql)).length, 6);
+  assert.equal(calls.at(-1), 'COMMIT');
+});
