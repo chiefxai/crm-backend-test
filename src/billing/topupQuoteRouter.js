@@ -43,12 +43,12 @@ router.post('/topup-quotes', requireAuth, requirePermission('billing.read'), asy
   const pool = getPool();
   try {
     const existing = await pool.query(
-      'SELECT id,status,total_units,asset,scale,valid_until FROM billing_quotes WHERE org_id=? AND idempotency_key=?',
+      'SELECT id,quote_type,status,total_units,asset,scale,valid_until FROM billing_quotes WHERE org_id=? AND idempotency_key=?',
       [req.orgId, key],
     );
     if (existing.rows.length) {
       const row = existing.rows[0];
-      if (row.quote_type && row.quote_type !== 'topup' || row.asset !== amount.asset
+      if (row.quote_type !== 'topup' || row.asset !== amount.asset
         || String(row.total_units) !== amount.units || Number(row.scale) !== 2) {
         return res.status(409).json({ error: 'This request key was already used for a different amount.' });
       }
@@ -67,7 +67,7 @@ router.post('/topup-quotes', requireAuth, requirePermission('billing.read'), asy
         terms_snapshot_json,context_json,total_units,asset,scale,valid_until,created_at,updated_at)
        VALUES (?,?,'topup','draft',1,?,?,NULL,?,?,?, ?,?,?)`,
       [quoteId, req.orgId, key, JSON.stringify(quote), amount.units,
-        amount.asset, amount.scale, validUntil, createdAt, createdAt],
+        amount.asset, amount.scale, new Date(validUntil), now, now],
     );
     return res.status(201).json({
       quoteId, purpose: 'topup', status: 'draft',
@@ -80,7 +80,7 @@ router.post('/topup-quotes', requireAuth, requirePermission('billing.read'), asy
         [req.orgId, key],
       ).catch(() => ({ rows: [] }));
       if (retry.rows.length && retry.rows[0].quote_type === 'topup'
-          && String(retry.rows[0].total_units) === amount.units) return res.json(quoteResponse(retry.rows[0]));
+          && String(retry.rows[0].total_units) === amount.units && retry.rows[0].asset === amount.asset && Number(retry.rows[0].scale) === 2) return res.json(quoteResponse(retry.rows[0]));
       return res.status(409).json({ error: 'Credit top-up already exists with different details.' });
     }
     return res.status(500).json({ error: 'Could not create the top-up request.' });
