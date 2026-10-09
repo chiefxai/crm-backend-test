@@ -99,6 +99,16 @@ function normalizeEvent(input, txOrgId) {
 
 function isDuplicateKey(error) { return error?.code === 'ER_DUP_ENTRY' || error?.errno === 1062 || error?.code === '23505'; }
 
+function validateAllowedEventTypes(input) {
+  if (input === undefined) return null;
+  if (!Array.isArray(input) || input.length === 0 || input.length > 50 ||
+    input.some(type => typeof type !== 'string' || !/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(type)) ||
+    new Set(input).size !== input.length) {
+    throw new TypeError('allowedEventTypes must be a non-empty unique set of up to 50 valid event types.');
+  }
+  return input;
+}
+
 function createMysqlOutboxStore({ pool, clock, tokenSource, random = Math.random }) {
   if (!pool || typeof pool.connect !== 'function') throw new TypeError('Billing MySQL outbox requires a pool with connect().');
   if (typeof tokenSource?.newId !== 'function') throw new TypeError('Billing MySQL outbox requires tokenSource.newId().');
@@ -152,21 +162,23 @@ function createMysqlOutboxStore({ pool, clock, tokenSource, random = Math.random
     return enqueued;
   }
 
-  async function listReadyOrganizations({ limit = 100, afterOrgId } = {}) {
+  async function listReadyOrganizations({ limit = 100, afterOrgId, allowedEventTypes } = {}) {
     limit = boundedInt(limit, 'limit');
     if (afterOrgId !== undefined) afterOrgId = validateId(afterOrgId, 'afterOrgId');
+    const eventTypes = validateAllowedEventTypes(allowedEventTypes);
     const connection = await pool.connect();
     try {
       const cursorClause = afterOrgId ? 'AND org_id>?' : '';
+      const typeClause = eventTypes ? `AND event_type IN (${eventTypes.map(() => '?').join(',')})` : '';
       const params = afterOrgId
-        ? [clock.now(), clock.now(), afterOrgId, limit]
-        : [clock.now(), clock.now(), limit];
+        ? [clock.now(), clock.now(), ...eventTypes || [], afterOrgId, limit]
+        : [clock.now(), clock.now(), ...eventTypes || [], limit];
       const result = queryResult(await connection.query(
         `SELECT org_id, MIN(available_at) AS oldest_available_at
            FROM billing_outbox
           WHERE ((status='pending' AND available_at<=?)
              OR (status='leased' AND lease_expires_at<=?))
-             ${cursorClause}
+             ${typeClause} ${cursorClause}
           GROUP BY org_id
           ORDER BY org_id
           LIMIT ?`,
@@ -176,11 +188,12 @@ function createMysqlOutboxStore({ pool, clock, tokenSource, random = Math.random
     } finally { connection.release(); }
   }
 
-  async function claimBatch({ orgId, workerId, limit = 50, leaseMs = 30000 } = {}) {
+  async function claimBatch({ orgId, workerId, limit = 50, leaseMs = 30000, allowedEventTypes } = {}) {
     orgId = orgId === undefined ? undefined : validateId(orgId, 'orgId');
     workerId = requiredText(workerId, 'workerId');
     limit = boundedInt(limit, 'limit');
     boundedInt(leaseMs, 'leaseMs', { min: 100, max: 24 * 60 * 60 * 1000 });
+    const eventTypes = validateAllowedEventTypes(allowedEventTypes);
     const connection = await pool.connect();
     let started = false;
     try {
@@ -188,12 +201,13 @@ function createMysqlOutboxStore({ pool, clock, tokenSource, random = Math.random
       started = true;
       const now = clock.now();
       const whereOrg = orgId ? 'AND org_id=?' : '';
-      const params = orgId ? [now, now, orgId, limit] : [now, now, limit];
+      const whereType = eventTypes ? `AND event_type IN (${eventTypes.map(() => '?').join(',')})` : '';
+      const params = orgId ? [now, now, orgId, ...eventTypes || [], limit] : [now, now, ...eventTypes || [], limit];
       const selectedResult = queryResult(await connection.query(
         `SELECT id,org_id,event_type,schema_version,aggregate_type,aggregate_id,aggregate_version,partition_key,
                 correlation_id,causation_id,payload_json,status,attempts,lease_token,fencing_token,lease_expires_at,created_at
            FROM billing_outbox
-          WHERE ((status='pending' AND available_at<=?) OR (status='leased' AND lease_expires_at<=?)) ${whereOrg}
+          WHERE ((status='pending' AND available_at<=?) OR (status='leased' AND lease_expires_at<=?)) ${whereOrg} ${whereType}
           ORDER BY available_at,partition_key,id
           LIMIT ? FOR UPDATE SKIP LOCKED`,
         params,
@@ -291,4 +305,4 @@ function createMysqlOutboxStore({ pool, clock, tokenSource, random = Math.random
   return Object.freeze({ enqueue, listReadyOrganizations, claimBatch, ack, fail });
 }
 
-module.exports = { createMysqlOutboxStore, MAX_BATCH_SIZE, MAX_PAYLOAD_BYTES, MAX_BATCH_BYTES, deterministicPartitionKey };
+module.exports = { validateAllowedEventTypes, createMysqlOutboxStore, MAX_BATCH_SIZE, MAX_PAYLOAD_BYTES, MAX_BATCH_BYTES, deterministicPartitionKey };

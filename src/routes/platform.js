@@ -865,4 +865,7 @@ router.delete("/organizations/:id", async (req, res) => {
   }
 });
 
+// Payment decisions inherit the verified platform-operator middleware above.
+router.use(require('../billing/platformPaymentDecisionRouter').router);
+
 module.exports = router;

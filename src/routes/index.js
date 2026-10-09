@@ -17,6 +17,9 @@ router.use("/api/conversations", conversationsRouter);
 // Platform admin
 router.use("/api/platform", require("./platform"));
 
+// Billing compatibility API (authenticated and tenant-scoped).
+router.use("/api/billing", require("./billing"));
+
 // Telephony connectors — all HTTP endpoints (vobiz, twilio, telecmi, …)
 // are mounted here via the registry. Adding a new provider = register it
 // in src/telephony/registry.js, nowhere else.
