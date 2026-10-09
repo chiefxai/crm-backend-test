@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { isPlatformAdminIdentity } = require('../middleware/auth');
 const { getPool } = require('../db/pool');
 const { createMysqlUnitOfWork } = require('./adapters/mysql/unitOfWork');
 const operationStore = require('./adapters/mysql/commandOperationRepository');
@@ -15,7 +16,7 @@ const { createMysqlInvoiceRepository } = require('./modules/postpaid/invoices/my
 const { createMysqlOutboxStore } = require('./adapters/mysql/outboxStore');
 
 function authorizedPlatformDecision(req, actor, orgId) {
-  return req.isPlatformAdmin === true
+  return isPlatformAdminIdentity(req.authClaims, req.userEmail) === true
     && actor?.type === 'user'
     && actor.id === req.userId
     && actor.organizationId === orgId;
