@@ -1,6 +1,7 @@
 'use strict';
 
 const { validateId } = require('./kernel/scope');
+const { toPaymentApiStatus } = require('./paymentStatus');
 const { getPool } = require('../db/pool');
 const db = require('../db/repository');
 
@@ -24,7 +25,7 @@ function period(row) {
 }
 function payment(row) {
   return { id: row.id, purpose: row.purpose,
-    status: row.status === 'needs_clarification' ? 'needs_information' : row.status,
+    status: toPaymentApiStatus(row.status),
     expectedAmount: amount(row.asset, row.expected_amount_units, row.scale),
     receivedAmount: row.received_amount_units == null ? null : amount(row.asset, row.received_amount_units, row.scale),
     submittedAt: dateIso(row.submitted_at || row.created_at), reviewedAt: dateIso(row.reviewed_at),
