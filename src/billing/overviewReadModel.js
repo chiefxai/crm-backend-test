@@ -73,28 +73,32 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = db.get
       return { uninitialized: true };
     }
     const at = now instanceof Date ? now.toISOString() : dateIso(now);
-    const [periodRows, paymentRows, invoiceRows, balanceRows, termsRows] = await Promise.all([
+    const queries = [
       // Queries share one transaction snapshot, but execute sequentially on one connection
       // when the MySQL adapter queues commands.
-      connection.query(`SELECT id,starts_at,ends_at,status,terms_version FROM billing_periods
+      () => connection.query(`SELECT id,starts_at,ends_at,status,terms_version FROM billing_periods
         WHERE org_id=? AND status IN ('active','scheduled')
         ORDER BY starts_at ASC,id ASC LIMIT 100`, [orgId]),
-      connection.query(`SELECT id,purpose,status,expected_amount_units,received_amount_units,asset,scale,submitted_at,reviewed_at,created_at
+      () => connection.query(`SELECT id,purpose,status,expected_amount_units,received_amount_units,asset,scale,submitted_at,reviewed_at,created_at
         FROM billing_payment_requests WHERE org_id=? ORDER BY created_at DESC,id DESC LIMIT 20`, [orgId]),
-      connection.query(`SELECT id,status,total_units,paid_units,asset,scale,issued_at,due_at
+      () => connection.query(`SELECT id,status,total_units,paid_units,asset,scale,issued_at,due_at
         FROM billing_invoices WHERE org_id=? AND status IN ('open','partially_paid','overdue')
         ORDER BY due_at ASC,id ASC LIMIT 50`, [orgId]),
-      connection.query(`SELECT g.grant_kind,g.expires_at,p.asset,p.scale,p.balance_units,p.reserved_units
+      () => connection.query(`SELECT g.grant_kind,g.expires_at,p.asset,p.scale,p.balance_units,p.reserved_units
         FROM billing_credit_positions p
         JOIN billing_credit_grants g ON g.org_id=p.org_id AND g.id=p.grant_id
         JOIN billing_credit_accounts a ON a.org_id=p.org_id AND a.id=p.account_id
         WHERE p.org_id=? AND a.account_type='organization' AND a.status='active'
           AND g.status='active' AND g.effective_at<=?
           AND (g.expires_at IS NULL OR g.expires_at>?)`, [orgId, at, at]),
-      connection.query(`SELECT terms_snapshot_json FROM organization_billing_terms
+      () => connection.query(`SELECT terms_snapshot_json FROM organization_billing_terms
         WHERE org_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
         ORDER BY version DESC LIMIT 1`, [orgId, at, at]),
-    ]);
+    ];
+    // Explicitly serialize all reads on the one snapshot transaction connection.
+    const results = [];
+    for (const query of queries) results.push(await query());
+    const [periodRows, paymentRows, invoiceRows, balanceRows, termsRows] = results;
     const active = periodRows.rows.find(row => row.status === 'active' && dateIso(row.starts_at) <= at && dateIso(row.ends_at) > at);
     const upcoming = periodRows.rows.find(row => row.status === 'scheduled' && dateIso(row.ends_at) > at);
     const termsValue = termsRows.rows[0]?.terms_snapshot_json;
