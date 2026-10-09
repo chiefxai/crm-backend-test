@@ -35,12 +35,12 @@ function decodeCursor(raw) {
     throw invalidPage('Invalid payment pagination cursor.');
   }
   try { validateId(value.id, 'cursor.id'); } catch (_) { throw invalidPage('Invalid payment pagination cursor.'); }
-  if (!Number.isFinite(Date.parse(value.createdAt))) throw invalidPage('Invalid payment pagination cursor.');
+  if (!Number.isFinite(Date.parse(value.createdAt.replace(' ', 'T') + 'Z'))) throw invalidPage('Invalid payment pagination cursor.');
   return value;
 }
 
 function encodeCursor(row) {
-  return Buffer.from(JSON.stringify({ v: 1, createdAt: dateIso(row.created_at), id: row.id })).toString('base64url');
+  return Buffer.from(JSON.stringify({ v: 1, createdAt: row.created_cursor, id: row.id })).toString('base64url');
 }
 function toPayment(row) {
   return {
@@ -65,12 +65,11 @@ async function listPaymentRequests(orgId, { limit, cursor } = {}, { pool = getPo
   let range = '';
   if (after) {
     range = ' AND (created_at<? OR (created_at=? AND id<?))';
-    const at = new Date(after.createdAt);
-    args.push(at, at, after.id);
+    args.push(after.createdAt, after.createdAt, after.id);
   }
   args.push(pageSize + 1);
   const result = await pool.query(`SELECT id,purpose,status,expected_amount_units,received_amount_units,asset,scale,
-       submitted_at,reviewed_at,created_at
+       submitted_at,reviewed_at,created_at,DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor
      FROM billing_payment_requests
      WHERE org_id=?${range}
      ORDER BY created_at DESC,id DESC LIMIT ?`, args);
