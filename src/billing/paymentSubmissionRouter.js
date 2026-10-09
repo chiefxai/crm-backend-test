@@ -79,7 +79,16 @@ router.post('/payments', requireAuth, requirePermission('billing.read'),
       if (!req.file) return res.status(400).json({ error: 'Payment proof is required.' });
       const service = createPaymentSubmitForRequest(req);
       const record = await service.submit({ command, trustedContext, proofFile: req.file });
-      return res.status(201).json(record);
+      return res.status(201).json({
+        id: record.id,
+        purpose: record.purpose,
+        status: record.status,
+        expectedAmount: record.expectedAmount,
+        receivedAmount: null,
+        submittedAt: record.submittedAt,
+        reviewedAt: null,
+        informationRequest: null,
+      });
     } catch (error) {
       return paymentError(res, error);
     }
