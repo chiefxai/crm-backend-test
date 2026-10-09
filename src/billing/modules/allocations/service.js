@@ -214,7 +214,7 @@ function createAllocationService({
       if (await authorizeAllocation({ actor: value.context.actor, orgId: value.orgId, action: 'credits.transfer', fromScope: value.fromScope, toScope: value.toScope }) !== true) {
         throw new BillingDomainError(DOMAIN_ERROR_CODES.FORBIDDEN, 'Actor is not authorized to transfer organization credits.');
       }
-      const requestFingerprint = fingerprint({ orgId: value.orgId, grantId: value.grantId, fromScope: value.fromScope, toScope: value.toScope, amount: value.amount, actorId: value.context.actor.id });
+      const requestFingerprint = fingerprint({ orgId: value.orgId, grantId: value.grantId, fromScope: value.fromScope, toScope: value.toScope, amount: value.amount, expectedPositionVersion: value.expectedPositionVersion, actorId: value.context.actor.id });
       const now = clock.now();
       return unitOfWork.runFinancial({
         orgId: value.orgId, operationId: value.context.operationId, requestFingerprint,

@@ -11,9 +11,9 @@ const KEYS = {
 const DEFAULT_WORKSPACE_PLANS = Object.freeze({
   version: 1,
   plans: [
-    { id: "starter", name: "Starter", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0 } },
-    { id: "growth", name: "Growth", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0 } },
-    { id: "enterprise", name: "Enterprise", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0 } },
+    { id: "starter", name: "Starter", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
+    { id: "growth", name: "Growth", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
+    { id: "enterprise", name: "Enterprise", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, extraWorkspaceMonthlyInr: null, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
   ],
 });
 
@@ -56,6 +56,7 @@ function normalizeWorkspacePlans(input, currentVersion) {
         includedWorkspaces,
         extraWorkspaceMonthlyInr: money(pricing.extraWorkspaceMonthlyInr, "additional workspace monthly price", true),
         additionalIndustryMonthlyInr: money(pricing.additionalIndustryMonthlyInr, "additional industry monthly price"),
+        monthlySubscriptionCreditsInr: money(pricing.monthlySubscriptionCreditsInr ?? 0, "monthly subscription credits"),
       },
     };
   });
