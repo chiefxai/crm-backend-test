@@ -119,7 +119,7 @@ async function createWorkspace(orgId, { name, industry, branchName = null, prici
     const organizationPricing=organizationPolicy.quote(policy,[...existingWorkspaces,{industry}]);
     const billingAgreement={organizationMonthlyQuoteAtCreation:organizationPricing,acceptedAt:now,createdByPlatformAdmin:platformAdmin};
     await client.query(`INSERT INTO workspaces (id,org_id,name,industry,branch_name,status,is_default,created_at,settings)
-      VALUES (?,?,?,?,?,'Active',0,?,?)`,[workspaceId,orgId,name,industry,branchName,now,JSON.stringify({billingAgreement})]);
+      VALUES (?,?,?,?,?,'Active',0,?,?)`,[workspaceId,orgId,name,industry,branchName,now,JSON.stringify({billingAgreement,enabledFeatures:[]})]);
     await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,role_source,created_at)
       VALUES (?,?,?,'Workspace Admin','Active','manual',?)`,[workspaceId,orgId,initialAdminMemberId,now]);
     await seedIndustryObjects(client,orgId,workspaceId,industry,now);
