@@ -76,4 +76,44 @@ router.post('/billing/organizations/:orgId/payments/:paymentRequestId/decision',
     }
   });
 
+
+router.get('/billing/payment-reviews', requireDecisionEnabled, async (req, res) => {
+  try {
+    const { listPlatformPaymentReviews } = require('./platformPaymentReviewReadModel');
+    return res.json(await listPlatformPaymentReviews({
+      status: req.query.status,
+      limit: req.query.limit,
+      cursor: req.query.cursor,
+      orgId: req.query.orgId,
+    }));
+  } catch (error) {
+    return decisionError(res, error);
+  }
+});
+
+// Receipt access is restricted to the same verified platform-operator boundary.
+router.get('/billing/organizations/:orgId/payments/:paymentRequestId/proof',
+  requireDecisionEnabled, async (req, res) => {
+    try {
+      const { createMysqlPaymentSubmissionRepository } = require('./modules/payments/repositories/mysqlPaymentSubmissionRepository');
+      const { createConfiguredPrivatePaymentProofStorage } = require('./adapters/storage/privatePaymentProofStorage');
+      const { getPool } = require('../db/pool');
+      const orgId = validateId(req.params.orgId, 'orgId');
+      const paymentRequestId = validateId(req.params.paymentRequestId, 'paymentRequestId');
+      const reference = await createMysqlPaymentSubmissionRepository({ pool: getPool() })
+        .getReceiptReference({ orgId, paymentRequestId });
+      if (!reference) return res.status(404).json({ error: 'Payment not found.' });
+      if (typeof reference.proofObjectKey !== 'string'
+        || !reference.proofObjectKey.startsWith(`billing/payment-proofs/${orgId}/`)) {
+        return res.status(404).json({ error: 'Payment receipt unavailable.' });
+      }
+      const url = await createConfiguredPrivatePaymentProofStorage()
+        .signedDownload({ key: reference.proofObjectKey, expiresIn: 120 });
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ url, expiresIn: 120 });
+    } catch (error) {
+      return decisionError(res, error);
+    }
+  });
+
 module.exports = { router, decisionCommand, requireDecisionEnabled, decisionError };
