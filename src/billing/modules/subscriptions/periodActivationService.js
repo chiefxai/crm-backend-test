@@ -87,7 +87,7 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
         occurredAt, correlationId,
         payload: { periodId, paymentRequestId: funding.paymentRequestId, grant: grantResult, allocationPolicy: period.termsSnapshot?.allocationPolicy || null },
       }];
-      if (grantResult && period.termsSnapshot?.allocationPolicy?.ruleVersion) {
+      if (grantResult && period.termsSnapshot?.allocationPolicy?.ruleVersionId && Number.isSafeInteger(period.termsSnapshot.allocationPolicy.version) && period.termsSnapshot.allocationPolicy.version > 0) {
         events.push({
           eventId: stableId('billing-event', `${orgId}\0allocation-requested\0${periodId}`),
           eventType: 'CreditGrantAllocationRequested.v1', schemaVersion: 1, operationId, orgId,
