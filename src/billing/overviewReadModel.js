@@ -66,7 +66,7 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = db.get
     await connection.query('START TRANSACTION READ ONLY');
     started = true;
     const accountRows = (await connection.query(
-      'SELECT org_id FROM organization_billing_accounts WHERE org_id=?', [orgId])).rows;
+      'SELECT org_id,fallback_mode FROM organization_billing_accounts WHERE org_id=?', [orgId])).rows;
     if (!accountRows.length) {
       await connection.query('COMMIT');
       started = false;
@@ -103,9 +103,13 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = db.get
     const upcoming = periodRows.rows.find(row => row.status === 'scheduled' && dateIso(row.ends_at) > at);
     const termsValue = termsRows.rows[0]?.terms_snapshot_json;
     const subscriptionTerms = termsValue == null ? null : typeof termsValue === 'string' ? JSON.parse(termsValue) : termsValue;
+    const fallbackMode = accountRows[0].fallback_mode;
+    if (!['prepaid', 'postpaid'].includes(fallbackMode)) {
+      throw new TypeError('Unrecognized billing account fallback mode.');
+    }
     const result = {
       orgId,
-      billingMethod: org.billingMethod === 'recharge_based' ? 'recharge_based' : 'pay_as_you_go',
+      billingMethod: fallbackMode === 'prepaid' ? 'recharge_based' : 'pay_as_you_go',
       activePeriod: period(active),
       nextPeriod: period(upcoming),
       balances: aggregateBalances(balanceRows.rows),
