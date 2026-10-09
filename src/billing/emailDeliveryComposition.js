@@ -10,6 +10,7 @@ function checkEmailDeliveryConfig(env = process.env) {
   // That is not an acceptable terminal state for queued billing email.
   const required = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'BILLING_EMAIL_PAYLOAD_KEY'];
   const missing = required.filter(key => !env[key] || !String(env[key]).trim());
+  if (String(env.BILLING_EMAIL_PAYLOAD_KEY || '').length < 32 && !missing.includes('BILLING_EMAIL_PAYLOAD_KEY')) missing.push('BILLING_EMAIL_PAYLOAD_KEY');
   if (missing.length) {
     const error = new Error('Billing email delivery dependencies are not configured.');
     error.code = 'BILLING_EMAIL_CONFIG_MISSING';
