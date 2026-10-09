@@ -1,11 +1,11 @@
 'use strict';
 
 const { validateId } = require('./kernel/scope');
+const { toPaymentApiStatus } = require('./paymentStatus');
 const { getPool } = require('../db/pool');
 const { dateIso } = require('./overviewReadModel');
 
 const MAX_PAGE_SIZE = 100;
-const STATUS_MAP = Object.freeze({ needs_clarification: 'needs_information', pending: 'pending_verification' });
 
 function parseLimit(value) {
   if (value === undefined) return 25;
@@ -46,7 +46,7 @@ function toPayment(row) {
   return {
     id: row.id,
     purpose: row.purpose,
-    status: STATUS_MAP[row.status] || row.status,
+    status: toPaymentApiStatus(row.status),
     expectedAmount: { asset: row.asset, units: String(row.expected_amount_units), scale: Number(row.scale) },
     receivedAmount: row.received_amount_units == null ? null
       : { asset: row.asset, units: String(row.received_amount_units), scale: Number(row.scale) },
