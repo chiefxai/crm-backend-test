@@ -479,8 +479,20 @@ router.post("/organizations", async (req, res) => {
     // from platform settings, never from client-provided retention/backup values.
     // Preserve legacy custom payloads from older clients during the transition.
     const hasLegacyOverrides = dataRetentionMode === "custom" || (backup && typeof backup === "object");
-    const selectedRetention = retentionPolicyId !== undefined || !hasLegacyOverrides
-      ? await require("../platform/dataRetention").resolveRetentionTemplate(retentionPolicyId, adminEmail, retentionPolicyVersion)
+    // The subscription plan is the source of truth for the combined policy.
+    // Older plans/clients without a linked policy retain their existing behavior.
+    const planRetentionPolicyId = selectedPlan.retentionPolicyId || null;
+    if (planRetentionPolicyId && retentionPolicyId != null &&
+        String(retentionPolicyId).trim() !== planRetentionPolicyId) {
+      throw Object.assign(new Error(
+        "Retention and backup policy changed on this subscription plan. Reload organization setup."
+      ), { statusCode: 409 });
+    }
+    const policyForOrg = planRetentionPolicyId || retentionPolicyId;
+    const selectedRetention = policyForOrg !== undefined || !hasLegacyOverrides
+      ? await require("../platform/dataRetention").resolveRetentionTemplate(
+        policyForOrg, adminEmail, retentionPolicyVersion,
+      )
       : null;
     const effectiveRetentionMode = selectedRetention ? "custom" : dataRetentionMode;
     const effectiveRetentionOverrides = selectedRetention ? selectedRetention.retention : dataRetentionOverrides;

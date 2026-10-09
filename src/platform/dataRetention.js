@@ -138,6 +138,19 @@ async function setPolicyCatalog(input) {
     throw policyError("Policy IDs must be unique.");
   if (new Set(policies.map(p => p.name.toLowerCase())).size !== policies.length)
     throw policyError("Policy names must be unique.");
+  // Never strand a subscription plan by removing a policy it references.
+  // Organizations already created keep snapshots, but future organizations
+  // created from active or archived plans must still resolve their policy.
+  const workspacePlans = await require("./billingSettings").getWorkspacePlans();
+  const nextIds = new Set(policies.map(policy => policy.id));
+  const linked = (workspacePlans.plans || []).find(plan =>
+    plan.retentionPolicyId && !nextIds.has(plan.retentionPolicyId));
+  if (linked) {
+    throw policyError(
+      `Policy is assigned to the "${linked.name}" subscription plan. Reassign that plan before deleting the policy.`,
+      409,
+    );
+  }
   const defaultPolicyId = String(input.defaultPolicyId || "");
   const selectedDefault = policies.find(row => row.id === defaultPolicyId);
   if (!selectedDefault) throw policyError("Choose one default policy.");

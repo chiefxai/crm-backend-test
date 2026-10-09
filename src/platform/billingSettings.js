@@ -19,7 +19,7 @@ const DEFAULT_WORKSPACE_PLANS = Object.freeze({
 
 const WORKSPACE_PLAN_MODES = new Set(["single", "same_industry", "mixed_industry"]);
 
-function normalizeWorkspacePlans(input, currentVersion) {
+function normalizeWorkspacePlans(input, currentVersion, policyCatalog = null) {
   if (!input || typeof input !== "object" || !Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 100) {
     throw Object.assign(new Error("Provide between 1 and 100 workspace plans."), { statusCode: 400 });
   }
@@ -48,9 +48,18 @@ function normalizeWorkspacePlans(input, currentVersion) {
     if (!Number.isInteger(includedWorkspaces) || includedWorkspaces < 1 || includedWorkspaces > 1000) {
       throw Object.assign(new Error(`${path} included workspaces must be between 1 and 1000 for multi-workspace plans.`), { statusCode: 400 });
     }
+    // Legacy workspace plans without a policy link inherit the platform default
+    // on their next save. Explicit links must refer to an existing template.
+    const policyId = plan.retentionPolicyId == null || plan.retentionPolicyId === ""
+      ? (policyCatalog?.defaultPolicyId || null) : String(plan.retentionPolicyId).trim();
+    if (policyId && policyCatalog && !policyCatalog.policies.some(policy => policy.id === policyId)) {
+      throw Object.assign(new Error(`${path} retention and backup policy no longer exists. Refresh policies before saving.`),
+        { statusCode: 409 });
+    }
     ids.add(id); names.add(name.toLowerCase());
     return {
       id, name, active: plan.active, defaultMode: plan.defaultMode,
+      retentionPolicyId: policyId,
       pricing: {
         baseMonthlyInr: money(pricing.baseMonthlyInr, "organization monthly price", true),
         includedWorkspaces,
@@ -132,7 +141,11 @@ async function getWorkspacePlans() {
 
 async function setWorkspacePlans(actor, input) {
   const current = await getWorkspacePlans();
-  const plans = normalizeWorkspacePlans({ ...input, priorPlanIds: current.plans.map((plan) => plan.id) }, current.version);
+  const policyCatalog = await require("./dataRetention").getPolicyCatalog();
+  const plans = normalizeWorkspacePlans(
+    { ...input, priorPlanIds: current.plans.map(plan => plan.id) },
+    current.version, policyCatalog,
+  );
   const next = { version: current.version + 1, plans, updatedAt: new Date().toISOString(), updatedBy: actor?.userId || null };
   await platformSettings.setSetting(KEYS.workspacePlans, next);
   return next;
