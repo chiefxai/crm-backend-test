@@ -35,4 +35,18 @@ router.get('/overview', requireAuth, requirePermission('billing.read'), async (r
   }
 });
 
+
+router.get('/payments', requireAuth, requirePermission('billing.read'), async (req, res) => {
+  try {
+    const { listPaymentRequests } = require('../billing/paymentReadModel');
+    const result = await listPaymentRequests(req.orgId, {
+      cursor: req.query.cursor,
+      limit: req.query.limit,
+    });
+    return res.json(result);
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ error: safeErrorMessage(error) });
+  }
+});
+
 module.exports = router;
