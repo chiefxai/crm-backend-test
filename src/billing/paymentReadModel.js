@@ -31,7 +31,7 @@ function decodeCursor(raw) {
     value = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
   } catch (_) { throw invalidPage('Invalid payment pagination cursor.'); }
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join(',') !== 'createdAt,id,v'
-    || value.v !== 1 || typeof value.createdAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.createdAt)) {
+    || value.v !== 1 || typeof value.createdAt !== 'string' || !/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{6}$/.test(value.createdAt)) {
     throw invalidPage('Invalid payment pagination cursor.');
   }
   try { validateId(value.id, 'cursor.id'); } catch (_) { throw invalidPage('Invalid payment pagination cursor.'); }
