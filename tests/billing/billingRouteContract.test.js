@@ -24,3 +24,8 @@ test('new overview is scoped, authenticated, and uses the ledger read model', ()
   assert.match(routes, /readBillingOverview\(req\.orgId\)/);
   assert.match(routes, /BILLING_ACCOUNT_NOT_INITIALIZED/);
 });
+
+test('payment history uses authenticated organization and billing.read permission', () => {
+  assert.match(routes, /router\.get\(['"]\/payments['"],\s*requireAuth,\s*requirePermission\(['"]billing\.read['"]\)/);
+  assert.match(routes, /listPaymentRequests\(req\.orgId,/);
+});
