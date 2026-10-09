@@ -165,6 +165,27 @@ router.get("/industry", requireAuth, async (req, res) => {
   }
 });
 
+// Organization-wide virtual number read model for authorized organization admins.
+// The tenant is taken only from req.orgId; callers cannot pass another org ID.
+router.get("/organization/numbers", requireAuth, requirePermission("organization.read"), async (req,res) => {
+  try {
+    const { getPool } = require("../db/pool");
+    const workspaces = await workspaceRepository.listForOrg(req.orgId);
+    const result = await getPool().query(`SELECT id,workspace_id,org_id,number,provider,status,
+      friendly_name,routing_url,incoming_call_count,outgoing_call_count
+      FROM virtual_numbers WHERE org_id=? ORDER BY number,id`, [req.orgId]);
+    res.json({
+      workspaces: workspaces.map(({id,name,status}) => ({id,name,status})),
+      rows: result.rows.map(row => ({
+        id:row.id,workspaceId:row.workspace_id || row.org_id,number:row.number,
+        provider:row.provider,status:row.status,friendlyName:row.friendly_name,
+        routingUrl:row.routing_url,incomingCallCount:Number(row.incoming_call_count || 0),
+        outgoingCallCount:Number(row.outgoing_call_count || 0),
+      })),
+    });
+  } catch(err) { res.status(err.statusCode || 500).json({error:safeErrorMessage(err)}); }
+});
+
 // ── Virtual numbers ──
 router.get("/numbers", requireAuth, async (req, res) => {
   try { res.json(await db.list("numbers", req.orgId)); }
