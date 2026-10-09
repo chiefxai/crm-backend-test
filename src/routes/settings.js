@@ -283,6 +283,44 @@ router.delete("/organization/workspace-access/:workspaceId/:memberId", requireAu
   } catch(err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
 });
 
+// Organization administrators map an explicit, least-privilege feature set
+// to each workspace. Missing policies continue legacy entitlement behavior.
+router.get("/organization/workspace-features", requireAuth, requirePermission("organization.read"), async (req,res) => {
+  try {
+    const catalog = require("../platform/featureFlags");
+    const org = await db.getOrg(req.orgId);
+    const allowedKeys = await catalog.sanitizeFeatureKeys(org?.featureFlags || []);
+    const workspaces = await workspaceRepository.listForOrg(req.orgId);
+    const assignments = await Promise.all(workspaces.map(async workspace => {
+      const selected = await workspaceRepository.getActive(req.orgId,workspace.id);
+      const keys = selected?.settings?.enabledFeatures;
+      return { id: workspace.id,name: workspace.name,status: workspace.status,
+        configured: Array.isArray(keys),
+        enabledFeatures: Array.isArray(keys) ? keys.filter(key => allowedKeys.includes(key)) : allowedKeys };
+    }));
+    res.json({ availableFeatures: allowedKeys, workspaces: assignments });
+  } catch(error) { res.status(error.statusCode || 500).json({error:safeErrorMessage(error)}); }
+});
+router.put("/organization/workspace-features/:workspaceId", requireAuth, requirePermission("organization.manage"), async (req,res) => {
+  try {
+    const catalog = require("../platform/featureFlags");
+    const workspaceId=String(req.params.workspaceId || '');
+    const workspaces=await workspaceRepository.listForOrg(req.orgId);
+    if (!workspaces.some(row => row.id === workspaceId && row.status === 'Active'))
+      return res.status(404).json({error:'Active workspace not found'});
+    if (!Array.isArray(req.body?.enabledFeatures) || req.body.enabledFeatures.some(key => typeof key !== 'string'))
+      return res.status(400).json({error:'enabledFeatures must be a list of feature keys'});
+    const org = await db.getOrg(req.orgId);
+    const allowed = new Set(await catalog.sanitizeFeatureKeys(org?.featureFlags || []));
+    const selected=[...new Set(req.body.enabledFeatures)];
+    if (selected.some(key => !allowed.has(key)))
+      return res.status(400).json({error:'Features must be enabled for the organization first'});
+    await workspaceRepository.updateSettings(req.orgId,workspaceId,{enabledFeatures:selected});
+    await auditLog.record(req.orgId,req,'workspace.features.update','workspace',workspaceId,{enabledFeatures:selected});
+    res.json({workspaceId,configured:true,enabledFeatures:selected});
+  } catch(error) { res.status(error.statusCode || 500).json({error:safeErrorMessage(error)}); }
+});
+
 // ── Team members ──
 router.get("/workspace/members", requireAuth, requirePermission("workspace.members.manage"), async (req, res) => {
   try { res.json(await workspaceRepository.listMembers(req.orgId,req.workspaceId)); }
@@ -356,9 +394,11 @@ router.get("/me", requireAuth, async (req, res) => {
     // Org admins get whatever the org-level flags are (controlled by super admin).
     // Other roles get the intersection of personal grants and org-level grants.
     const isOrgAdmin = hasPermission(req,"workspace.settings.manage");
-    const featureFlags = isOrgAdmin
-      ? orgFlags
-      : memberFlags.filter((f) => orgFlags.includes(f));
+    const workspaceFeatures = require("../authorization/workspaceFeatures");
+    const configuredKeys = await workspaceFeatures.listWorkspaceGrants(req.orgId,req.workspaceId);
+    const featureFlags = await workspaceFeatures.effectiveKeys(
+      orgFlags,configuredKeys,memberFlags,isOrgAdmin
+    );
     res.json({
       userId: req.userId,
       email: req.userEmail,
