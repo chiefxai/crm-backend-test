@@ -151,6 +151,8 @@ async function requireAuth(req, res, next) {
     req.orgId     = membership.orgId;
     req.userRole  = membership.role;
     req.authClaims = payload;
+    req.orgFeatureFlags = Array.isArray(org.featureFlags) ? org.featureFlags : [];
+    req.memberFeatureFlags = Array.isArray(membership.featureFlags) ? membership.featureFlags : [];
     attachAuthorization(req,await resolveAuthorization({ userId,email: userEmail,orgId: req.orgId,workspaceId: req.workspaceId,
       platformAdmin: isPlatformAdminIdentity(payload,userEmail),membership }));
     res.set("X-Organization-Id", req.orgId);
