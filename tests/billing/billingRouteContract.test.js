@@ -19,6 +19,8 @@ test('legacy billing overview is protected by authentication and billing.read', 
   assert.match(routes, /getOrganizationBillingConsole\(req\.orgId\)/);
 });
 
-test('legacy overview is not exposed as the new credit-based overview', () => {
-  assert.doesNotMatch(routes, /router\.get\(['"]\/overview['"]/);
+test('new overview is scoped, authenticated, and uses the ledger read model', () => {
+  assert.match(routes, /router\.get\(['"]\/overview['"],\s*requireAuth,\s*requirePermission\(['"]billing\.read['"]\)/);
+  assert.match(routes, /readBillingOverview\(req\.orgId\)/);
+  assert.match(routes, /BILLING_ACCOUNT_NOT_INITIALIZED/);
 });
