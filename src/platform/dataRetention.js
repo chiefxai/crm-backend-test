@@ -68,32 +68,144 @@ function normalizePolicy(input, base = DEFAULT_POLICY) {
   return result;
 }
 
-async function getPlatformDefaults() {
-  const stored = await platformSettings.getSetting(PLATFORM_KEY, null);
+const CATALOG_KEY = "data_retention.policy_catalog";
+const DEFAULT_TEMPLATE_ID = "platform-default";
+function policyError(message, statusCode = 400) {
+  return Object.assign(new Error(message), { statusCode });
+}
+function normalizeBackupTemplate(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input) || typeof input.enabled !== "boolean")
+    throw policyError("Provide valid backup settings for every policy.");
+  const frequency = String(input.frequency || "");
+  if (!["daily", "weekly", "monthly"].includes(frequency))
+    throw policyError("Backup frequency must be daily, weekly, or monthly.");
+  const retentionDays = Number(input.retentionDays);
+  if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650)
+    throw policyError("Backup retention must be 1–3650 days.");
+  return { enabled: input.enabled, frequency, retentionDays };
+}
+function normalizeTemplate(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw policyError("Each policy needs a name, retention, and backup configuration.");
+  const id = String(input.id || "").trim();
+  const name = String(input.name || "").trim();
+  const description = String(input.description || "").trim();
+  if (!/^[a-z][a-z0-9_-]{0,63}$/.test(id)) throw policyError("Invalid policy ID.");
+  if (!name || name.length > 100) throw policyError("Policy names must be 1–100 characters.");
+  if (description.length > 300) throw policyError("Policy descriptions must be at most 300 characters.");
+  if (!input.retention || typeof input.retention !== "object" || Array.isArray(input.retention))
+    throw policyError("Retention periods must be an object.");
+  let retention;
+  try { retention = normalizePolicy(input.retention, DEFAULT_POLICY); }
+  catch (err) { throw policyError(err.message); }
+  return { id, name, description, retention, backup: normalizeBackupTemplate(input.backup) };
+}
 
-  // Migrate the original "all Never" platform policy to the defined defaults.
-  // Once an admin changes a value (including intentionally choosing Never),
-  // that stored policy is respected normally.
-  if (!stored || (typeof stored === "object" && Object.keys(DATA_TYPES).every((key) => stored[key] == null))) {
+async function getLegacyDefaults() {
+  const stored = await platformSettings.getSetting(PLATFORM_KEY, null);
+  // Preserve the original migration away from an unconfigured all-Never policy.
+  if (!stored || (typeof stored === "object" && Object.keys(DATA_TYPES).every(key => stored[key] == null))) {
     await platformSettings.setSetting(PLATFORM_KEY, DEFAULT_POLICY);
     return { ...DEFAULT_POLICY };
   }
-
   return normalizePolicy(stored, DEFAULT_POLICY);
 }
-
+async function getPolicyCatalog() {
+  const stored = await platformSettings.getSetting(CATALOG_KEY, null);
+  if (stored) {
+    if (!Array.isArray(stored.policies) || !stored.policies.length ||
+        !stored.policies.some(row => row.id === stored.defaultPolicyId))
+      throw new Error("The saved retention and backup policy catalog is invalid.");
+    return stored;
+  }
+  return { version: 0, defaultPolicyId: DEFAULT_TEMPLATE_ID, policies: [{
+    id: DEFAULT_TEMPLATE_ID, name: "Platform default",
+    description: "Default data retention and backup settings for new organizations.",
+    retention: await getLegacyDefaults(),
+    backup: { enabled: false, frequency: "monthly", retentionDays: 365 },
+  }] };
+}
+async function setPolicyCatalog(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw policyError("Provide a policy catalog.");
+  const current = await getPolicyCatalog();
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion !== current.version)
+    throw policyError("Policies changed since you opened this page. Reload before saving.", 409);
+  if (!Array.isArray(input.policies) || input.policies.length < 1 || input.policies.length > 50)
+    throw policyError("Keep between 1 and 50 policies.");
+  const policies = input.policies.map(normalizeTemplate);
+  if (new Set(policies.map(p => p.id)).size !== policies.length)
+    throw policyError("Policy IDs must be unique.");
+  if (new Set(policies.map(p => p.name.toLowerCase())).size !== policies.length)
+    throw policyError("Policy names must be unique.");
+  const defaultPolicyId = String(input.defaultPolicyId || "");
+  const selectedDefault = policies.find(row => row.id === defaultPolicyId);
+  if (!selectedDefault) throw policyError("Choose one default policy.");
+  if (!policies.some(row => row.id === current.defaultPolicyId))
+    throw policyError("Set a new default before deleting the previous default.");
+  const next = { version: current.version + 1, defaultPolicyId, policies };
+  await platformSettings.setSetting(CATALOG_KEY, next);
+  await platformSettings.setSetting(PLATFORM_KEY, selectedDefault.retention);
+  return next;
+}
+async function resolveRetentionTemplate(policyId, adminEmail, expectedVersion) {
+  const catalog = await getPolicyCatalog();
+  if (expectedVersion !== undefined && expectedVersion !== catalog.version)
+    throw policyError("Retention and backup policies changed. Reload before creating the organization.", 409);
+  const id = policyId == null ? catalog.defaultPolicyId : String(policyId).trim();
+  const policy = catalog.policies.find(row => row.id === id);
+  if (!policy) throw policyError("Selected retention and backup policy no longer exists.", 409);
+  const email = String(adminEmail || "").trim().toLowerCase();
+  if (policy.backup.enabled && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    throw policyError("An organization admin email is required when automated backups are enabled.");
+  return {
+    policyId: policy.id, policyName: policy.name,
+    retention: normalizePolicy(policy.retention, DEFAULT_POLICY),
+    backup: {
+      enabled: policy.backup.enabled,
+      frequency: policy.backup.frequency,
+      retentionDays: policy.backup.retentionDays,
+      email: policy.backup.enabled ? email : "",
+    },
+  };
+}
+async function getPlatformDefaults() {
+  const stored = await platformSettings.getSetting(CATALOG_KEY, null);
+  if (stored) {
+    const def = stored.policies?.find(row => row.id === stored.defaultPolicyId);
+    if (!def) throw new Error("Retention policy default is not configured.");
+    return normalizePolicy(def.retention, DEFAULT_POLICY);
+  }
+  return getLegacyDefaults();
+}
 async function setPlatformDefaults(policy) {
   const normalized = normalizePolicy(policy, DEFAULT_POLICY);
+  const stored = await platformSettings.getSetting(CATALOG_KEY, null);
+  if (stored) {
+    const updated = await setPolicyCatalog({
+      expectedVersion: stored.version,
+      defaultPolicyId: stored.defaultPolicyId,
+      policies: stored.policies.map(row => row.id === stored.defaultPolicyId
+        ? { ...row, retention: normalized } : row),
+    });
+    return updated.policies.find(row => row.id === updated.defaultPolicyId).retention;
+  }
   await platformSettings.setSetting(PLATFORM_KEY, normalized);
   return normalized;
 }
 
 function extractOrgSettings(org) {
-  let settings = org?.settings || {};
+  // Worker queries return a raw settings column. db.getOrg() returns the
+  // flattened API object (dataRetention/dataBackup at top level).
+  let settings = org?.settings;
   if (typeof settings === "string") {
     try { settings = JSON.parse(settings); } catch { settings = {}; }
   }
-  return settings && typeof settings === "object" ? settings : {};
+  if (settings && typeof settings === "object" && !Array.isArray(settings)) return settings;
+  return {
+    ...(org?.dataRetention !== undefined ? { [ORG_KEY]: org.dataRetention } : {}),
+    ...(org?.dataBackup !== undefined ? { [BACKUP_KEY]: org.dataBackup } : {}),
+  };
 }
 
 async function getOrgPolicy(orgId) {
@@ -109,6 +221,8 @@ async function getOrgPolicy(orgId) {
     organizationId: orgId,
     mode,
     policy,
+    policyId: retention.policyId || null,
+    policyName: retention.policyName || null,
     defaults,
     overrides: mode === "custom" ? overrides : {},
     backup: { ...BACKUP_DEFAULTS, ...(settings[BACKUP_KEY] || {}) },
@@ -571,6 +685,9 @@ module.exports = {
   DATA_TYPES,
   DEFAULT_POLICY,
   BACKUP_DEFAULTS,
+  getPolicyCatalog,
+  setPolicyCatalog,
+  resolveRetentionTemplate,
   getPlatformDefaults,
   setPlatformDefaults,
   getOrgPolicy,

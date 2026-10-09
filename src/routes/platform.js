@@ -239,6 +239,23 @@ router.get("/features", async (req, res) => {
   }
 });
 
+// Reusable platform retention + backup templates. The catalog is versioned;
+// one policy is always designated the default.
+router.get("/data-retention/policies", async (req, res) => {
+  try { res.json(await require("../platform/dataRetention").getPolicyCatalog()); }
+  catch (err) { handleError(err, res); }
+});
+router.put("/data-retention/policies", async (req, res) => {
+  try {
+    const catalog = await require("../platform/dataRetention").setPolicyCatalog(req.body || {});
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail },
+      "platform.retention.policies.update", "retention_policy_catalog",
+      "global", { version: catalog.version, defaultPolicyId: catalog.defaultPolicyId,
+        policyIds: catalog.policies.map(p => p.id) });
+    res.json(catalog);
+  } catch (err) { handleError(err, res); }
+});
+
 // ── Data retention defaults and organization policies ─────────────────────
 router.get("/data-retention/defaults", async (req, res) => {
   try { res.json(await platformAdmin.getDataRetentionDefaults()); }
@@ -335,7 +352,7 @@ router.post("/organizations", async (req, res) => {
       name, workspaceName, industry, subscriptionPlan: requestedPlan, workspacePlanId, workspacePlanVersion, adminEmail, adminName, featureFlags,
       gcpProjectMode = "existing", gcpProject, callProvider,
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
-      dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
+      dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null, retentionPolicyId, retentionPolicyVersion,
       workspacePolicy: requestedWorkspacePolicy, initialWorkspaces: requestedWorkspaces = [], firstBranchName = null
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
@@ -457,6 +474,18 @@ router.post("/organizations", async (req, res) => {
       return res.status(400).json({ error: "Invalid billing charge scope." });
     }
     const initialRecharge = Math.max(0, Number(initialRechargeAmountInr) || 0);
+
+    // New clients select one combined template; the server always resolves it
+    // from platform settings, never from client-provided retention/backup values.
+    // Preserve legacy custom payloads from older clients during the transition.
+    const hasLegacyOverrides = dataRetentionMode === "custom" || (backup && typeof backup === "object");
+    const selectedRetention = retentionPolicyId !== undefined || !hasLegacyOverrides
+      ? await require("../platform/dataRetention").resolveRetentionTemplate(retentionPolicyId, adminEmail, retentionPolicyVersion)
+      : null;
+    const effectiveRetentionMode = selectedRetention ? "custom" : dataRetentionMode;
+    const effectiveRetentionOverrides = selectedRetention ? selectedRetention.retention : dataRetentionOverrides;
+    const effectiveBackup = selectedRetention ? selectedRetention.backup : backup;
+
     const { org, cloudProject, memberId } = await db.createOrganizationSetup({
       name, workspaceName, industry: workspacePolicy.primaryIndustry, subscriptionPlan,
       workspacePolicy, initialWorkspaces, firstBranchName: firstBranchName?.trim() || null,
@@ -472,9 +501,11 @@ router.post("/organizations", async (req, res) => {
       billingMethod,
       chargeScope,
       initialRechargeAmountInr: initialRecharge,
-      dataRetentionMode,
-      dataRetentionOverrides,
-      backup,
+      dataRetentionMode: effectiveRetentionMode,
+      dataRetentionOverrides: effectiveRetentionOverrides,
+      dataRetentionPolicyId: selectedRetention?.policyId || null,
+      dataRetentionPolicyName: selectedRetention?.policyName || null,
+      backup: effectiveBackup,
     });
 
     let tempPassword = null;
@@ -520,7 +551,7 @@ router.post("/organizations", async (req, res) => {
         name, workspaceName, adminEmail, gcpProjectMode: "existing", gcpProjectId: validatedGcp.project.projectId,
         callProvider: validatedCallProvider?.provider || null,
         callProviderPhoneNumber: validatedCallProvider?.phoneNumber || null,
-        billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge, workspacePolicy, initialWorkspaceCount: initialWorkspaces.length + 1
+        billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge, workspacePolicy, initialWorkspaceCount: initialWorkspaces.length + 1, retentionPolicyId: selectedRetention?.policyId || null
       });
 
     res.status(201).json({

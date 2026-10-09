@@ -40,6 +40,7 @@ async function createOrganizationSetup({
   name, workspaceName, industry, subscriptionPlan, featureFlags, adminEmail, adminName, gcpProject, callProvider,
   billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
   dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
+  dataRetentionPolicyId = null, dataRetentionPolicyName = null,
   workspacePolicy, initialWorkspaces = [], firstBranchName = null,
 }) {
   await supabase.ready;
@@ -55,6 +56,7 @@ async function createOrganizationSetup({
       dataRetention: {
         mode: dataRetentionMode === "custom" ? "custom" : "default",
         overrides: dataRetentionMode === "custom" && dataRetentionOverrides && typeof dataRetentionOverrides === "object" ? dataRetentionOverrides : {},
+        ...(dataRetentionPolicyId ? { policyId: dataRetentionPolicyId, policyName: dataRetentionPolicyName || null } : {}),
         updatedAt: now,
       },
       ...(backup && typeof backup === "object" ? { dataBackup: backup } : {}),
