@@ -20,6 +20,10 @@ const FEATURE_PATHS = [
   [/^\/api\/campaigns(?:\/|$)/, 'ai_campaigns'],
   [/^\/api\/workflows(?:\/|$)/, 'workflows'],
   [/^\/api\/dialer(?:\/|$)/, 'dialer'],
+  [/^\/api\/dialer-tasks(?:\/|$)/, 'dialer'],
+  [/^\/api\/dialer-retries(?:\/|$)/, 'dialer'],
+  [/^\/api\/question-flows(?:\/|$)/, 'workflows'],
+  [/^\/api\/audit-log(?:\/|$)/, 'audit_log'],
   [/^\/api\/conversations(?:\/|$)/, 'unified_inbox'],
 ];
 
@@ -47,13 +51,12 @@ async function enforceFeatureRequest(req, res, next) {
   try {
     const grants = await listWorkspaceGrants(req.orgId, req.workspaceId);
     if (grants === null) return next(); // no policy configured: migration-safe
-    const allowed = await effectiveKeys(
-      Array.isArray(req.orgFeatureFlags) ? req.orgFeatureFlags : [],
-      grants,
-      Array.isArray(req.memberFeatureFlags) ? req.memberFeatureFlags : [],
-      req.authorization?.workspaceRole === 'Workspace Admin' || req.authorization?.platformAdmin === true
-    );
-    if (!allowed.includes(key)) return res.status(403).json({ error: 'Feature disabled for this workspace', feature: key });
+    const isWorkspaceAdmin = req.authorization?.workspaceRole === 'Workspace Admin' || req.authorization?.platformAdmin === true;
+    const permitted = grants.includes(key)
+      && Array.isArray(req.orgFeatureFlags) && req.orgFeatureFlags.includes(key)
+      && (isWorkspaceAdmin || (Array.isArray(req.memberFeatureFlags) && req.memberFeatureFlags.includes(key)))
+      && await platformFeatures.isAppFeatureEnabled(key);
+    if (!permitted) return res.status(403).json({ error: 'Feature disabled for this workspace', feature: key });
     next();
   } catch (error) { next(error); }
 }
