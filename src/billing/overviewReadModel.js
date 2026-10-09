@@ -23,7 +23,8 @@ function period(row) {
     status: row.status, termsVersion: row.terms_version == null ? null : Number(row.terms_version) };
 }
 function payment(row) {
-  return { id: row.id, purpose: row.purpose, status: row.status,
+  return { id: row.id, purpose: row.purpose,
+    status: row.status === 'needs_clarification' ? 'needs_information' : row.status,
     expectedAmount: amount(row.asset, row.expected_amount_units, row.scale),
     receivedAmount: row.received_amount_units == null ? null : amount(row.asset, row.received_amount_units, row.scale),
     submittedAt: dateIso(row.submitted_at || row.created_at), reviewedAt: dateIso(row.reviewed_at),
