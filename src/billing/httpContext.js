@@ -1,8 +1,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { validateId } = require('../contracts/validation');
-const { CONTRACT_VERSION } = require('../contracts/validation');
+const { validateId } = require('./contracts/validation');
+const { CONTRACT_VERSION } = require('./contracts/validation');
 
 /** Trusted billing context: never accept actor, fingerprint or operation ID from JSON body. */
 function buildBillingContext(req) {
