@@ -231,6 +231,37 @@ router.post("/numbers/sync", requireAuth, requirePermission("workspace.settings.
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
+// Organization-scoped workspace access. Only org membership administrators can
+// manage roles across workspaces; a workspace admin cannot administer another workspace.
+router.get("/organization/workspace-access", requireAuth, requirePermission("organization.members.read"), async (req,res) => {
+  try {
+    const workspaces = await workspaceRepository.listForOrg(req.orgId);
+    const assignments = await Promise.all(workspaces.map(async workspace => ({
+      workspaceId: workspace.id, workspaceName: workspace.name,
+      members: await workspaceRepository.listMembers(req.orgId, workspace.id),
+    })));
+    res.json({ workspaces: workspaces.map(({ id,name,status }) => ({ id,name,status })), assignments });
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
+});
+router.put("/organization/workspace-access/:workspaceId/:memberId", requireAuth, requirePermission("organization.members.manage"), async (req,res) => {
+  const role=String(req.body?.role || "").trim();
+  if (!WORKSPACE_ROLES.includes(role)) return res.status(400).json({ error:"A valid workspace role is required" });
+  try {
+    const result=await workspaceRepository.setMemberAssignment(req.orgId,req.params.workspaceId,req.params.memberId,role);
+    auditLog.record(req.orgId,req,"organization.workspace_member.assign","workspace_member",req.params.memberId,{workspaceId:req.params.workspaceId,role});
+    res.json(result);
+  } catch(err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
+});
+router.delete("/organization/workspace-access/:workspaceId/:memberId", requireAuth, requirePermission("organization.members.manage"), async (req,res) => {
+  try {
+    const old=await workspaceRepository.getAssignment(req.orgId,req.params.workspaceId,req.params.memberId);
+    if (!old || old.status !== 'Active') return res.status(404).json({ error:"Active workspace access not found" });
+    const result=await workspaceRepository.setMemberAssignment(req.orgId,req.params.workspaceId,req.params.memberId,old.role,'Inactive');
+    auditLog.record(req.orgId,req,"organization.workspace_member.revoke","workspace_member",req.params.memberId,{workspaceId:req.params.workspaceId,role:old.role});
+    res.json(result);
+  } catch(err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
+});
+
 // ── Team members ──
 router.get("/workspace/members", requireAuth, requirePermission("workspace.members.manage"), async (req, res) => {
   try { res.json(await workspaceRepository.listMembers(req.orgId,req.workspaceId)); }
