@@ -30,7 +30,7 @@ test('aggregates credit units precisely without floating point arithmetic', () =
 
 test('returns a typed, tenant-scoped billing overview', async () => {
   const { pool, history } = fixture([
-    [{ org_id: 'org_123' }],
+    [{ org_id: 'org_123', fallback_mode: 'prepaid' }],
     [{ id: 'period-1', starts_at: '2026-10-01 00:00:00', ends_at: '2026-11-01 00:00:00', status: 'active', terms_version: 1 }],
     [{ id: 'payment-1', purpose: 'subscription', status: 'approved', expected_amount_units: '1000',
       received_amount_units: '1000', asset: 'INR', scale: 2, submitted_at: '2026-10-01 00:00:00',
@@ -45,6 +45,7 @@ test('returns a typed, tenant-scoped billing overview', async () => {
     pool, orgReader: async () => ({ billingMethod: 'recharge_based' }), now: new Date('2026-10-09T00:00:00Z'),
   });
   assert.equal(result.orgId, 'org_123');
+  assert.equal(result.billingMethod, 'recharge_based');
   assert.equal(result.activePeriod.id, 'period-1');
   assert.equal(result.balances[0].available.units, '25');
   assert.equal(result.balances[0].held.units, '5');
@@ -66,7 +67,7 @@ test('uninitialized organization does not inherit legacy INR balance', async () 
 });
 
 test('connection rolls back and releases on read errors', async () => {
-  const { pool, history } = fixture([[{ org_id: 'org_123' }]]);
+  const { pool, history } = fixture([[{ org_id: 'org_123', fallback_mode: 'prepaid' }]]);
   await assert.rejects(() => readBillingOverview('org_123', {
     pool, orgReader: async () => ({ billingMethod: 'pay_as_you_go' }), now: 'not-a-timestamp',
   }));
@@ -77,7 +78,7 @@ test('connection rolls back and releases on read errors', async () => {
 
 test('maps persisted clarification status to the frontend payment contract', async () => {
   const { pool } = fixture([
-    [{ org_id: 'org_123' }],
+    [{ org_id: 'org_123', fallback_mode: 'prepaid' }],
     [],
     [{ id: 'payment_1', purpose: 'topup', status: 'needs_clarification',
       expected_amount_units: '100', received_amount_units: null, asset: 'INR', scale: 2,
@@ -102,7 +103,7 @@ test('snapshot queries are awaited one at a time on the same connection', async 
       calls.push(sql);
       inFlight = false;
       return { rows: sql.includes('FROM organization_billing_accounts')
-        ? [{ org_id: 'org_123' }] : [] };
+        ? [{ org_id: 'org_123', fallback_mode: 'prepaid' }] : [] };
     },
     release() {},
   };
@@ -113,4 +114,24 @@ test('snapshot queries are awaited one at a time on the same connection', async 
   assert.equal(overlapped, false);
   assert.equal(calls.filter(sql => /^SELECT/.test(sql)).length, 6);
   assert.equal(calls.at(-1), 'COMMIT');
+});
+
+test('new account fallback mode wins over a contradictory legacy organization billing method', async () => {
+  const { pool } = fixture([
+    [{ org_id: 'org_123', fallback_mode: 'postpaid' }],
+    [], [], [], [], [],
+  ]);
+  const overview = await readBillingOverview('org_123', {
+    pool, orgReader: async () => ({ billingMethod: 'recharge_based' }),
+  });
+  assert.equal(overview.billingMethod, 'pay_as_you_go');
+});
+
+test('unknown new billing account mode fails closed rather than inventing pay-as-you-go', async () => {
+  const { pool, history } = fixture([[{ org_id: 'org_123', fallback_mode: 'invalid' }], [], [], [], [], []]);
+  await assert.rejects(
+    () => readBillingOverview('org_123', { pool, orgReader: async () => ({ billingMethod: 'pay_as_you_go' }) }),
+    /Unrecognized billing account fallback mode/,
+  );
+  assert.ok(history.some(item => item.sql === 'ROLLBACK'));
 });
