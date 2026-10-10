@@ -5,7 +5,7 @@ const { validateAmount } = require('../../kernel/amount');
 const TERMS_SCHEMA_VERSION = 1;
 const STRUCTURE_MODES = Object.freeze(['single', 'same_industry', 'mixed_industry']);
 const EXPIRY_MODES = Object.freeze(['suspend', 'grace', 'continue_postpaid']);
-const TAX_APPLICABILITY = Object.freeze(['subscription', 'additional_workspace', 'additional_industry']);
+const TAX_APPLICABILITY = Object.freeze(['subscription', 'additional_workspace', 'additional_industry', 'additional_seat']);
 
 function fail(path, reason) { throw new TypeError(`${path} ${reason}`); }
 function record(value, path, allowed, required = allowed) {
@@ -42,8 +42,9 @@ function deepFreeze(value) {
 function normalizePlanTerms(value) {
   record(value, 'terms', [
     'schemaVersion', 'currency', 'billingInterval', 'subscriptionPrice', 'structure', 'workspaceFees',
-    'includedCredits', 'taxes', 'postpaid', 'serviceAfterExpiry',
-  ]);
+    'includedCredits', 'taxes', 'postpaid', 'serviceAfterExpiry', 'seats', 'industryModules',
+  ], ['schemaVersion', 'currency', 'billingInterval', 'subscriptionPrice', 'structure', 'workspaceFees',
+    'includedCredits', 'taxes', 'postpaid', 'serviceAfterExpiry']);
   if (value.schemaVersion !== TERMS_SCHEMA_VERSION) fail('terms.schemaVersion', `must be ${TERMS_SCHEMA_VERSION}.`);
   if (typeof value.currency !== 'string' || !/^[A-Z]{3}$/.test(value.currency)) fail('terms.currency', 'must be an ISO-style uppercase three-letter currency code.');
   record(value.billingInterval, 'terms.billingInterval', ['unit', 'count']);
@@ -76,6 +77,22 @@ function normalizePlanTerms(value) {
     additionalWorkspace: validAmount(value.workspaceFees.additionalWorkspace, 'terms.workspaceFees.additionalWorkspace', { asset: value.currency }),
     additionalDistinctIndustry: validAmount(value.workspaceFees.additionalDistinctIndustry, 'terms.workspaceFees.additionalDistinctIndustry', { asset: value.currency }),
   };
+  const zeroSeatFee = { asset: value.currency, units: '0', scale: subscriptionPrice.scale };
+  const rawSeats = value.seats || { included: 1, max: null, additionalSeat: zeroSeatFee };
+  record(rawSeats, 'terms.seats', ['included', 'max', 'additionalSeat']);
+  const seats = {
+    included: positiveInt(rawSeats.included, 'terms.seats.included', { min: 1, max: 100000 }),
+    max: rawSeats.max === null ? null : positiveInt(rawSeats.max, 'terms.seats.max', { min: 1, max: 100000 }),
+    additionalSeat: validAmount(rawSeats.additionalSeat, 'terms.seats.additionalSeat', { asset: value.currency }),
+  };
+  if (seats.max !== null && seats.max < seats.included) fail('terms.seats.max', 'cannot be below included seats.');
+  const industryModules = value.industryModules || {};
+  if (!industryModules || typeof industryModules !== 'object' || Array.isArray(industryModules)) fail('terms.industryModules', 'must be an industry-to-module map.');
+  for (const [industry, modules] of Object.entries(industryModules)) {
+    if (!/^[a-z][a-z0-9_]*$/.test(industry) || !Array.isArray(modules) || modules.some(module => typeof module !== 'string' || !/^[a-z][a-z0-9_]*$/.test(module)) || new Set(modules).size !== modules.length) {
+      fail('terms.industryModules', 'must contain unique valid module keys for each industry.');
+    }
+  }
   const includedCredits = validAmount(value.includedCredits, 'terms.includedCredits');
   if (!Array.isArray(value.taxes) || value.taxes.length > 50) fail('terms.taxes', 'must be an array of at most 50 tax definitions.');
   const taxCodes = new Set();
@@ -127,6 +144,8 @@ function normalizePlanTerms(value) {
       orgAdminWorkspaceIndustry: value.structure.orgAdminWorkspaceIndustry,
     },
     workspaceFees,
+    seats,
+    industryModules: Object.fromEntries(Object.entries(industryModules).sort(([a], [b]) => a.localeCompare(b)).map(([industry, modules]) => [industry, [...modules].sort()])),
     includedCredits,
     taxes,
     postpaid,
@@ -136,11 +155,12 @@ function normalizePlanTerms(value) {
 
 /** Normalize an allowlisted partial terms override; omitted values remain inherited. */
 function normalizePlanOverrides(value) {
-  record(value, 'overrides', ['structure', 'workspaceFees', 'includedCredits', 'taxes', 'postpaid', 'serviceAfterExpiry', 'subscriptionPrice', 'currency', 'billingInterval'], []);
+  record(value, 'overrides', ['structure', 'workspaceFees', 'includedCredits', 'taxes', 'postpaid', 'serviceAfterExpiry', 'subscriptionPrice', 'currency', 'billingInterval', 'seats', 'industryModules'], []);
   const normalized = {};
   const allowedNested = {
     structure: ['mode', 'includedWorkspaces', 'includedDistinctIndustries', 'maxWorkspaces', 'maxDistinctIndustries', 'orgAdminWorkspaceIndustry'],
     workspaceFees: ['additionalWorkspace', 'additionalDistinctIndustry'],
+    seats: ['included', 'max', 'additionalSeat'],
     postpaid: ['eligible', 'workspaceModes', 'organizationExposureLimit'],
     serviceAfterExpiry: ['mode', 'graceSeconds'],
   };
@@ -152,7 +172,7 @@ function normalizePlanOverrides(value) {
     }
     normalized[group] = { ...value[group] };
   }
-  for (const key of ['includedCredits', 'taxes', 'subscriptionPrice', 'currency']) {
+  for (const key of ['includedCredits', 'taxes', 'subscriptionPrice', 'currency', 'industryModules']) {
     if (value[key] !== undefined) normalized[key] = value[key];
   }
   if (value.billingInterval !== undefined) {
@@ -170,6 +190,7 @@ function applyPlanOverrides(terms, overrides) {
     ...partial,
     structure: { ...normalizedTerms.structure, ...(partial.structure || {}) },
     workspaceFees: { ...normalizedTerms.workspaceFees, ...(partial.workspaceFees || {}) },
+    seats: { ...normalizedTerms.seats, ...(partial.seats || {}) },
     postpaid: { ...normalizedTerms.postpaid, ...(partial.postpaid || {}) },
     serviceAfterExpiry: { ...normalizedTerms.serviceAfterExpiry, ...(partial.serviceAfterExpiry || {}) },
   };

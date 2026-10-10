@@ -5,13 +5,15 @@ const router = require("express").Router();
 const { requireAuth } = require("../middleware/auth");
 const db = require("../db/repository");
 const lendingObjectsMirror = require("../crm/lendingObjectsMirror");
+const { requireModule } = require("../workspaces/moduleEntitlements");
+const requireLoanModule = requireModule('loan_lifecycle');
 
-router.get("/", requireAuth, async (req, res) => {
+router.get("/", requireAuth, requireLoanModule, async (req, res) => {
   try { res.json(await db.getLoansWithContacts(req.orgId)); }
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/", requireAuth, async (req, res) => {
+router.post("/", requireAuth, requireLoanModule, async (req, res) => {
   try {
     const newLoan = await db.create("loans", req.orgId, req.body);
     global.broadcastLog(`💵 Created loan application: ${newLoan.id}`, { type: "loan", loanId: newLoan.id });
@@ -20,7 +22,7 @@ router.post("/", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.patch("/:id", requireAuth, async (req, res) => {
+router.patch("/:id", requireAuth, requireLoanModule, async (req, res) => {
   try {
     const updated = await db.patch("loans", req.orgId, req.params.id, req.body);
     if (!updated) return res.status(404).json({ error: "Loan not found" });
@@ -30,7 +32,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/sync", requireAuth, async (req, res) => {
+router.post("/sync", requireAuth, requireLoanModule, async (req, res) => {
   try {
     const result = await db.replaceAll("loans", req.orgId, req.body);
     res.json(result);

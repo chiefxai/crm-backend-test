@@ -13,6 +13,7 @@ const auditLog = require("../platform/auditLog");
 const { requireAuth, requirePermission } = require("../middleware/auth");
 const { getLogger } = require("../observability/logger");
 const { parsePagination } = require("../lib/pagination");
+const { requireRecordsModule } = require("../workspaces/moduleEntitlements");
 const log = getLogger("routes.objects");
 
 const router = express.Router();
@@ -36,7 +37,7 @@ function requireValidRecordId(req, res, next) {
   next();
 }
 
-router.get("/", requireAuth, async (req, res) => {
+router.get("/", requireAuth, requireRecordsModule, async (req, res) => {
   try {
     res.json(await engine.listObjects(req.orgId));
   } catch (err) {
@@ -46,7 +47,7 @@ router.get("/", requireAuth, async (req, res) => {
 
 // Defining a new object type is a schema change — admin-level action,
 // same bar as org settings/team management.
-router.post("/", requireAuth, requirePermission("workspace.settings.manage"), async (req, res) => {
+router.post("/", requireAuth, requireRecordsModule, requirePermission("workspace.settings.manage"), async (req, res) => {
   try {
     const created = await engine.createObject(req.orgId, req.body);
     auditLog.record(req.orgId, req, "object.create", "object", created.id, { key: created.key, label: created.label });
@@ -56,7 +57,7 @@ router.post("/", requireAuth, requirePermission("workspace.settings.manage"), as
   }
 });
 
-router.get("/:key", requireAuth, async (req, res) => {
+router.get("/:key", requireAuth, requireRecordsModule, async (req, res) => {
   try {
     const object = await engine.getObjectByKey(req.orgId, req.params.key);
     if (!object) return res.status(404).json({ error: `Object "${req.params.key}" not found` });
@@ -66,7 +67,7 @@ router.get("/:key", requireAuth, async (req, res) => {
   }
 });
 
-router.get("/:key/records", requireAuth, async (req, res) => {
+router.get("/:key/records", requireAuth, requireRecordsModule, async (req, res) => {
   try {
     const pagination = parsePagination(req.query);
     res.json(await engine.listRecords(req.orgId, req.params.key, pagination || {}));
@@ -75,7 +76,7 @@ router.get("/:key/records", requireAuth, async (req, res) => {
   }
 });
 
-router.post("/:key/records", requireAuth, async (req, res) => {
+router.post("/:key/records", requireAuth, requireRecordsModule, async (req, res) => {
   try {
     const record = await engine.createRecord(req.orgId, req.params.key, req.body || {});
     res.status(201).json(record);
@@ -84,7 +85,7 @@ router.post("/:key/records", requireAuth, async (req, res) => {
   }
 });
 
-router.patch("/:key/records/:id", requireAuth, requireValidRecordId, async (req, res) => {
+router.patch("/:key/records/:id", requireAuth, requireRecordsModule, requireValidRecordId, async (req, res) => {
   try {
     const updated = await engine.patchRecord(req.orgId, req.params.key, req.params.id, req.body || {});
     if (!updated) return res.status(404).json({ error: "Record not found" });
@@ -94,7 +95,7 @@ router.patch("/:key/records/:id", requireAuth, requireValidRecordId, async (req,
   }
 });
 
-router.delete("/:key/records/:id", requireAuth, requireValidRecordId, async (req, res) => {
+router.delete("/:key/records/:id", requireAuth, requireRecordsModule, requireValidRecordId, async (req, res) => {
   try {
     const removed = await engine.removeRecord(req.orgId, req.params.key, req.params.id);
     if (!removed) return res.status(404).json({ error: "Record not found" });

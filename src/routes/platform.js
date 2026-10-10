@@ -353,7 +353,7 @@ router.post("/organizations", async (req, res) => {
       gcpProjectMode = "existing", gcpProject, callProvider,
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
       dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null, retentionPolicyId, retentionPolicyVersion,
-      workspacePolicy: requestedWorkspacePolicy, initialWorkspaces: requestedWorkspaces = [], firstBranchName = null
+      initialWorkspaces: requestedWorkspaces = [], firstBranchName = null
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
     const policyTools = require('../workspaces/organizationPolicy');
@@ -370,8 +370,8 @@ router.post("/organizations", async (req, res) => {
       throw Object.assign(new Error(`Configure the monthly prices for the ${selectedPlan.name} plan before creating an organization.`), { statusCode: 409 });
     }
     const workspacePolicy = policyTools.validatePolicy({
-      ...(requestedWorkspacePolicy || {}), planId: selectedPlan.id, planVersion: workspacePlans.version,
-      mode: requestedWorkspacePolicy?.mode || selectedPlan.defaultMode, pricing: selectedPlan.pricing,
+      planId: selectedPlan.id, planVersion: workspacePlans.version,
+      mode: selectedPlan.defaultMode, pricing: selectedPlan.pricing, industryModules: selectedPlan.industryModules || {},
     },String(industry || 'lending').trim().toLowerCase(),industryKeys);
     const subscriptionPlan = selectedPlan.name;
     if (!Array.isArray(requestedWorkspaces) || requestedWorkspaces.length >= Math.max(2,Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG)||100,1000))) throw policyTools.invalid('Workspace count exceeds the configured organization limit.');
@@ -380,8 +380,8 @@ router.post("/organizations", async (req, res) => {
     if (requestedWorkspaces.length && !adminEmail) throw policyTools.invalid('An initial organization administrator is required for additional workspaces.');
     if (firstBranchName !== null && (typeof firstBranchName!=='string' || !firstBranchName.trim() || firstBranchName.length>120)) throw policyTools.invalid('Enter a first branch name of up to 120 characters.');
     const initialWorkspaces = requestedWorkspaces.map(branch=>({ name:String(branch?.name || '').trim(),industry:String(branch?.industry || workspacePolicy.primaryIndustry).trim(),branchName:String(branch?.branchName || '').trim() || null }));
-    if (initialWorkspaces.length + 1 > workspacePolicy.pricing.includedWorkspaces) {
-      throw policyTools.invalid(`The ${selectedPlan.name} subscription includes up to ${workspacePolicy.pricing.includedWorkspaces} workspaces.`);
+    if (workspacePolicy.pricing.maxWorkspaces !== null && initialWorkspaces.length + 1 > workspacePolicy.pricing.maxWorkspaces) {
+      throw policyTools.invalid(`The ${selectedPlan.name} subscription allows up to ${workspacePolicy.pricing.maxWorkspaces} workspaces.`);
     }
     const branchNames = new Set([(firstBranchName || workspaceName).trim().toLowerCase()]);
     for (const branch of initialWorkspaces) {
@@ -593,13 +593,6 @@ router.post("/organizations", async (req, res) => {
 router.get('/organizations/:id/workspace-setup', async(req,res)=>{
   try { res.json(await require('../db/repositories/workspaceRepository').getWorkspaceSetup(req.params.id)); }
   catch(error) {handleError(error,res);}
-});
-router.put('/organizations/:id/workspace-setup', async(req,res)=>{
-  try {
-    const result=await require('../db/repositories/workspaceRepository').setWorkspacePolicy(req.params.id,req.body);
-    await auditLog.record(null,req,'platform.organization.workspace_policy.update','organization',req.params.id,result.policy);
-    res.json(result);
-  } catch(error) {handleError(error,res);}
 });
 router.post('/organizations/:id/workspaces', async(req,res)=>{
   try {

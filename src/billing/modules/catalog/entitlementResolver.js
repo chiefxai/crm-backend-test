@@ -43,8 +43,9 @@ function getIndustry(workspace) {
   return value.trim();
 }
 
-function computeInventory(workspaces, primaryIndustryCode) {
+function computeInventory(workspaces, primaryIndustryCode, seatCount = 1) {
   if (!Array.isArray(workspaces)) fail('workspaces must be an array.');
+  if (!Number.isSafeInteger(seatCount) || seatCount < 0) fail('seatCount must be a non-negative integer.');
   const included = workspaces.filter(isCountedWorkspace);
   const canonical = included.map(workspace => {
     const id = workspace.id ?? workspace.workspaceId;
@@ -61,12 +62,13 @@ function computeInventory(workspaces, primaryIndustryCode) {
   const industryCounts = Object.fromEntries(industries.map(code => [code, counts.get(code)]));
   return {
     workspaceCount: included.length,
+    seatCount,
     distinctIndustryCount: industries.length,
     industryCodes: industries,
     industryCounts,
     industries: industries.map(code => ({ code, count: counts.get(code) })),
     additionalDistinctIndustryCount: industries.filter(code => code !== primaryIndustryCode).length,
-    sourceVersion: `sha256:${crypto.createHash('sha256').update(JSON.stringify({ primaryIndustryCode, workspaces: canonical })).digest('hex')}`
+    sourceVersion: `sha256:${crypto.createHash('sha256').update(JSON.stringify({ primaryIndustryCode, seatCount, workspaces: canonical })).digest('hex')}`
   };
 }
 
@@ -121,15 +123,18 @@ function resolveServiceAccess(terms, organization, effectiveAt) {
   return { state: 'suspended', allowed: false, expiresAt: expiresAt.toISOString(), postpaidRequired: false };
 }
 
-function resolveEntitlements({ planVersion, orgOverrides = {}, organization = {}, workspaces = [], effectiveAt }) {
+function resolveEntitlements({ planVersion, orgOverrides = {}, organization = {}, workspaces = [], seatCount = 1, effectiveAt }) {
   if (!planVersion || typeof planVersion !== 'object' || typeof planVersion.id !== 'string' || !planVersion.id.trim()) fail('planVersion with a stable id is required.');
   if (!organization || typeof organization !== 'object' || Array.isArray(organization)) fail('organization must be an object.');
   const terms = mergeEffectiveTerms(planVersion.terms, orgOverrides);
   const rawPrimaryIndustryCode = organization.primaryIndustryCode ?? organization.primaryIndustry ?? organization.industry ?? null;
   if (rawPrimaryIndustryCode !== null && (typeof rawPrimaryIndustryCode !== 'string' || !rawPrimaryIndustryCode.trim())) fail('organization primary industry must be a non-empty string or null.');
   const primaryIndustryCode = rawPrimaryIndustryCode === null ? null : rawPrimaryIndustryCode.trim();
-  const inventory = computeInventory(workspaces, primaryIndustryCode);
+  const inventory = computeInventory(workspaces, primaryIndustryCode, seatCount);
   const conflicts = getStructuralConflicts(terms, inventory, primaryIndustryCode);
+  if (terms.seats.max !== null && seatCount > terms.seats.max) {
+    conflicts.push({ code: 'MAX_SEATS_EXCEEDED', limit: terms.seats.max, actual: seatCount });
+  }
   const serviceAccess = resolveServiceAccess(terms, organization, effectiveAt);
   return deepFreeze({
     planVersionId: planVersion.id,
@@ -142,6 +147,21 @@ function resolveEntitlements({ planVersion, orgOverrides = {}, organization = {}
     conflicts,
     serviceAccess
   });
+}
+
+function authorizeSeatAddition(entitlements) {
+  if (!entitlements?.terms?.seats || !entitlements.inventory) fail('Resolved entitlements are required.');
+  if (!entitlements.serviceAccess.allowed) return { allowed: false, reason: 'SERVICE_EXPIRED' };
+  const max = entitlements.terms.seats.max;
+  if (max !== null && entitlements.inventory.seatCount + 1 > max) return { allowed: false, reason: 'MAX_SEATS_EXCEEDED', limit: max };
+  return { allowed: true, reason: null };
+}
+
+function hasIndustryModule(entitlements, industryCode, moduleKey) {
+  if (!entitlements?.terms) fail('Resolved entitlements are required.');
+  const modules = entitlements.terms.industryModules;
+  if (!Object.keys(modules).length) return true; // Legacy published terms predate module entitlements.
+  return Array.isArray(modules[industryCode]) && modules[industryCode].includes(moduleKey);
 }
 
 function authorizeWorkspaceCreation(entitlements, { industryCode, actorRole }) {
@@ -179,6 +199,8 @@ module.exports = {
   mergeEffectiveTerms,
   resolveEntitlements,
   authorizeWorkspaceCreation,
+  authorizeSeatAddition,
+  hasIndustryModule,
   computeInventory,
   getStructuralConflicts,
   resolveServiceAccess

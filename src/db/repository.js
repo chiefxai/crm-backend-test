@@ -938,6 +938,11 @@ async function replaceTeamMembers(orgId, apiArray) {
 
   const rows = apiArray.map((o) => {
     const row = { ...toDbRow("team", o), org_id: orgId };
+    if (row.status !== undefined) {
+      const status = String(row.status).toLowerCase();
+      if (!['active', 'inactive'].includes(status)) throw Object.assign(new Error('Team member status must be Active or Inactive.'), { statusCode: 400, expose: true });
+      row.status = status === 'active' ? 'Active' : 'Inactive';
+    }
     row.id = memberIdByEmail.get((o.email || "").toLowerCase()) || row.id || require("crypto").randomUUID();
     const preservedUserId = userIdById.get(o.id) || userIdByEmail.get((o.email || "").toLowerCase()) || null;
     if (preservedUserId) row.user_id = preservedUserId;
@@ -951,7 +956,11 @@ async function replaceTeamMembers(orgId, apiArray) {
   const client = await _pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT id FROM organizations WHERE id=? FOR UPDATE", [orgId]);
+    const lockedOrg = await client.query("SELECT id,industry,settings FROM organizations WHERE id=? FOR UPDATE", [orgId]);
+    const maxSeats = seatMaximum(lockedOrg.rows[0]);
+    if (maxSeats !== null && rows.filter(row => isBillableSeat(row.status)).length > maxSeats) {
+      throw seatLimitError(maxSeats);
+    }
     const workspaceRepository = require("./repositories/workspaceRepository");
     await workspaceRepository.ensureDefault(orgId, client);
     const result = [];
@@ -983,6 +992,7 @@ async function replaceTeamMembers(orgId, apiArray) {
     return result;
   } catch (error) {
     try { await client.query("ROLLBACK"); } catch { /* retain original failure */ }
+    if (error.statusCode) throw error;
     throw new Error(`[db.replaceTeamMembers] transaction failed: ${error.message}`);
   } finally { client.release(); }
 }
@@ -1350,31 +1360,69 @@ async function findOrgMemberByEmail(email) {
   return { id: data.id, orgId: data.org_id, email: data.email, userId: data.user_id };
 }
 
+function isBillableSeat(status) {
+  return !status || String(status).toLowerCase() === 'active';
+}
+function seatMaximum(org) {
+  if (!org) return null;
+  const policy = require('../workspaces/organizationPolicy').effectivePolicy(org, []);
+  return Number.isInteger(policy.pricing?.maxSeats) ? policy.pricing.maxSeats : null;
+}
+function seatLimitError(maxSeats) {
+  return Object.assign(new Error(`This subscription allows up to ${maxSeats} active user seats. Upgrade the subscription to add another user.`), { statusCode: 409, expose: true });
+}
+async function assertSeatCapacity(client, orgId, maxSeats, additionalSeats = 1) {
+  if (maxSeats === null) return;
+  const { rows } = await client.query("SELECT COUNT(*) AS seat_count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'", [orgId]);
+  if (Number(rows[0]?.seat_count || 0) + additionalSeats > maxSeats) throw seatLimitError(maxSeats);
+}
+
 async function addOrgMember(orgId, userId, { name, email, phone, role, feature_flags } = {}) {
   const normalizedEmail = email ? email.toLowerCase() : email;
-  const { data, error } = await supabase
-    .from("org_members")
-    .insert({
-      org_id: orgId,
-      user_id: userId || null,
-      name,
-      email: normalizedEmail,
-      phone: phone || null,
-      role: role || "Organization Admin",
-      status: "Active",
-      performance_score: 0,
-      assigned_leads_count: 0,
-      feature_flags: feature_flags || [],
-    })
-    .select()
-    .single();
-  if (error) {
-    const wrapped = new Error(`[db.addOrgMember] ${error.message}`);
-    if (error.code) wrapped.code = error.code;
-    if (error.errno) wrapped.errno = error.errno;
-    throw wrapped;
+  const client = await _pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: orgs } = await client.query('SELECT id,industry,settings FROM organizations WHERE id=? FOR UPDATE', [orgId]);
+    if (!orgs[0]) throw Object.assign(new Error('Organization not found'), { statusCode: 404 });
+    await assertSeatCapacity(client, orgId, seatMaximum(orgs[0]));
+    const id = require('crypto').randomUUID();
+    await client.query(`INSERT INTO org_members (id,org_id,user_id,name,email,phone,role,status,performance_score,assigned_leads_count,feature_flags,created_at)
+      VALUES (?,?,?,?,?,?,?,'Active',0,0,?,?)`, [id,orgId,userId || null,name,normalizedEmail,phone || null,role || 'Organization Admin',JSON.stringify(feature_flags || []),new Date().toISOString()]);
+    const { rows } = await client.query('SELECT * FROM org_members WHERE org_id=? AND id=?', [orgId,id]);
+    await client.query('COMMIT');
+    return fromDbRow('team', rows[0]);
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* retain original failure */ }
+    throw error;
+  } finally { client.release(); }
+}
+
+async function patchTeamMember(orgId, id, patch) {
+  const row = toDbRow('team', patch);
+  if (row.status !== undefined) {
+    const status = String(row.status).toLowerCase();
+    if (!['active', 'inactive'].includes(status)) throw Object.assign(new Error('Team member status must be Active or Inactive.'), { statusCode: 400, expose: true });
+    row.status = status === 'active' ? 'Active' : 'Inactive';
   }
-  return fromDbRow("team", data);
+  const client = await _pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: orgs } = await client.query('SELECT id,industry,settings FROM organizations WHERE id=? FOR UPDATE', [orgId]);
+    const { rows: members } = await client.query('SELECT * FROM org_members WHERE org_id=? AND id=? FOR UPDATE', [orgId,id]);
+    if (!members[0]) { await client.query('ROLLBACK'); return null; }
+    if (isBillableSeat(row.status) && row.status !== undefined && !isBillableSeat(members[0].status)) {
+      await assertSeatCapacity(client, orgId, seatMaximum(orgs[0]));
+    }
+    const allowed = Object.keys(row).filter(key => key in supabase.TABLES.org_members.columns && !['id','org_id','user_id','created_at'].includes(key));
+    if (allowed.length) await client.query(`UPDATE org_members SET ${allowed.map(key => `\`${key}\`=?`).join(',')} WHERE org_id=? AND id=?`,
+      [...allowed.map(key => ['json','array'].includes(supabase.TABLES.org_members.columns[key]) ? JSON.stringify(row[key]) : row[key]),orgId,id]);
+    const { rows } = await client.query('SELECT * FROM org_members WHERE org_id=? AND id=?', [orgId,id]);
+    await client.query('COMMIT');
+    return fromDbRow('team', rows[0]);
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* retain original failure */ }
+    throw error;
+  } finally { client.release(); }
 }
 
 async function signInWithPassword(email, password) {
@@ -2872,6 +2920,7 @@ module.exports = {
   DEFAULT_RETRY_POLICY,
   MAX_RETRY_ATTEMPTS,
   addOrgMember,
+  patchTeamMember,
   findOrgMemberByEmail,
   updateOrgMemberUserId,
   listMembershipsForUser,

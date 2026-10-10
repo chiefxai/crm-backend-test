@@ -20,6 +20,7 @@ const channelsEngine = require("../channels/engine");
 const { getIndustryDefinition } = require("../platform/industry");
 const { WORKSPACE_ROLES } = require("../authorization/policy");
 const { multipleWorkspacesEnabled } = require("../workspaces/capabilities");
+const { enabledModules } = require("../workspaces/moduleEntitlements");
 
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
@@ -154,6 +155,7 @@ router.get("/industry", requireAuth, async (req, res) => {
     const config = getIndustryDefinition(org.industry);
     res.json({
       ...config,
+      modules: enabledModules(req.organization, config.key),
       industry: config.key,
       businessType: org.businessType || org.business_type || null,
       organizationId: req.orgId,
@@ -513,6 +515,7 @@ router.post("/team", requireAuth, requirePermission("organization.members.manage
     res.status(201).json({ ...m, userId: authUserId, role: crmRole, credsSent: false });
   } catch (err) {
     log.error("POST /api/settings/team failed:", err.message);
+    if (err.statusCode) return res.status(err.statusCode).json({ error: safeErrorMessage(err) });
     if (isDuplicateKeyError(err)) {
       return res.status(409).json({ error: "A team member with this email already exists." });
     }
@@ -550,10 +553,10 @@ router.patch("/team/:id", requireAuth, requirePermission("organization.members.m
     if (existing.role === "Owner" && ((patch.role && patch.role !== "Owner") || (patch.status && String(patch.status).toLowerCase() !== "active"))) {
       return res.status(409).json({ error: "Transfer organization ownership through the owner-transfer action before changing or deactivating the Owner membership." });
     }
-    const updated = await db.patch("team", req.orgId, req.params.id, patch);
+    const updated = await db.patchTeamMember(req.orgId, req.params.id, patch);
     auditLog.record(req.orgId, req, "team.update", "team_member", req.params.id, patch);
     res.json(updated);
-  } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
 router.delete("/team/:id", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
@@ -598,7 +601,7 @@ router.post("/team/sync", requireAuth, requirePermission("organization.members.m
     }
     res.json(await db.replaceTeamMembers(req.orgId,req.body));
   }
-  catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+  catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
 // ── Organization settings ──

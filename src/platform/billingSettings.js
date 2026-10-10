@@ -1,5 +1,7 @@
 // Platform-wide billing defaults (Super Admin) — stored in platform_settings.
 const platformSettings = require("./settings");
+const { getIndustryDefinition } = require("./industry");
+const { listIndustries } = require("../seed/industryPacks");
 
 const KEYS = {
   globalAi: "billing.globalAi",
@@ -11,13 +13,17 @@ const KEYS = {
 const DEFAULT_WORKSPACE_PLANS = Object.freeze({
   version: 1,
   plans: [
-    { id: "starter", name: "Starter", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
-    { id: "growth", name: "Growth", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
-    { id: "enterprise", name: "Enterprise", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
+    { id: "starter", name: "Starter", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, maxWorkspaces: 1, extraWorkspaceMonthlyInr: 0, includedSeats: 1, maxSeats: null, extraSeatMonthlyInr: 0, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
+    { id: "growth", name: "Growth", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, maxWorkspaces: 1, extraWorkspaceMonthlyInr: 0, includedSeats: 1, maxSeats: null, extraSeatMonthlyInr: 0, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
+    { id: "enterprise", name: "Enterprise", active: true, defaultMode: "single", pricing: { baseMonthlyInr: null, includedWorkspaces: 1, maxWorkspaces: 1, extraWorkspaceMonthlyInr: 0, includedSeats: 1, maxSeats: null, extraSeatMonthlyInr: 0, additionalIndustryMonthlyInr: 0, monthlySubscriptionCreditsInr: 0 } },
   ],
 });
 
 const WORKSPACE_PLAN_MODES = new Set(["single", "same_industry", "mixed_industry"]);
+const platformWorkspaceCap = () => Math.max(2, Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG) || 100, 1000));
+const allIndustryModules = () => Object.fromEntries(listIndustries().map(industry => [
+  industry.key, getIndustryDefinition(industry.key).modules.map(module => module.key),
+]));
 
 function normalizeWorkspacePlans(input, currentVersion, policyCatalog = null) {
   if (!input || typeof input !== "object" || !Array.isArray(input.plans) || input.plans.length < 1 || input.plans.length > 100) {
@@ -48,6 +54,30 @@ function normalizeWorkspacePlans(input, currentVersion, policyCatalog = null) {
     if (!Number.isInteger(includedWorkspaces) || includedWorkspaces < 1 || includedWorkspaces > 1000) {
       throw Object.assign(new Error(`${path} included workspaces must be between 1 and 1000 for multi-workspace plans.`), { statusCode: 400 });
     }
+    const maxWorkspaces = plan.defaultMode === "single" ? 1 : (pricing.maxWorkspaces == null ? null : pricing.maxWorkspaces);
+    if (maxWorkspaces !== null && (!Number.isInteger(maxWorkspaces) || maxWorkspaces < includedWorkspaces || maxWorkspaces > 1000)) {
+      throw Object.assign(new Error(`${path} workspace maximum must be between the included count and 1000.`), { statusCode: 400 });
+    }
+    if (includedWorkspaces > platformWorkspaceCap() || (maxWorkspaces !== null && maxWorkspaces > platformWorkspaceCap())) {
+      throw Object.assign(new Error(`${path} workspace allowance exceeds the configured platform limit of ${platformWorkspaceCap()}.`), { statusCode: 400, expose: true });
+    }
+    const includedSeats = pricing.includedSeats;
+    const maxSeats = pricing.maxSeats == null ? null : pricing.maxSeats;
+    if (!Number.isInteger(includedSeats) || includedSeats < 1 || includedSeats > 100000
+      || (maxSeats !== null && (!Number.isInteger(maxSeats) || maxSeats < includedSeats || maxSeats > 100000))) {
+      throw Object.assign(new Error(`${path} seat allowance and maximum must be valid whole numbers.`), { statusCode: 400 });
+    }
+    const availableIndustries = new Map(listIndustries().map(industry => [industry.key,
+      new Set(getIndustryDefinition(industry.key).modules.map(module => module.key))]));
+    const industryModules = plan.industryModules ?? allIndustryModules();
+    if (!industryModules || typeof industryModules !== "object" || Array.isArray(industryModules)) {
+      throw Object.assign(new Error(`${path} industry modules must be grouped by industry.`), { statusCode: 400 });
+    }
+    for (const [industry, modules] of Object.entries(industryModules)) {
+      if (!availableIndustries.has(industry) || !Array.isArray(modules) || modules.some(module => !availableIndustries.get(industry).has(module)) || new Set(modules).size !== modules.length) {
+        throw Object.assign(new Error(`${path} has an unknown or duplicated industry module.`), { statusCode: 400 });
+      }
+    }
     // Legacy workspace plans without a policy link inherit the platform default
     // on their next save. Explicit links must refer to an existing template.
     const policyId = plan.retentionPolicyId == null || plan.retentionPolicyId === ""
@@ -60,9 +90,15 @@ function normalizeWorkspacePlans(input, currentVersion, policyCatalog = null) {
     return {
       id, name, active: plan.active, defaultMode: plan.defaultMode,
       retentionPolicyId: policyId,
+      industryModules: Object.fromEntries(Object.entries(industryModules).map(([industry, modules]) => [industry, [...modules].sort()])),
       pricing: {
         baseMonthlyInr: money(pricing.baseMonthlyInr, "organization monthly price", true),
         includedWorkspaces,
+        maxWorkspaces,
+        extraWorkspaceMonthlyInr: plan.defaultMode === "single" ? 0 : money(pricing.extraWorkspaceMonthlyInr, "additional workspace monthly price"),
+        includedSeats,
+        maxSeats,
+        extraSeatMonthlyInr: money(pricing.extraSeatMonthlyInr, "additional seat monthly price"),
         additionalIndustryMonthlyInr: money(pricing.additionalIndustryMonthlyInr, "additional industry monthly price"),
         monthlySubscriptionCreditsInr: money(pricing.monthlySubscriptionCreditsInr ?? 0, "monthly subscription credits"),
       },
@@ -134,8 +170,20 @@ async function getSystemMinimumBalance() {
 
 async function getWorkspacePlans() {
   const stored = await platformSettings.getSetting(KEYS.workspacePlans, null);
-  if (!stored || !Array.isArray(stored.plans)) return DEFAULT_WORKSPACE_PLANS;
-  return { version: Number(stored.version) || 1, plans: stored.plans };
+  const catalog = stored && Array.isArray(stored.plans) ? stored : DEFAULT_WORKSPACE_PLANS;
+  return { version: Number(catalog.version) || 1, plans: catalog.plans.map(plan => ({
+    ...plan,
+    industryModules: plan.industryModules ?? allIndustryModules(),
+    pricing: {
+      ...plan.pricing,
+      maxWorkspaces: plan.pricing.maxWorkspaces === undefined
+        ? (plan.defaultMode === 'single' ? 1 : plan.pricing.includedWorkspaces) : plan.pricing.maxWorkspaces,
+      extraWorkspaceMonthlyInr: plan.pricing.extraWorkspaceMonthlyInr ?? 0,
+      includedSeats: plan.pricing.includedSeats ?? 1,
+      maxSeats: plan.pricing.maxSeats ?? null,
+      extraSeatMonthlyInr: plan.pricing.extraSeatMonthlyInr ?? 0,
+    },
+  })) };
 }
 
 async function setWorkspacePlans(actor, input) {

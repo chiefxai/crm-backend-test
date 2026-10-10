@@ -88,6 +88,7 @@ function normalizeInventory(inventory) {
   const organizationCount = inventory.organizationCount === undefined ? 1 : safeCount(inventory.organizationCount, 'inventory.organizationCount', { min: 1 });
   if (organizationCount !== 1) invalid('inventory.organizationCount must be 1 for an organization quote.');
   const workspaceCount = safeCount(inventory.workspaceCount, 'inventory.workspaceCount', { min: 1 });
+  const seatCount = safeCount(inventory.seatCount === undefined ? 1 : inventory.seatCount, 'inventory.seatCount', { min: 0 });
   let industryCounts = null;
   let industryCodes;
   if (Array.isArray(inventory.industries)) {
@@ -124,7 +125,7 @@ function normalizeInventory(inventory) {
   if (distinctIndustryCount !== industryCodes.length) invalid('distinctIndustryCount must match the supplied industry codes.');
   const version = inventory.version === undefined ? (inventory.sourceVersion === undefined ? null : inventory.sourceVersion) : safeCount(inventory.version, 'inventory.version');
   if (version !== null && typeof version !== 'number' && (typeof version !== 'string' || !version.trim())) invalid('inventory.version/sourceVersion must be a non-empty stable value.');
-  return { organizationCount, workspaceCount, distinctIndustryCount, industryCodes, industryCounts, version };
+  return { organizationCount, workspaceCount, seatCount, distinctIndustryCount, industryCodes, industryCounts, version };
 }
 
 function normalizeTerms(value) {
@@ -140,6 +141,10 @@ function normalizeTerms(value) {
   const workspaceFees = record(terms.workspaceFees, 'plan.terms.workspaceFees');
   const workspaceFee = sameCurrency(base, amount(workspaceFees.additionalWorkspace, 'plan.terms.workspaceFees.additionalWorkspace'), 'additionalWorkspace');
   const industryFee = sameCurrency(base, amount(workspaceFees.additionalDistinctIndustry, 'plan.terms.workspaceFees.additionalDistinctIndustry'), 'additionalDistinctIndustry');
+  const rawSeats = terms.seats || { included: 1, max: null, additionalSeat: zeroLike(base) };
+  const includedSeats = safeCount(rawSeats.included, 'plan.terms.seats.included', { min: 1 });
+  const maxSeats = rawSeats.max == null ? null : safeCount(rawSeats.max, 'plan.terms.seats.max', { min: includedSeats });
+  const seatFee = sameCurrency(base, amount(rawSeats.additionalSeat, 'plan.terms.seats.additionalSeat'), 'additionalSeat');
   const includedCredits = amount(terms.includedCredits, 'plan.terms.includedCredits');
   const interval = record(terms.billingInterval, 'plan.terms.billingInterval');
   if (!['day', 'week', 'month', 'year'].includes(interval.unit)) invalid('billingInterval.unit is unsupported.');
@@ -150,7 +155,7 @@ function normalizeTerms(value) {
     if (typeof tax.code !== 'string' || !/^[A-Za-z0-9._:-]{1,64}$/.test(tax.code)) invalid(`taxes[${index}].code is invalid.`);
     const rateBps = safeCount(tax.rateBps, `taxes[${index}].rateBps`);
     if (rateBps > 100000) invalid(`taxes[${index}].rateBps must not exceed 100000.`);
-    if (!Array.isArray(tax.appliesTo) || tax.appliesTo.length < 1 || tax.appliesTo.some((item) => !['subscription', 'additional_workspace', 'additional_industry'].includes(item))) {
+    if (!Array.isArray(tax.appliesTo) || tax.appliesTo.length < 1 || tax.appliesTo.some((item) => !['subscription', 'additional_workspace', 'additional_industry', 'additional_seat'].includes(item))) {
       invalid(`taxes[${index}].appliesTo is invalid.`);
     }
     if (typeof tax.inclusive !== 'boolean') invalid(`taxes[${index}].inclusive must be a boolean.`);
@@ -160,7 +165,7 @@ function normalizeTerms(value) {
   for (const key of ['maxWorkspaces', 'maxDistinctIndustries']) {
     if (structure[key] !== null && structure[key] !== undefined) safeCount(structure[key], `plan.terms.structure.${key}`, { min: 1 });
   }
-  return { base, workspaceFee, industryFee, includedCredits, taxes, structure, includedWorkspaces, includedDistinctIndustries };
+  return { base, workspaceFee, industryFee, seatFee, includedSeats, maxSeats, includedCredits, taxes, structure, includedWorkspaces, includedDistinctIndustries };
 }
 
 function addLine(lines, { code, label, quantity, unitAmount, amount: lineAmount, taxable = true, discountable = true }) {
@@ -213,6 +218,9 @@ function createQuote(input) {
   if (!hasResolvedConflicts && terms.structure.maxDistinctIndustries != null && inventory.distinctIndustryCount > terms.structure.maxDistinctIndustries) {
     conflicts.push({ code: 'INDUSTRY_LIMIT_EXCEEDED', limit: terms.structure.maxDistinctIndustries, actual: inventory.distinctIndustryCount });
   }
+  if (!hasResolvedConflicts && terms.maxSeats !== null && inventory.seatCount > terms.maxSeats) {
+    conflicts.push({ code: 'SEAT_LIMIT_EXCEEDED', limit: terms.maxSeats, actual: inventory.seatCount });
+  }
 
   const lines = [];
   const baseQuantity = 1;
@@ -223,6 +231,8 @@ function createQuote(input) {
   const additionalIndustries = Math.max(0, inventory.distinctIndustryCount - terms.includedDistinctIndustries);
   const industryLineAmount = multiply(terms.industryFee, additionalIndustries);
   addLine(lines, { code: 'additional_industry', label: 'Additional distinct industries', quantity: additionalIndustries, unitAmount: terms.industryFee, amount: industryLineAmount });
+  const additionalSeats = Math.max(0, inventory.seatCount - terms.includedSeats);
+  addLine(lines, { code: 'additional_seat', label: 'Additional user seats', quantity: additionalSeats, unitAmount: terms.seatFee, amount: multiply(terms.seatFee, additionalSeats) });
 
   let subtotal = zeroLike(terms.base);
   for (const line of lines) subtotal = add(subtotal, line.amount);
@@ -236,15 +246,15 @@ function createQuote(input) {
       const code = typeof adjustment.code === 'string' && /^[A-Za-z0-9._:-]{1,64}$/.test(adjustment.code) ? adjustment.code : invalid(`adjustments[${index}].code is invalid.`);
       if (lines.some((line) => line.code === `discount_${code}`)) invalid(`discount code ${code} is duplicated.`);
       const appliesTo = adjustment.appliesTo === undefined
-        ? ['subscription', 'additional_workspace', 'additional_industry']
+        ? ['subscription', 'additional_workspace', 'additional_industry', 'additional_seat']
         : adjustment.appliesTo;
-      if (!Array.isArray(appliesTo) || appliesTo.length < 1 || appliesTo.some((item) => !['subscription', 'additional_workspace', 'additional_industry'].includes(item))) {
+      if (!Array.isArray(appliesTo) || appliesTo.length < 1 || appliesTo.some((item) => !['subscription', 'additional_workspace', 'additional_industry', 'additional_seat'].includes(item))) {
         invalid(`adjustments[${index}].appliesTo is invalid.`);
       }
       const label = adjustment.label === undefined ? 'Discount' : adjustment.label;
       if (typeof label !== 'string' || !label.trim() || label.length > 128) invalid(`adjustments[${index}].label must contain 1 to 128 characters.`);
       const scopeGross = lines.reduce((sum, line) => {
-        const category = line.code === 'subscription_base' ? 'subscription' : line.code === 'additional_workspace' ? 'additional_workspace' : line.code === 'additional_industry' ? 'additional_industry' : null;
+        const category = line.code === 'subscription_base' ? 'subscription' : line.code === 'additional_workspace' ? 'additional_workspace' : line.code === 'additional_industry' ? 'additional_industry' : line.code === 'additional_seat' ? 'additional_seat' : null;
         return category && appliesTo.includes(category) ? add(sum, line.amount) : sum;
       }, zeroLike(terms.base));
       const discountAmount = adjustment.kind === 'percent'
@@ -268,7 +278,7 @@ function createQuote(input) {
     for (const line of lines) {
       const category = line.code === 'subscription_base' ? 'subscription'
         : line.code === 'additional_workspace' ? 'additional_workspace'
-          : line.code === 'additional_industry' ? 'additional_industry' : null;
+          : line.code === 'additional_industry' ? 'additional_industry' : line.code === 'additional_seat' ? 'additional_seat' : null;
       if (category) {
         eligibleGross[category] = add(eligibleGross[category] || zeroLike(terms.base), line.amount);
         if (categories.has(category)) taxableBase = add(taxableBase, line.amount);

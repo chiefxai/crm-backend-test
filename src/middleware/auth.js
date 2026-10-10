@@ -149,6 +149,7 @@ async function requireAuth(req, res, next) {
     req.userEmail = userEmail;
     req.userName  = payload.name || membership.name || null;
     req.orgId     = membership.orgId;
+    req.organization = org;
     req.userRole  = membership.role;
     req.authClaims = payload;
     req.orgFeatureFlags = Array.isArray(org.featureFlags) ? org.featureFlags : [];

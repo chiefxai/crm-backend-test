@@ -97,14 +97,12 @@ async function createWorkspace(orgId, { name, industry, branchName = null, prici
       throw Object.assign(new Error('An active organization is required'),{ statusCode:404 });
     }
     const { rows: existingWorkspaces } = await client.query('SELECT id,industry FROM workspaces WHERE org_id=? ORDER BY id',[orgId]);
+    const { rows: seatRows } = await client.query("SELECT COUNT(*) AS seat_count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'",[orgId]);
+    const seatCount = Number(seatRows[0]?.seat_count || 0);
     const policy = organizationPolicy.effectivePolicy(organizations[0],existingWorkspaces);
     if (!industryPacks.listIndustries().some(item => item.key === industry)) throw organizationPolicy.invalid('Select a supported workspace industry.');
     if (!name || name.length > 120 || (branchName && branchName.length > 160)) throw organizationPolicy.invalid('Enter a valid workspace and branch name.');
-    const authorizedPolicy=organizationPolicy.authorizeCreation(policy,existingWorkspaces,{industry,platformAdmin,pricingAcceptanceToken});
-    if (policy.mode === 'single') {
-      policy.mode = authorizedPolicy.mode;
-      await client.query("UPDATE organizations SET settings=JSON_SET(COALESCE(settings,JSON_OBJECT()),'$.workspacePolicy',CAST(? AS JSON)) WHERE id=?",[JSON.stringify(policy),orgId]);
-    }
+    organizationPolicy.authorizeCreation(policy,existingWorkspaces,{industry,platformAdmin,pricingAcceptanceToken,seatCount});
     if (existingWorkspaces.length >= maxWorkspaces) {
       throw Object.assign(new Error(`Workspace limit reached (${maxWorkspaces})`),{ statusCode:409 });
     }
@@ -116,7 +114,7 @@ async function createWorkspace(orgId, { name, industry, branchName = null, prici
        AND COALESCE(NULLIF(status,''),'Active')='Active' FOR UPDATE`,[orgId,initialAdminMemberId]);
     if (!members[0]) throw Object.assign(new Error('An active organization member is required to administer the workspace'),{ statusCode:403 });
 
-    const organizationPricing=organizationPolicy.quote(policy,[...existingWorkspaces,{industry}]);
+    const organizationPricing=organizationPolicy.quote(policy,[...existingWorkspaces,{industry}],seatCount);
     const billingAgreement={organizationMonthlyQuoteAtCreation:organizationPricing,acceptedAt:now,createdByPlatformAdmin:platformAdmin};
     await client.query(`INSERT INTO workspaces (id,org_id,name,industry,branch_name,status,is_default,created_at,settings)
       VALUES (?,?,?,?,?,'Active',0,?,?)`,[workspaceId,orgId,name,industry,branchName,now,JSON.stringify({billingAgreement,enabledFeatures:[]})]);
@@ -247,23 +245,8 @@ async function getWorkspaceSetup(orgId) {
   if (!org) throw organizationPolicy.invalid('Organization not found',404);
   const workspaces = await listForOrg(orgId);
   const policy = organizationPolicy.effectivePolicy(org,workspaces);
-  return { policy, workspaces, currentQuote: organizationPolicy.quote(policy,workspaces), addBranchQuote: organizationPolicy.branchQuote(policy,workspaces) };
+  const { rows: seatRows } = await pool.query("SELECT COUNT(*) AS seat_count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'",[orgId]);
+  const seatCount = Number(seatRows[0]?.seat_count || 0);
+  return { policy, workspaces, currentQuote: organizationPolicy.quote(policy,workspaces,seatCount), addBranchQuote: organizationPolicy.branchQuote(policy,workspaces,seatCount) };
 }
-async function setWorkspacePolicy(orgId,input) {
-  await db.ready;
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const {rows:orgs} = await client.query('SELECT industry FROM organizations WHERE id=? FOR UPDATE',[orgId]);
-    if (!orgs[0]) throw organizationPolicy.invalid('Organization not found',404);
-    const policy = organizationPolicy.validatePolicy(input,orgs[0].industry || 'lending',industryPacks.listIndustries().map(i=>i.key));
-    const {rows:workspaces} = await client.query('SELECT id,industry FROM workspaces WHERE org_id=?',[orgId]);
-    if (policy.mode==='single' && workspaces.length>1) throw organizationPolicy.invalid('An organization with multiple workspaces cannot use single-workspace mode.');
-    if (policy.mode!=='mixed_industry' && workspaces.some(w=>w.industry!==policy.primaryIndustry)) throw organizationPolicy.invalid('Existing workspaces use different industries; select mixed industries.');
-    await client.query("UPDATE organizations SET settings=JSON_SET(COALESCE(settings,JSON_OBJECT()),'$.workspacePolicy',CAST(? AS JSON)) WHERE id=?",[JSON.stringify(policy),orgId]);
-    await client.query('COMMIT');
-  } catch(error) { try {await client.query('ROLLBACK');} catch {} throw error; }
-  finally {client.release();}
-  return getWorkspaceSetup(orgId);
-}
-module.exports = { getWorkspaceSetup, setWorkspacePolicy, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };
+module.exports = { getWorkspaceSetup, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };
