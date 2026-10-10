@@ -366,9 +366,8 @@ router.post("/organizations", async (req, res) => {
     const selectedPlan = workspacePlans.plans.find(plan => plan.active && (plan.id === workspacePlanId
       || plan.id === String(requestedPlan || '').trim().toLowerCase() || plan.name.toLowerCase() === String(requestedPlan || '').trim().toLowerCase()));
     if (!selectedPlan) throw policyTools.invalid('Select an active workspace plan from Admin > Plans & Pricing.');
-    if (selectedPlan.pricing.baseMonthlyInr === null || selectedPlan.pricing.extraWorkspaceMonthlyInr === null
-      || selectedPlan.pricing.additionalIndustryMonthlyInr === null) {
-      throw Object.assign(new Error(`Configure all monthly prices for the ${selectedPlan.name} plan before creating an organization.`), { statusCode: 409 });
+    if (selectedPlan.pricing.baseMonthlyInr === null || selectedPlan.pricing.additionalIndustryMonthlyInr === null) {
+      throw Object.assign(new Error(`Configure the monthly prices for the ${selectedPlan.name} plan before creating an organization.`), { statusCode: 409 });
     }
     const workspacePolicy = policyTools.validatePolicy({
       ...(requestedWorkspacePolicy || {}), planId: selectedPlan.id, planVersion: workspacePlans.version,
@@ -381,6 +380,9 @@ router.post("/organizations", async (req, res) => {
     if (requestedWorkspaces.length && !adminEmail) throw policyTools.invalid('An initial organization administrator is required for additional workspaces.');
     if (firstBranchName !== null && (typeof firstBranchName!=='string' || !firstBranchName.trim() || firstBranchName.length>120)) throw policyTools.invalid('Enter a first branch name of up to 120 characters.');
     const initialWorkspaces = requestedWorkspaces.map(branch=>({ name:String(branch?.name || '').trim(),industry:String(branch?.industry || workspacePolicy.primaryIndustry).trim(),branchName:String(branch?.branchName || '').trim() || null }));
+    if (initialWorkspaces.length + 1 > workspacePolicy.pricing.includedWorkspaces) {
+      throw policyTools.invalid(`The ${selectedPlan.name} subscription includes up to ${workspacePolicy.pricing.includedWorkspaces} workspaces.`);
+    }
     const branchNames = new Set([(firstBranchName || workspaceName).trim().toLowerCase()]);
     for (const branch of initialWorkspaces) {
       if (!branch.name || branch.name.length>120 || (branch.branchName && branch.branchName.length>160) || !industryKeys.includes(branch.industry)) throw policyTools.invalid('Enter supported industries and valid names for all workspaces.');

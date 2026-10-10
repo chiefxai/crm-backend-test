@@ -8,7 +8,7 @@ function validatePolicy(input, primaryIndustry, industries) {
   const pricing = input.pricing;
   if (!pricing || typeof pricing !== 'object') throw invalid('Configure monthly workspace pricing.');
   const result = {};
-  for (const key of ['baseMonthlyInr', 'extraWorkspaceMonthlyInr', 'additionalIndustryMonthlyInr']) {
+  for (const key of ['baseMonthlyInr', 'additionalIndustryMonthlyInr']) {
     if (typeof pricing[key] !== 'number' || !Number.isFinite(pricing[key]) || pricing[key] < 0 || pricing[key] > 100000000) throw invalid('Monthly prices must be non-negative INR amounts.');
     result[key] = Math.round(pricing[key] * 100) / 100;
   }
@@ -37,15 +37,15 @@ function effectivePolicy(org, workspaces) {
 function quote(policy, workspaces) {
   if (!policy.pricing) return null;
   const p = policy.pricing;
-  const extraWorkspaces = Math.max(0, workspaces.length - p.includedWorkspaces);
   const additionalIndustries = new Set(workspaces.map(w => w.industry).filter(i => i !== policy.primaryIndustry)).size;
-  const totalMonthlyInr = Math.round((p.baseMonthlyInr + extraWorkspaces * p.extraWorkspaceMonthlyInr + additionalIndustries * p.additionalIndustryMonthlyInr) * 100) / 100;
+  const totalMonthlyInr = Math.round((p.baseMonthlyInr + additionalIndustries * p.additionalIndustryMonthlyInr) * 100) / 100;
   return { currency: 'INR', baseMonthlyInr: p.baseMonthlyInr, workspaceCount: workspaces.length,
-    includedWorkspaces: p.includedWorkspaces, extraWorkspaces, extraWorkspaceMonthlyInr: p.extraWorkspaceMonthlyInr,
+    includedWorkspaces: p.includedWorkspaces,
     additionalIndustries, additionalIndustryMonthlyInr: p.additionalIndustryMonthlyInr, totalMonthlyInr,
     usageIncluded: false };
 }
 function branchQuote(policy, workspaces) {
+  if (!policy.pricing || workspaces.length >= policy.pricing.includedWorkspaces) return null;
   const next = quote(policy, [...workspaces, { industry: policy.primaryIndustry }]);
   if (!next) return null;
   const token = crypto.createHash('sha256').update(JSON.stringify({ policy, workspaces: workspaces.map(w => [w.id, w.industry]).sort(), next })).digest('hex');
@@ -55,6 +55,9 @@ function validateIndustryChange(currentIndustry, nextIndustry) {
   if (nextIndustry !== undefined && nextIndustry !== currentIndustry) throw invalid('Workspace industry is fixed. Ask a platform administrator to provision a workspace for another industry.', 403);
 }
 function authorizeCreation(policy,workspaces,{industry,platformAdmin=false,pricingAcceptanceToken}) {
+  if (!policy.pricing || workspaces.length >= policy.pricing.includedWorkspaces) {
+    throw invalid(`This subscription includes up to ${policy.pricing?.includedWorkspaces || 0} workspaces. Upgrade the subscription to add another workspace.`, 409);
+  }
   if (industry !== policy.primaryIndustry && (!platformAdmin || policy.mode !== 'mixed_industry')) {
     throw invalid('Only platform administrators can add a different industry, and only for mixed-industry organizations.',403);
   }
