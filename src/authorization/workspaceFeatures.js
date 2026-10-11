@@ -37,12 +37,12 @@ async function listWorkspaceGrants(orgId, workspaceId) {
   const value = workspace.settings?.enabledFeatures;
   return Array.isArray(value) ? value.filter(v => typeof v === 'string') : null;
 }
-async function effectiveKeys(orgKeys, workspaceKeys, memberKeys, isWorkspaceAdmin = false) {
+async function effectiveKeys(orgKeys, workspaceKeys, memberKeys, isWorkspaceAdmin = false, memberWorkspaceOverride = null) {
   const globallyEnabled = new Set(await platformFeatures.getEnabledAppFeatureKeys());
   const org = new Set(orgKeys.filter(k => globallyEnabled.has(k)));
   const workspace = workspaceKeys === null ? org : new Set(workspaceKeys.filter(k => org.has(k)));
-  if (isWorkspaceAdmin) return [...workspace];
-  const member = new Set(memberKeys);
+  if (isWorkspaceAdmin && memberWorkspaceOverride === null) return [...workspace];
+  const member = new Set(memberWorkspaceOverride === null ? memberKeys : memberWorkspaceOverride);
   return [...workspace].filter(k => member.has(k));
 }
 async function enforceFeatureRequest(req, res, next) {
@@ -50,11 +50,14 @@ async function enforceFeatureRequest(req, res, next) {
   if (!key || !req.orgId || !req.workspaceId) return next();
   try {
     const grants = await listWorkspaceGrants(req.orgId, req.workspaceId);
-    if (grants === null) return next(); // no policy configured: migration-safe
+    const override = req.workspaceMemberFeatureOverride ?? null;
+    // Preserve legacy behavior when neither workspace nor member has a policy.
+    if (grants === null && override === null) return next();
     const isWorkspaceAdmin = req.authorization?.workspaceRole === 'Workspace Admin' || req.authorization?.platformAdmin === true;
-    const permitted = grants.includes(key)
+    const permitted = (grants === null || grants.includes(key))
       && Array.isArray(req.orgFeatureFlags) && req.orgFeatureFlags.includes(key)
-      && (isWorkspaceAdmin || (Array.isArray(req.memberFeatureFlags) && req.memberFeatureFlags.includes(key)))
+      && (override !== null ? override.includes(key)
+        : isWorkspaceAdmin || (Array.isArray(req.memberFeatureFlags) && req.memberFeatureFlags.includes(key)))
       && await platformFeatures.isAppFeatureEnabled(key);
     if (!permitted) return res.status(403).json({ error: 'Feature disabled for this workspace', feature: key });
     next();
