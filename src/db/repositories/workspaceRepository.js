@@ -308,7 +308,7 @@ async function getAuthorizationState(orgId,workspaceId,memberId) {
   const { rows } = await pool.query(`SELECT CASE WHEN a.id IS NOT NULL
     AND (CASE WHEN a.auto_renew=1 THEN a.grace_ends_at ELSE a.period_ends_at END)<=UTC_TIMESTAMP(6)
     THEN 'Suspended' ELSE w.status END AS workspace_status,o.status AS organization_status,
-    wm.role,wm.status,wm.role_source,wm.feature_flags AS workspace_feature_flags FROM workspaces w
+    wm.role,wm.status,wm.role_source,wm.feature_flags_json AS workspace_feature_flags FROM workspaces w
     INNER JOIN organizations o ON o.id=w.org_id
     LEFT JOIN billing_workspace_addons a ON a.org_id=w.org_id AND a.workspace_id=w.id
     LEFT JOIN workspace_members wm ON wm.org_id=w.org_id AND wm.workspace_id=w.id AND wm.member_id=?
