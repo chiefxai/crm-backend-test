@@ -16,7 +16,7 @@ function createS3PrivatePaymentProofStorage({ client, bucket, signUrl, maxTtlSec
     safeSegment(orgId, 'orgId');
     safeSegment(paymentRequestId, 'paymentRequestId');
     if (typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256)) throw new TypeError('sha256 is invalid.');
-    return `billing/payment-proofs/${orgId}/${paymentRequestId}/${sha256}`;
+    return `orgs/${orgId}/billing/payment-proofs/${paymentRequestId}/${sha256}`;
   }
 
   return Object.freeze({
@@ -31,19 +31,31 @@ function createS3PrivatePaymentProofStorage({ client, bucket, signUrl, maxTtlSec
       return key;
     },
     async signedDownload({ key, expiresIn = 120 }) {
-      if (typeof key !== 'string' || !/^billing\/payment-proofs\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/[a-f0-9]{64}$/.test(key)) {
+      if (!isPaymentProofObjectKey(key)) {
         throw new TypeError('Payment proof object key is invalid.');
       }
       if (!Number.isInteger(expiresIn) || expiresIn < 1 || expiresIn > maxTtlSeconds) throw new TypeError(`expiresIn must be from 1 to ${maxTtlSeconds} seconds.`);
       return signUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn });
     },
     async remove({ key }) {
-      if (typeof key !== 'string' || !/^billing\/payment-proofs\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/[a-f0-9]{64}$/.test(key)) {
+      if (!isPaymentProofObjectKey(key)) {
         throw new TypeError('Payment proof object key is invalid.');
       }
       await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
     },
   });
+}
+
+function isPaymentProofObjectKey(key) {
+  return typeof key === 'string' && (
+    /^orgs\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/billing\/payment-proofs\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/[a-f0-9]{64}$/.test(key)
+    || /^billing\/payment-proofs\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/[a-f0-9]{64}$/.test(key)
+  );
+}
+
+function isPaymentProofObjectKeyForOrg(key, orgId) {
+  return isPaymentProofObjectKey(key) && (key.startsWith(`orgs/${orgId}/billing/payment-proofs/`)
+    || key.startsWith(`billing/payment-proofs/${orgId}/`));
 }
 
 function createConfiguredPrivatePaymentProofStorage() {
@@ -56,4 +68,4 @@ function createConfiguredPrivatePaymentProofStorage() {
   });
 }
 
-module.exports = { createS3PrivatePaymentProofStorage, createConfiguredPrivatePaymentProofStorage };
+module.exports = { createS3PrivatePaymentProofStorage, createConfiguredPrivatePaymentProofStorage, isPaymentProofObjectKey, isPaymentProofObjectKeyForOrg };

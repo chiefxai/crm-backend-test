@@ -570,7 +570,7 @@ async function exportOrgBackup(orgId, orgName, backupConfig) {
     const zipName = `${orgId}-crm-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
     const zipPath = root + ".zip";
     await execFileAsync("zip", ["-qr", zipPath, "."], { cwd: root, maxBuffer: 1024 * 1024 });
-    const key = `backups/${orgId}/${zipName}`;
+    const key = `orgs/${orgId}/backups/${zipName}`;
     const stat = await fsp.stat(zipPath);
     await storage.upload(key, fs.createReadStream(zipPath), { contentType: "application/zip" });
     const downloadUrl = await storage.signedUrl(key, 7 * 86400);
@@ -592,23 +592,31 @@ async function updateBackupState(orgId, patch) {
 
 async function purgeExpiredBackups(orgId, retentionDays) {
   const cutoff = Date.now() - retentionDays * 86400000;
-  try {
-    const response = await getClient().send(new ListObjectsV2Command({
-      Bucket: process.env.STORAGE_BUCKET,
-      Prefix: `backups/${orgId}/`,
-    }));
-    let deleted = 0;
-    for (const object of response.Contents || []) {
-      if (object.LastModified && object.LastModified.getTime() < cutoff && object.Key) {
-        await storage.remove(object.Key);
-        deleted++;
-      }
+  let deleted = 0;
+  // Read both prefixes until legacy backups have aged out; all newly written
+  // backups use the organization-rooted key layout.
+  for (const prefix of [`orgs/${orgId}/backups/`, `backups/${orgId}/`]) {
+    try {
+      let continuationToken;
+      do {
+        const response = await getClient().send(new ListObjectsV2Command({
+          Bucket: process.env.STORAGE_BUCKET,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }));
+        for (const object of response.Contents || []) {
+          if (object.LastModified && object.LastModified.getTime() < cutoff && object.Key) {
+            await storage.removeOrganizationObject(object.Key, orgId);
+            deleted++;
+          }
+        }
+        continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+      } while (continuationToken);
+    } catch (err) {
+      log.warn(`[backup] Could not purge expired backups for ${orgId} at ${prefix}: ${err.message}`);
     }
-    return deleted;
-  } catch (err) {
-    log.warn(`[backup] Could not purge expired backups for ${orgId}: ${err.message}`);
-    return 0;
   }
+  return deleted;
 }
 
 async function performBackup(org) {

@@ -126,20 +126,23 @@ async function signedUrl(key, expiresIn = SIGNED_URL_TTL_SECONDS) {
   return getSignedUrl(getClient(), cmd, { expiresIn });
 }
 
-// Recording object keys encode their owning workspace. Never turn a key read
-// from a database row into a signed URL unless it belongs to the active
-// workspace. Legacy/default-workspace recordings remain at recordings/<file>.
+// New recording keys include organization and workspace prefixes. Continue to
+// recognize historical keys during the gradual migration, but only for the
+// active workspace that owns the corresponding database row.
 function recordingKeyBelongsToScope(key, scope) {
   if (!scope || typeof key !== "string") return false;
   let segments;
   try { segments = key.split("/").map(segment => decodeURIComponent(segment)); }
   catch { return false; }
   if (segments.some(segment => !segment || segment === "." || segment === "..")) return false;
-  if (scope.workspaceId === scope.orgId) {
-    return segments.length === 2 && segments[0] === "recordings";
-  }
-  return segments.length === 4 && segments[0] === "recordings" &&
+  const current = segments.length === 5 && segments[0] === "orgs" &&
+    segments[1] === scope.orgId && segments[2] === "recordings" &&
+    segments[3] === scope.workspaceId;
+  const legacyChild = segments.length === 4 && segments[0] === "recordings" &&
     segments[1] === scope.orgId && segments[2] === scope.workspaceId;
+  const legacyDefault = segments.length === 2 && segments[0] === "recordings" &&
+    scope.workspaceId === scope.orgId;
+  return current || legacyChild || legacyDefault;
 }
 
 function recordingObjectKey(value, scope = getScope()) {
@@ -229,6 +232,21 @@ async function remove(key) {
   await getClient().send(cmd);
 }
 
+// Organization backup retention runs outside a workspace request scope. Keep
+// its delete capability explicit and constrained to the requested org prefix,
+// including the legacy backup prefix while old backups age out.
+async function removeOrganizationObject(key, orgId) {
+  if (typeof key !== "string" || typeof orgId !== "string") throw new Error("Organization object key and owner are required");
+  const segments = key.split("/");
+  if (segments.some(segment => !segment || segment === "." || segment === "..")) throw new Error("Invalid organization object key");
+  const currentBackupPrefix = segments.length >= 4 && segments[0] === "orgs" &&
+    segments[1] === orgId && segments[2] === "backups";
+  const legacyBackupPrefix = segments.length >= 3 && segments[0] === "backups" &&
+    segments[1] === orgId;
+  if (!currentBackupPrefix && !legacyBackupPrefix) throw new Error("Object is not a backup owned by the requested organization");
+  await getClient().send(new DeleteObjectCommand({ Bucket: BUCKET(), Key: key }));
+}
+
 // Returns true when all required env vars are present.
 function isConfigured() {
   return !!(
@@ -238,4 +256,4 @@ function isConfigured() {
   );
 }
 
-module.exports = { upload, signedUrl, resolvePlaybackUrl, recordingObjectKey, remove, publicUrl, isConfigured };
+module.exports = { upload, signedUrl, resolvePlaybackUrl, recordingObjectKey, remove, removeOrganizationObject, publicUrl, isConfigured };

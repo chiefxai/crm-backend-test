@@ -99,15 +99,14 @@ router.get('/billing/organizations/:orgId/payments/:paymentRequestId/proof',
   requireDecisionEnabled, async (req, res) => {
     try {
       const { createMysqlPaymentSubmissionRepository } = require('./modules/payments/repositories/mysqlPaymentSubmissionRepository');
-      const { createConfiguredPrivatePaymentProofStorage } = require('./adapters/storage/privatePaymentProofStorage');
+      const { createConfiguredPrivatePaymentProofStorage, isPaymentProofObjectKeyForOrg } = require('./adapters/storage/privatePaymentProofStorage');
       const { getPool } = require('../db/pool');
       const orgId = validateId(req.params.orgId, 'orgId');
       const paymentRequestId = validateId(req.params.paymentRequestId, 'paymentRequestId');
       const reference = await createMysqlPaymentSubmissionRepository({ pool: getPool() })
         .getReceiptReference({ orgId, paymentRequestId });
       if (!reference) return res.status(404).json({ error: 'Payment not found.' });
-      if (typeof reference.proofObjectKey !== 'string'
-        || !reference.proofObjectKey.startsWith(`billing/payment-proofs/${orgId}/`)) {
+      if (!isPaymentProofObjectKeyForOrg(reference.proofObjectKey, orgId)) {
         return res.status(404).json({ error: 'Payment receipt unavailable.' });
       }
       const url = await createConfiguredPrivatePaymentProofStorage()

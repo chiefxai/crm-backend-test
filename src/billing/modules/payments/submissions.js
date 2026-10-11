@@ -82,8 +82,8 @@ function createPaymentSubmissionService({ unitOfWork, repository, proofStorage, 
       if (allowed !== true) throw new BillingDomainError(DOMAIN_ERROR_CODES.FORBIDDEN, 'Actor is not authorized to access this payment proof.');
       const request = await repository.getReceiptReference({ orgId, paymentRequestId });
       if (!request) throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'Payment request was not found for this organization.');
-      const expectedPrefix = `billing/payment-proofs/${orgId}/`;
-      if (!request.proofObjectKey || !request.proofObjectKey.startsWith(expectedPrefix)) {
+      const { isPaymentProofObjectKeyForOrg } = require('../../adapters/storage/privatePaymentProofStorage');
+      if (!isPaymentProofObjectKeyForOrg(request.proofObjectKey, orgId)) {
         throw new BillingDomainError(DOMAIN_ERROR_CODES.RETRYABLE_STORAGE, 'Payment proof reference is missing or outside the organization storage namespace.', { retryable: true });
       }
       return Object.freeze({ url: await proofStorage.signedDownload({ key: request.proofObjectKey, expiresIn }), expiresIn });

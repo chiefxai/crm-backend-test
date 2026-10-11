@@ -84,12 +84,13 @@ production build. No MySQL migration or end-to-end VM execution was performed.
   Provider-ID aliases cannot combine different workspace owners. Contact phone
   numbers are no longer treated as authoritative call aliases. Per-phone prompt
   and agent caches are partitioned by workspace; hangup requires matching scope.
-- New child recording keys include organization/workspace IDs. Historical
-  default recording keys are preserved. Signed-URL/storage policy audit remains.
-- Recording playback now checks known object keys against the active workspace
-  before signing or returning them. The legacy default workspace can resolve
-  only root-level `recordings/<file>` keys; child workspaces require their
-  organization/workspace path. External provider URLs remain provider-managed.
+- New object keys use `orgs/<orgId>/...` prefixes. Recordings include the
+  workspace ID; payment proofs and backups are grouped beneath the organization.
+  Existing recording, payment-proof and backup keys remain readable while they
+  age out or are migrated.
+- Recording playback checks the object key against the active organization and
+  workspace before signing or returning it. External provider URLs remain
+  provider-managed.
 - Retention deletes only recording objects owned by its active workspace, and
   organization backups validate each recording against its owning workspace.
   Backup recording filenames include workspace IDs to avoid collisions when
