@@ -39,7 +39,7 @@ describe("workspace and platform authorization", () => {
     delete process.env.PLATFORM_ADMIN_EMAILS;
     provider.verifyToken.mockResolvedValue({ sub: "user-a", email: "member@example.com" });
     db.findMembershipForUser.mockImplementation(async (_id, _email, selected) =>
-      selected && selected !== "org-a" ? null : { orgId: "org-a", role: "Agent" });
+      selected && selected !== "org-a" ? null : { orgId: "org-a", role: "Agent", memberId: "member-agent" });
     db.getOrg.mockImplementation(async (id) => ({ id, name: id, status: "Active" }));
     db.listMembershipsForUser.mockResolvedValue([{ orgId: "org-a", role: "Agent" }]);
     platform.listOrganizations.mockResolvedValue([{ id: "org-b", name: "Private customer" }]);
