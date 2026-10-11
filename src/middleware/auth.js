@@ -129,12 +129,14 @@ async function requireAuth(req, res, next) {
     return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, () => policy.enforceRequest(req,res,next));
   }
 
+  let authStage = "token_verification";
   try {
     const payload = await resolvePayload(req, token);
     if (!payload?.sub) {
       log.error("❌ auth.js: missing sub. keys:", payload ? Object.keys(payload) : null);
       return res.status(401).json({ error: "Invalid token payload" });
     }
+    authStage = "membership_authorization";
 
     const userId    = payload.sub;
     const userEmail = payload.email_verified === true && payload.email ? payload.email : null;
@@ -192,8 +194,9 @@ async function requireAuth(req, res, next) {
     res.set("X-Workspace-Id", req.workspaceId);
     return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, () => policy.enforceRequest(req,res,next));
   } catch (err) {
-    log.error("❌ auth.js: token verification failed:", err.message);
-    return res.status(err.statusCode || 401).json({ error: err.statusCode ? err.message : "Invalid or expired token" });
+    log.error("❌ auth.js: authentication request failed:", { stage: authStage, error: err.message });
+    const statusCode = err.statusCode || (authStage === "token_verification" ? 401 : 500);
+    return res.status(statusCode).json({ error: err.statusCode ? err.message : statusCode === 401 ? "Invalid or expired token" : "Authentication service unavailable" });
   }
 }
 

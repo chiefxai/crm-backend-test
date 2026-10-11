@@ -89,6 +89,11 @@ describe("workspace and platform authorization", () => {
     const res = await request(app).get("/api/resource").set("Authorization", "Bearer valid").set("X-Organization-Id", "org-a").expect(200);
     expect(res.body).toEqual({ orgId: "org-a", role: "Agent" });
   });
+  test("authentication backing-store failures are reported as server errors, not invalid tokens", async () => {
+    workspaceRepo.getAuthorizationState.mockRejectedValueOnce(new Error("workspace schema is unavailable"));
+    const res = await request(app).get("/api/auth/me").set("Authorization", "Bearer valid").expect(500);
+    expect(res.body).toEqual({ error: "Authentication service unavailable" });
+  });
   test.each([
     { platformAdmin: true },
     { admin: true },
