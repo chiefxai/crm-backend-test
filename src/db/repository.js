@@ -25,6 +25,7 @@ const {
 const { getLogger } = require("../observability/logger");
 const { buildVobizIncomingWebhookUrl } = require("../telephony/vobiz/vobizWebhookAuth");
 const organizationRepository = require("./repositories/organizationRepository");
+const { planOrganizationDeletion } = require("./organizationDeletionPlan");
 const aiUsageRepository = require("./repositories/aiUsageRepository");
 const { scopeForOrg, getScope } = require("../workspaces/scope");
 const { WORKSPACE_TABLES } = require("../workspaces/tables");
@@ -2804,9 +2805,10 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
       );
     }
 
-    // Delete every tenant-owned table in one transaction. The information_schema
-    // lookup keeps this list aligned with the actual MySQL schema while the
-    // explicit order handles the known parent/child relationships first.
+    // Discover every org-scoped table AND the current MySQL foreign-key graph.
+    // Billing/workspace migrations create RESTRICT relationships between tenant
+    // tables, so the old hardcoded order could delete a parent first and fail
+    // with ER_ROW_IS_REFERENCED_2 (surfaced as an opaque HTTP 500).
     const preferredOrder = [
       "messages", "lead_responses", "knowledge_chunks", "object_records",
       "object_fields", "object_stages", "workflow_runs", "enquiries", "loans",
@@ -2823,20 +2825,23 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
         WHERE TABLE_SCHEMA = DATABASE()
           AND COLUMN_NAME = 'org_id'`
     );
-    const existing = new Set((rows || []).map((r) => r.table_name));
-    const ordered = [
-      ...preferredOrder.filter((table) => existing.has(table)),
-      ...[...existing].filter((table) => !preferredOrder.includes(table) && table !== "organizations" && table !== "org_cost_archive"),
-    ];
+    const existing = (rows || []).map(row => row.table_name);
+    const { rows: foreignKeys } = await client.query(
+      `SELECT TABLE_NAME AS child_table, REFERENCED_TABLE_NAME AS parent_table
+         FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND REFERENCED_TABLE_SCHEMA = DATABASE()
+          AND REFERENCED_TABLE_NAME IS NOT NULL`
+    );
+    const ordered = planOrganizationDeletion(existing, foreignKeys || [], preferredOrder);
 
     for (const table of ordered) {
       await client.query(`DELETE FROM \`${table}\` WHERE org_id = ?`, [orgId]);
     }
 
-    // Cloud-project metadata uses organization_id rather than org_id.
-    if (existing.has("organization_cloud_projects")) {
-      await client.query("DELETE FROM `organization_cloud_projects` WHERE organization_id = ?", [orgId]);
-    }
+    // organization_cloud_projects deliberately has organization_id, not
+    // org_id. Never delete it: project and billing attribution must survive
+    // the CRM tenant deletion (see retainOrgCloudProject above).
 
     const orgResult = await client.query("DELETE FROM `organizations` WHERE id = ?", [orgId]);
     if (!orgResult || Number(orgResult.affectedRows || 0) !== 1) {
@@ -2847,7 +2852,9 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
     return true;
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch (_) {}
-    throw new Error(`[db.deleteOrganizationData] transaction failed: ${err.message}`);
+    const error = new Error(`[db.deleteOrganizationData] transaction failed: ${err.message}`, { cause: err });
+    if (err.statusCode) error.statusCode = err.statusCode;
+    throw error;
   } finally {
     client.release();
   }
