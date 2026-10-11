@@ -46,6 +46,10 @@ function toPayment(row) {
   return {
     id: row.id,
     purpose: row.purpose,
+    // A generic invoice payment is not always a workspace add-on.
+    // Identify workspace invoices using the persisted org-scoped cycle.
+    invoiceId: row.invoice_id || null,
+    workspaceAddonName: row.workspace_addon_name || null,
     status: toPaymentApiStatus(row.status),
     expectedAmount: { asset: row.asset, units: String(row.expected_amount_units), scale: Number(row.scale) },
     receivedAmount: row.received_amount_units == null ? null
@@ -64,15 +68,18 @@ async function listPaymentRequests(orgId, { limit, cursor } = {}, { pool = getPo
   const args = [orgId];
   let range = '';
   if (after) {
-    range = ' AND (created_at<? OR (created_at=? AND id<?))';
+    range = ' AND (p.created_at<? OR (p.created_at=? AND p.id<?))';
     args.push(after.createdAt, after.createdAt, after.id);
   }
   args.push(pageSize + 1);
-  const result = await pool.query(`SELECT id,purpose,status,expected_amount_units,received_amount_units,asset,scale,
-       submitted_at,reviewed_at,created_at,DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor
-     FROM billing_payment_requests
-     WHERE org_id=?${range}
-     ORDER BY created_at DESC,id DESC LIMIT ?`, args);
+  const result = await pool.query(`SELECT p.id,p.purpose,p.invoice_id,p.status,p.expected_amount_units,p.received_amount_units,p.asset,p.scale,
+       p.submitted_at,p.reviewed_at,p.created_at,DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor,
+       a.name AS workspace_addon_name
+     FROM billing_payment_requests p
+     LEFT JOIN billing_workspace_addon_cycles c ON c.org_id=p.org_id AND c.invoice_id=p.invoice_id
+     LEFT JOIN billing_workspace_addons a ON a.org_id=c.org_id AND a.id=c.addon_id
+     WHERE p.org_id=?${range}
+     ORDER BY p.created_at DESC,p.id DESC LIMIT ?`, args);
   if (!Array.isArray(result?.rows)) throw new TypeError('Billing storage returned an invalid result.');
   const hasMore = result.rows.length > pageSize;
   const page = result.rows.slice(0, pageSize);
