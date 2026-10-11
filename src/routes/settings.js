@@ -285,6 +285,46 @@ router.delete("/organization/workspace-access/:workspaceId/:memberId", requireAu
   } catch(err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
 });
 
+// Per-person, per-workspace feature permissions. A null override inherits the
+// existing member-level grants; an empty array explicitly denies all features.
+// Org/workspace policies remain hard ceilings, never bypassed by this endpoint.
+router.put("/organization/workspace-access/:workspaceId/:memberId/features", requireAuth, requirePermission("organization.members.manage"), async (req,res) => {
+  try {
+    const features=req.body?.featureFlags;
+    if (!Array.isArray(features) || features.some(key => typeof key !== 'string'))
+      return res.status(400).json({error:'featureFlags must be a list of feature keys'});
+    const workspace=await workspaceRepository.getActive(req.orgId,req.params.workspaceId);
+    if (!workspace) return res.status(404).json({error:'Active workspace not found'});
+    const target=await db.getTeamMemberById(req.orgId,req.params.memberId);
+    if (!target) return res.status(404).json({error:'Member not found'});
+    if (isAuthPrivilegedRole(target.role) && !req.isPlatformAdmin)
+      return res.status(403).json({error:'Privileged memberships require platform administration'});
+    const org=await db.getOrg(req.orgId);
+    const catalog=require("../platform/featureFlags");
+    const allowed=await catalog.sanitizeFeatureKeys(org?.featureFlags || []);
+    const workspaceKeys=workspace.settings?.enabledFeatures;
+    const ceiling=new Set(Array.isArray(workspaceKeys) ? allowed.filter(key => workspaceKeys.includes(key)) : allowed);
+    const selected=[...new Set(features)];
+    if (selected.some(key=>!ceiling.has(key)))
+      return res.status(400).json({error:'Features must be enabled for this organization and workspace'});
+    const saved=await workspaceRepository.setMemberFeatureOverride(req.orgId,req.params.workspaceId,req.params.memberId,selected);
+    await auditLog.record(req.orgId,req,'organization.workspace_member.features_update','workspace_member',req.params.memberId,
+      {workspaceId:req.params.workspaceId,featureFlags:selected});
+    return res.json(saved);
+  } catch(err) { return res.status(err.statusCode || 500).json({error:safeErrorMessage(err)}); }
+});
+router.delete("/organization/workspace-access/:workspaceId/:memberId/features", requireAuth, requirePermission("organization.members.manage"), async (req,res) => {
+  try {
+    const target=await db.getTeamMemberById(req.orgId,req.params.memberId);
+    if (target && isAuthPrivilegedRole(target.role) && !req.isPlatformAdmin)
+      return res.status(403).json({error:'Privileged memberships require platform administration'});
+    const saved=await workspaceRepository.setMemberFeatureOverride(req.orgId,req.params.workspaceId,req.params.memberId,null);
+    await auditLog.record(req.orgId,req,'organization.workspace_member.features_inherit','workspace_member',req.params.memberId,
+      {workspaceId:req.params.workspaceId});
+    return res.json(saved);
+  } catch(err) { return res.status(err.statusCode || 500).json({error:safeErrorMessage(err)}); }
+});
+
 // Organization administrators map an explicit, least-privilege feature set
 // to each workspace. Missing policies continue legacy entitlement behavior.
 router.get("/organization/workspace-features", requireAuth, requirePermission("organization.read"), async (req,res) => {
