@@ -29,6 +29,20 @@ router.get('/legacy-overview', requireAuth, requirePermission('billing.read'), a
 });
 
 
+// Included monthly usage credits are plan entitlements, not automatically
+// spendable credit grants. Only approved/activated subscription periods issue
+// ledger credits. Expose the difference explicitly for existing/new orgs.
+router.get('/subscription-credit-status', requireAuth, requirePermission('billing.organization.read'), async (req, res) => {
+  try {
+    const { readPlanCreditStatus } = require('../billing/planCreditStatus');
+    const status = await readPlanCreditStatus(req.orgId);
+    if (!status) return res.status(404).json({ error: 'Organization not found' });
+    return res.json(status);
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ error: safeErrorMessage(error) });
+  }
+});
+
 // New billing read model; never substitute legacy INR balances for credit units.
 router.get('/overview', requireAuth, requirePermission('billing.read'), async (req, res) => {
   try {
