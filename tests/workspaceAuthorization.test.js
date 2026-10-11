@@ -3,6 +3,11 @@ jest.mock('../src/db/repositories/workspaceRepository', () => ({
   listForOrg: jest.fn(),
   listForMember: jest.fn(),
   ensureDefaultMembership: jest.fn(),
+  getAuthorizationState: jest.fn(async () => ({
+    organization_status: 'Active', workspace_status: 'Active',
+    role: 'Member', status: 'Active', role_source: 'manual',
+  })),
+  getMemberFeatureOverride: jest.fn(async () => null),
 }));
 jest.mock("../src/db/repository", () => ({
   findMembershipForUser: jest.fn(), getOrg: jest.fn(), listMembershipsForUser: jest.fn(),
@@ -47,7 +52,7 @@ describe("workspace and platform authorization", () => {
 
   test("ordinary authenticated users receive only their own memberships", async () => {
     const res = await request(app).get("/api/auth/workspaces").set("Authorization", "Bearer valid").expect(200);
-    expect(res.body).toEqual([{ orgId: "org-a", role: "Agent", workspaceId: "org-a", workspace: { id: "org-a", orgId: "org-a", isDefault: true } }]);
+    expect(res.body).toEqual([{ orgId: "org-a", role: "Agent", workspaceId: "org-a", workspaceRole: "Agent", workspace: { id: "org-a", orgId: "org-a", isDefault: true } }]);
     expect(platform.listOrganizations).not.toHaveBeenCalled();
   });
   test('Organization Admin sees every workspace without being labeled Workspace Admin', async () => {
