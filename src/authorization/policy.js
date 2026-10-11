@@ -4,8 +4,8 @@ const requestAuthority = new AsyncLocalStorage();
 const ORGANIZATION_ROLES = ['Owner','Organization Admin','Billing Admin','Member'];
 const WORKSPACE_ROLES = ['Workspace Admin','Manager','Member','Viewer'];
 const ORG_PERMISSIONS = {
-  Owner: ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit'],
-  'Organization Admin': ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit'],
+  Owner: ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit','billing.credit.allocate','billing.allocation_rules.manage'],
+  'Organization Admin': ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit','billing.credit.allocate','billing.allocation_rules.manage'],
   'Billing Admin': ['organization.read','billing.read','billing.organization.read','billing.payment.submit'],
   Member: [],
 };
@@ -22,7 +22,10 @@ function organizationRole(role) {
   return ORGANIZATION_ROLES.includes(role) ? role : 'Member';
 }
 function legacyWorkspaceRole(role) {
-  if (['Owner','Organization Admin','Super Admin','Workspace Admin'].includes(role)) return 'Workspace Admin';
+  // Organization roles are not workspace roles. Explicit workspace
+  // assignments (if any) are resolved separately.
+  if (['Owner','Organization Admin','Super Admin'].includes(role)) return null;
+  if (role === 'Workspace Admin') return 'Workspace Admin';
   if (['Manager','Sales Manager'].includes(role)) return 'Manager';
   if (['Viewer','Customer'].includes(role)) return 'Viewer';
   if (role === 'Billing Admin') return null;
@@ -52,6 +55,8 @@ function requestPermission(req) {
   if (/^\/api\/workspace-sharing\/grants(?:\/|$)/.test(path)) return read ? 'workspace.read' : 'workspace.settings.manage';
   if (path === '/api/billing/workspace-budget' && !read) return 'workspace.settings.manage';
   if (/^\/api\/billing\/workspace-addons(?:\/|$)/.test(path) && !read) return 'billing.payment.submit';
+  if (/^\/api\/billing\/allocation-rules(?:\/|$)/.test(path) && !read) return 'billing.allocation_rules.manage';
+  if (/^\/api\/billing\/(?:allocations|transfers)(?:\/|$)/.test(path) && !read) return 'billing.credit.allocate';
   if (path === '/api/billing/workspace-addons' && read) return 'billing.organization.read';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';
   if (/^\/api\/settings\/workspace\/members(?:\/|$)/.test(path)) return 'workspace.members.manage';
