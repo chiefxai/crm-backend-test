@@ -7,6 +7,9 @@ const { buildBillingContext } = require('./httpContext');
 const { createPaymentSubmitForRequest, BILLING_SUBMIT_ROLES } = require('./paymentHttpComposition');
 const { CONTRACT_VERSION } = require('./contracts/validation');
 const { isBillingDomainError, DOMAIN_ERROR_CODES } = require('./contracts/errors');
+const { getLogger } = require('../observability/logger');
+
+const logger = getLogger('billing.paymentSubmission');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -90,6 +93,18 @@ router.post('/payments', requireAuth, requirePermission('billing.read'),
         informationRequest: null,
       });
     } catch (error) {
+      if (!(error instanceof multer.MulterError)
+        && !isBillingDomainError(error)
+        && error?.statusCode !== 400
+        && !(error instanceof TypeError)) {
+        // The client receives a generic 500, but retain the underlying failure
+        // in structured server logs so storage/database issues can be diagnosed.
+        logger.error('Unexpected payment submission failure', {
+          orgId: req.orgId,
+          userId: req.userId,
+          error,
+        });
+      }
       return paymentError(res, error);
     }
   });
