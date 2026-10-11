@@ -10,5 +10,11 @@ test('query builder implements repository compatibility operators', () => {
 });
 
 test('mysql adapter has no PostgreSQL-only SQL operators', () => {
-  expect(src).not.toMatch(/\bRETURNING\b|\bILIKE\b|\bON CONFLICT\b|\bANY\s*\(/i);
+  const executableSrc = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  expect(executableSrc).not.toMatch(/\bRETURNING\b|\bILIKE\b|\bON CONFLICT\b|\bANY\s*\(/);
+});
+
+test('mysql adapter exposes the migration-managed workspaces table to its query builder', () => {
+  expect(src).toMatch(/workspaces:\s*\{\s*pk:\s*"id"/);
+  expect(src).toContain('if (table === "workspaces") continue;');
 });

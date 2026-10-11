@@ -82,6 +82,18 @@ function parseSelectColumns(table, cols) {
 // ------------------------------------------------------------
 
 const TABLES = {
+  // Created and evolved by the ordered workspace migrations below. Keep a
+  // query-builder definition here so platform/workspace repositories can
+  // read the table through the MySQL adapter without letting the legacy
+  // bootstrap create an incomplete version before migration 0701 runs.
+  workspaces: {
+    pk: "id",
+    uniqueKeys: [["org_id", "id"]],
+    columns: {
+      id: "text", org_id: "text", name: "text", industry: "text", branch_name: "text",
+      status: "text", is_default: "bool", created_at: "text", settings: "json"
+    }
+  },
   organization_cloud_projects: {
     pk: "id",
     columns: {
@@ -715,6 +727,11 @@ async function createTables() {
 
 async function runSchemaMigration(client) {
     for (const [table, def] of Object.entries(TABLES)) {
+      // Workspace schema is owned by versioned migrations, which create its
+      // composite keys and foreign keys. Creating it in the legacy bootstrap
+      // would cause migration 0701's CREATE TABLE IF NOT EXISTS to skip those
+      // constraints on a fresh installation.
+      if (table === "workspaces") continue;
       const cols = Object.entries(def.columns)
         .map(([col, type]) => `${q(col)} ${sqlType(type, col, col === def.pk)}${col === def.pk ? " PRIMARY KEY" : ""}`)
         .join(", ");
