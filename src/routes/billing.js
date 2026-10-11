@@ -52,6 +52,7 @@ router.get('/payments', requireAuth, requirePermission('billing.read'), async (r
     const result = await listPaymentRequests(req.orgId, {
       cursor: req.query.cursor,
       limit: req.query.limit,
+      type: req.query.type,
     });
     return res.json(result);
   } catch (error) {
