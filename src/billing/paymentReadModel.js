@@ -42,6 +42,15 @@ function decodeCursor(raw) {
 function encodeCursor(row) {
   return Buffer.from(JSON.stringify({ v: 1, createdAt: row.created_cursor, id: row.id })).toString('base64url');
 }
+const PAYMENT_FILTERS = new Set(['all', 'topup', 'workspace', 'subscription', 'invoice']);
+function parsePaymentFilter(value) {
+  if (value === undefined) return 'all';
+  if (typeof value !== 'string' || !PAYMENT_FILTERS.has(value)) {
+    throw invalidPage('type must be all, topup, workspace, subscription, or invoice.');
+  }
+  return value;
+}
+
 function toPayment(row) {
   return {
     id: row.id,
@@ -61,16 +70,24 @@ function toPayment(row) {
 }
 
 /** An authenticated org-scoped page of persisted payment requests; no financial mutations. */
-async function listPaymentRequests(orgId, { limit, cursor } = {}, { pool = getPool() } = {}) {
+async function listPaymentRequests(orgId, { limit, cursor, type } = {}, { pool = getPool() } = {}) {
   validateId(orgId, 'orgId');
   const pageSize = parseLimit(limit);
   const after = decodeCursor(cursor);
+  const filter = parsePaymentFilter(type);
   const args = [orgId];
   let range = '';
   if (after) {
     range = ' AND (p.created_at<? OR (p.created_at=? AND p.id<?))';
     args.push(after.createdAt, after.createdAt, after.id);
   }
+  // Filter at the database before LIMIT so each payment-history page has
+  // real matching results, even with mixed invoice/top-up submissions.
+  const typeWhere = filter === 'all' ? ''
+    : filter === 'workspace' ? " AND p.purpose='invoice' AND c.id IS NOT NULL"
+    : filter === 'invoice' ? " AND p.purpose='invoice' AND c.id IS NULL"
+    : " AND p.purpose=?";
+  if (filter === 'topup' || filter === 'subscription') args.push(filter);
   args.push(pageSize + 1);
   const result = await pool.query(`SELECT p.id,p.purpose,p.invoice_id,p.status,p.expected_amount_units,p.received_amount_units,p.asset,p.scale,
        p.submitted_at,p.reviewed_at,p.created_at,DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor,
@@ -78,7 +95,7 @@ async function listPaymentRequests(orgId, { limit, cursor } = {}, { pool = getPo
      FROM billing_payment_requests p
      LEFT JOIN billing_workspace_addon_cycles c ON c.org_id=p.org_id AND c.invoice_id=p.invoice_id
      LEFT JOIN billing_workspace_addons a ON a.org_id=c.org_id AND a.id=c.addon_id
-     WHERE p.org_id=?${range}
+     WHERE p.org_id=?${typeWhere}${range}
      ORDER BY p.created_at DESC,p.id DESC LIMIT ?`, args);
   if (!Array.isArray(result?.rows)) throw new TypeError('Billing storage returned an invalid result.');
   const hasMore = result.rows.length > pageSize;
@@ -86,4 +103,4 @@ async function listPaymentRequests(orgId, { limit, cursor } = {}, { pool = getPo
   return { rows: page.map(toPayment), nextCursor: hasMore ? encodeCursor(page[page.length - 1]) : null };
 }
 
-module.exports = { listPaymentRequests, parseLimit, decodeCursor, encodeCursor, toPayment };
+module.exports = { listPaymentRequests, parseLimit, parsePaymentFilter, decodeCursor, encodeCursor, toPayment };
