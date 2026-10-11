@@ -218,7 +218,9 @@ async function getOrganizationDetail(orgId) {
     { data: activity, error: actErr },
     { count: leadCount },
     { count: workflowCount },
-    { count: campaignCount }
+    { count: campaignCount },
+    { count: workspaceCount, error: workspaceCountErr },
+    { count: agentCount, error: agentCountErr }
   ] = await Promise.all([
     db.supabase.from("organizations").select("*").eq("id", orgId).maybeSingle(),
     db.supabase.from("org_members").select("*").eq("org_id", orgId).order("created_at", { ascending: false }),
@@ -226,7 +228,11 @@ async function getOrganizationDetail(orgId) {
     db.supabase.from("audit_log").select("*").systemReadOnly("Show platform-admin organization-wide audit history").eq("org_id", orgId).order("created_at", { ascending: false }).limit(10),
     db.supabase.from("leads").select("id", { count: "exact", head: true }).systemReadOnly("Count all workspaces in platform-admin organization detail").eq("org_id", orgId),
     db.supabase.from("workflows").select("id", { count: "exact", head: true }).systemReadOnly("Count all workspaces in platform-admin organization detail").eq("org_id", orgId),
-    db.supabase.from("campaigns").select("id", { count: "exact", head: true }).systemReadOnly("Count all workspaces in platform-admin organization detail").eq("org_id", orgId)
+    db.supabase.from("campaigns").select("id", { count: "exact", head: true }).systemReadOnly("Count all workspaces in platform-admin organization detail").eq("org_id", orgId),
+    // Counts cover every workspace/AI voice agent for the selected organization,
+    // including suspended workspaces and disabled agents (they still exist).
+    db.supabase.from("workspaces").select("id", { count: "exact", head: true }).systemReadOnly("Count organization workspaces for platform admin").eq("org_id", orgId),
+    db.supabase.from("org_agents").select("id", { count: "exact", head: true }).systemReadOnly("Count organization AI agents for platform admin").eq("org_id", orgId)
   ]);
   if (orgErr) throw new Error(`[platformAdmin.getOrganizationDetail] ${orgErr.message}`);
   if (!org) {
@@ -237,6 +243,8 @@ async function getOrganizationDetail(orgId) {
   if (memErr) throw new Error(`[platformAdmin.getOrganizationDetail] members: ${memErr.message}`);
   if (callErr) throw new Error(`[platformAdmin.getOrganizationDetail] calls: ${callErr.message}`);
   if (actErr) throw new Error(`[platformAdmin.getOrganizationDetail] activity: ${actErr.message}`);
+  if (workspaceCountErr) throw new Error(`[platformAdmin.getOrganizationDetail] workspaces: ${workspaceCountErr.message}`);
+  if (agentCountErr) throw new Error(`[platformAdmin.getOrganizationDetail] agents: ${agentCountErr.message}`);
 
   return {
     id: org.id,
@@ -256,7 +264,14 @@ async function getOrganizationDetail(orgId) {
     rechargeAvailableInr: Math.max(0, (Number(org.recharge_balance_inr) || 0) - (Number(org.recharge_reserved_inr) || 0)),
     gcpVertexProject: await db.toApiOrgCloudProject(await db.getOrgCloudProject(orgId)),
     settings: org.settings || {},
-    counts: { leads: leadCount || 0, workflows: workflowCount || 0, campaigns: campaignCount || 0, members: (members || []).length },
+    counts: {
+      leads: leadCount || 0,
+      workflows: workflowCount || 0,
+      campaigns: campaignCount || 0,
+      members: (members || []).length,
+      workspaces: workspaceCount ?? 0,
+      agents: agentCount ?? 0,
+    },
     members: (members || []).map((m) => ({
       id: m.id, name: m.name, email: m.email, role: m.role, status: m.status, hasAccount: !!m.user_id, createdAt: m.created_at
     })),
