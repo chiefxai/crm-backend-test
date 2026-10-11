@@ -1,5 +1,7 @@
 # Subscription lifecycle invocation — staging-only runbook
 
+> Superseded by [the subscription lifecycle operations and release runbook](billing-subscription-lifecycle-operations.md). The scheduler registry and access-enforcement mode have since changed; use the current runbook for flags, rollout prerequisites, and operational procedures.
+
 The feature branch contains **bounded, explicitly invoked** lifecycle composition:
 - `src/billing/lifecycleJobComposition.js` uses the existing period scanner, activation service, financial UnitOfWork, credit repository, and outbox.
 - `scripts/run-billing-lifecycle-once.js` invokes **one** bounded activation or renewal-reminder scan.

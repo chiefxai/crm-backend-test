@@ -74,6 +74,21 @@ router.get('/payments', requireAuth, requirePermission('billing.organization.rea
   }
 });
 
+// Initial subscription purchase is opt-in and uses the canonical versioned
+// billing catalog. Resolve legacy workspace plans only after explicit terms
+// have been configured by platform operations.
+const { createSubscriptionPurchaseRouter } = require('../billing/subscriptionPurchaseRouter');
+function subscriptionPurchaseCompositionFactory() {
+  return require('../billing/subscriptionPurchaseCompositionFactory').createConfiguredSubscriptionPurchaseComposition();
+}
+router.use(createSubscriptionPurchaseRouter({ compositionFactory: subscriptionPurchaseCompositionFactory }));
+
+// Grace requests remain independently opt-in; a pending request never changes
+// subscription access and decisions are audited in the lifecycle tables.
+router.use(require('../billing/subscriptionGraceRouter').createOrganizationSubscriptionGraceRouter());
+router.use(require('../billing/subscriptionRenewalRouter').createSubscriptionRenewalRouter());
+router.use(require('../billing/subscriptionUpgradeRouter').createSubscriptionUpgradeRouter());
+
 // Organization credit allocation uses the existing ledger and stays write-gated.
 router.use(require('../billing/manualAllocationRouter').router);
 

@@ -31,6 +31,8 @@ const BILLING_ORG_TABLES = new Set([
   'billing_contacts', 'billing_alert_states', 'billing_notifications',
   'billing_notification_recipients', 'billing_notification_deliveries',
   'billing_workspace_addons', 'billing_workspace_addon_cycles',
+  'organization_subscriptions', 'billing_subscription_period_links',
+  'billing_subscription_grace_requests', 'billing_subscription_grace_decisions',
 ]);
 const BILLING_TABLES = new Set([...BILLING_PLATFORM_TABLES, ...BILLING_ORG_TABLES]);
 

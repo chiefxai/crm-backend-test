@@ -54,7 +54,47 @@ function createBillingEmailEventHandlers({ notificationRepository, deliveryRepos
     } });
   }
 
-  return Object.freeze({ handleContactVerification, handleRenewalDue, handlePaymentConfirmed });
+  async function handlePeriodActivated(tx, event) {
+    const data = event.payload || {}; const now = clock.now();
+    return notificationRepository.createNotification(tx, { orgId: event.orgId, now, templateKey: 'billing.subscription_active.v1', notification: {
+      notificationKey: `subscription-active:${data.periodId || event.aggregateId}`, eventKey: 'subscription.period_activated',
+      scopeType: 'organization', scopeOwnerId: event.orgId, title: 'Subscription active',
+      message: 'Your approved subscription period is active and its included usage credits are available.',
+      actionPath: '/settings/billing', occurredAt: event.occurredAt,
+      payload: { periodId: data.periodId || event.aggregateId, paymentRequestId: data.paymentRequestId || null },
+    } });
+  }
+
+  async function handleAccessRestricted(tx, event) {
+    const data = event.payload || {}; const now = clock.now();
+    return notificationRepository.createNotification(tx, { orgId: event.orgId, now, templateKey: 'billing.subscription_suspended.v1', notification: {
+      notificationKey: `subscription-suspended:${event.aggregateVersion || event.eventId}`, eventKey: 'subscription.access_restricted',
+      scopeType: 'organization', scopeOwnerId: event.orgId, title: 'Subscription access suspended',
+      message: 'The subscription billing deadline passed. Arrange payment or contact the platform team to restore access.',
+      actionPath: '/settings/billing', occurredAt: event.occurredAt,
+      payload: { restrictionDeadline: data.restrictionDeadline || null, cause: data.cause || 'subscription_expired' },
+    } });
+  }
+
+  async function handleGraceOutcome(tx, event) {
+    const data = event.payload || {}; const now = clock.now();
+    const requested = event.eventType === 'SubscriptionGraceRequested.v1';
+    const approved = event.eventType === 'SubscriptionGraceApproved.v1' || data.decision === 'approve';
+    const title = requested ? 'Grace time request submitted' : approved ? 'Grace time approved' : 'Grace time request denied';
+    const message = requested ? 'Your request for additional billing grace time was submitted to the platform team.'
+      : approved ? 'The platform team approved additional time to resolve subscription billing.'
+        : 'The platform team denied the request for additional billing grace time.';
+    return notificationRepository.createNotification(tx, { orgId: event.orgId, now, templateKey: requested ? 'billing.grace_requested.v1' : 'billing.grace_decided.v1', notification: {
+      notificationKey: `subscription-grace:${data.graceRequestId || event.aggregateId}:${requested ? 'requested' : data.decision}`,
+      eventKey: requested ? 'subscription.grace_requested' : approved ? 'subscription.grace_approved' : 'subscription.grace_denied',
+      scopeType: 'organization', scopeOwnerId: event.orgId, title, message, actionPath: '/settings/billing', occurredAt: event.occurredAt,
+      payload: { graceRequestId: data.graceRequestId || event.aggregateId, periodId: data.periodId || null,
+        requestedUntil: data.requestedUntil || null, grantedUntil: data.grantedUntil || null, reason: data.reason || null },
+    } });
+  }
+
+  return Object.freeze({ handleContactVerification, handleRenewalDue, handlePaymentConfirmed,
+    handlePeriodActivated, handleAccessRestricted, handleGraceOutcome });
 }
 
 module.exports = { createBillingEmailEventHandlers, stableKey };

@@ -14,6 +14,11 @@ const { createMysqlEmailDeliveryRepository } = require('./adapters/delivery/mysq
 const HANDLED_EMAIL_EVENTS = Object.freeze([
   'BillingContactVerificationRequested.v1',
   'SubscriptionRenewalDue.v1',
+  'SubscriptionPeriodActivated.v1',
+  'SubscriptionAccessRestricted.v1',
+  'SubscriptionGraceRequested.v1',
+  'SubscriptionGraceApproved.v1',
+  'SubscriptionGraceDenied.v1',
   'PaymentConfirmed.v1',
 ]);
 
@@ -49,6 +54,11 @@ function createBillingNotificationOutboxWorker({
   const registry = createBillingJobDispatchRegistry({
     'BillingContactVerificationRequested.v1': (event, tx) => handlers.handleContactVerification(tx, event),
     'SubscriptionRenewalDue.v1': (event, tx) => handlers.handleRenewalDue(tx, event),
+    'SubscriptionPeriodActivated.v1': (event, tx) => handlers.handlePeriodActivated(tx, event),
+    'SubscriptionAccessRestricted.v1': (event, tx) => handlers.handleAccessRestricted(tx, event),
+    'SubscriptionGraceRequested.v1': (event, tx) => handlers.handleGraceOutcome(tx, event),
+    'SubscriptionGraceApproved.v1': (event, tx) => handlers.handleGraceOutcome(tx, event),
+    'SubscriptionGraceDenied.v1': (event, tx) => handlers.handleGraceOutcome(tx, event),
     'PaymentConfirmed.v1': (event, tx) => handlers.handlePaymentConfirmed(tx, event),
   });
   const baseOutbox = createMysqlOutboxStore({ pool, clock, tokenSource: idSource });

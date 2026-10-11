@@ -9,6 +9,7 @@ const { createMysqlPaymentDecisionRepository } = require('./modules/payments/rep
 const { createPaymentDecisionService } = require('./modules/payments/decisions');
 const { createMysqlCreditRepository } = require('./modules/credits/repositories/mysqlCreditRepository');
 const { createMysqlPeriodRepository } = require('./modules/subscriptions/repositories/mysqlPeriodRepository');
+const { createMysqlSubscriptionRepository } = require('./modules/subscriptions/repositories/mysqlSubscriptionRepository');
 const { createSubscriptionLifecycleService } = require('./modules/subscriptions/lifecycleService');
 const { createMysqlAllocationRepository } = require('./modules/allocations/repositories/mysqlAllocationRepository');
 const { createMysqlPostpaidRepository } = require('./modules/postpaid/repositories/mysqlPostpaidRepository');
@@ -46,6 +47,7 @@ function createPlatformPaymentDecisionForRequest(req, {
     repository: createMysqlPaymentDecisionRepository({ idSource, clock }),
     creditRepository: createMysqlCreditRepository({ idSource, clock }),
     periodLifecycle,
+    subscriptionRepository: createMysqlSubscriptionRepository(),
     invoiceRepository: invoices,
     outbox,
     idSource, clock,

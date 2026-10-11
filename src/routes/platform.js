@@ -480,6 +480,21 @@ router.post("/organizations", async (req, res) => {
     }
     const initialRecharge = Math.max(0, Number(initialRechargeAmountInr) || 0);
     if (initialRecharge > 0) throw policyTools.invalid('Create the organization with a zero opening balance, then use the verified top-up flow.');
+    const provisionInitialSubscription = process.env.BILLING_SUBSCRIPTION_PURCHASE_ENABLED === 'true';
+    if (provisionInitialSubscription) {
+      if (process.env.BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED !== 'true') {
+        throw Object.assign(new Error('Enable subscription access enforcement after existing organizations have been reconciled before accepting new subscription purchases.'), {
+          statusCode: 503, code: 'SUBSCRIPTION_ACCESS_ENFORCEMENT_REQUIRED',
+        });
+      }
+      const subscriptionTerms = await billingSettings.getSubscriptionTermsPolicy();
+      if (!subscriptionTerms?.configured) {
+        throw Object.assign(new Error('Configure explicit subscription taxes and financial terms before enabling initial subscription purchases.'), {
+          statusCode: 409, code: 'SUBSCRIPTION_TERMS_NOT_CONFIGURED',
+        });
+      }
+      require('../billing/subscriptionPurchaseComposition').quoteTtlSeconds();
+    }
 
     // New clients select one combined template; the server always resolves it
     // from platform settings, never from client-provided retention/backup values.
@@ -525,6 +540,26 @@ router.post("/organizations", async (req, res) => {
       dataRetentionPolicyName: selectedRetention?.policyName || null,
       backup: effectiveBackup,
     });
+
+    // Provision the first immutable subscription quote as part of the org
+    // onboarding flow when the lifecycle is explicitly enabled. A failed quote
+    // remains retryable through the organization billing recovery endpoint.
+    let initialSubscriptionPurchase = null;
+    if (provisionInitialSubscription) {
+      try {
+        const purchase = require('../billing/subscriptionPurchaseCompositionFactory')
+          .createConfiguredSubscriptionPurchaseComposition();
+        const result = await purchase.provisionInitialQuote({ orgId: org.id });
+        initialSubscriptionPurchase = result ? {
+          status: 'awaiting_payment', quoteId: result.quoteId,
+          paymentAmount: result.paymentAmount, includedCredits: result.includedCredits,
+          validUntil: result.validUntil,
+        } : { status: 'pending' };
+      } catch (purchaseError) {
+        log.error('Initial subscription quote provisioning failed:', purchaseError.message);
+        initialSubscriptionPurchase = { status: 'pending', code: purchaseError.code || 'SUBSCRIPTION_PURCHASE_ERROR' };
+      }
+    }
 
     let tempPassword = null;
     if (adminEmail) {
@@ -581,6 +616,7 @@ router.post("/organizations", async (req, res) => {
         status: cloudProject.status,
       },
       adminEmailSent: !!(adminEmail && tempPassword),
+      ...(initialSubscriptionPurchase ? { initialSubscriptionPurchase } : {}),
     });
   } catch (err) {
     if (err?.code === "ER_DUP_ENTRY" || err?.code === "23505") {
@@ -710,6 +746,21 @@ router.put("/billing/workspace-plans", async (req, res) => {
     const actor = { userId: req.userId, userEmail: req.userEmail };
     const next = await billingSettings.setWorkspacePlans(actor, req.body || {});
     await auditLog.record(null, actor, "platform.billing.workspace_plans.update", "billing", "workspace_plans", next);
+    res.json(next);
+  } catch (err) { handleError(err, res); }
+});
+
+router.get("/billing/subscription-terms-policy", async (_req, res) => {
+  try {
+    res.json(await require("../platform/billingSettings").getSubscriptionTermsPolicy());
+  } catch (err) { handleError(err, res); }
+});
+
+router.put("/billing/subscription-terms-policy", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    const next = await require("../platform/billingSettings").setSubscriptionTermsPolicy(actor, req.body || {});
+    await auditLog.record(null, actor, "platform.billing.subscription_terms_policy.update", "billing", "subscription_terms_policy", next);
     res.json(next);
   } catch (err) { handleError(err, res); }
 });
@@ -909,5 +960,7 @@ router.delete("/organizations/:id", async (req, res) => {
 
 // Payment decisions inherit the verified platform-operator middleware above.
 router.use(require('../billing/platformPaymentDecisionRouter').router);
+router.use(require('../billing/subscriptionGraceRouter').createPlatformSubscriptionGraceRouter());
+router.use(require('../billing/subscriptionReconciliationRouter').createSubscriptionReconciliationRouter());
 
 module.exports = router;

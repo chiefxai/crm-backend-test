@@ -12,10 +12,10 @@ const {
   runBillingLifecycleOnce, validateRunOptions, lifecycleFlag,
 } = require('../../src/billing/lifecycleJobComposition');
 
-test('subscription activation and reminders both fail closed by default', async () => {
+test('subscription activation, reminders, and expiry enforcement fail closed by default', async () => {
   let constructed = 0;
   const jobsFactory = () => { constructed++; throw new Error('Jobs should not be constructed'); };
-  for (const mode of ['activate', 'renewal-reminders']) {
+  for (const mode of ['activate', 'renewal-reminders', 'enforce-access']) {
     const result = await runBillingLifecycleOnce({ mode }, { env: {}, jobsFactory });
     assert.equal(result.skipped, true);
     assert.equal(result.scanned, 0);
@@ -49,6 +49,22 @@ test('reminder tick requires a different flag and uses selected lead time', asyn
   assert.deepEqual(calls, [{ now: '2026-10-09T12:00:00.000Z', limit: 5, leadTimeSeconds: 172800 }]);
 });
 
+test('access enforcement mode is bounded by its own default-off flag', async () => {
+  const calls = [];
+  const jobsFactory = () => ({
+    activateDuePeriods: async () => { throw Error('wrong mode'); },
+    queueDueRenewalEvents: async () => { throw Error('wrong mode'); },
+    enforceExpiredAccess: async input => { calls.push(input); return { scanned: 1, results: [] }; },
+  });
+  const disabled = await runBillingLifecycleOnce({ mode: 'enforce-access', limit: 4 }, { env: {}, jobsFactory });
+  assert.equal(disabled.skipped, true);
+  const result = await runBillingLifecycleOnce({ mode: 'enforce-access', limit: 4, now: '2026-10-09T12:00:00.000Z' }, {
+    env: { BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED: 'true' }, jobsFactory,
+  });
+  assert.equal(result.scanned, 1);
+  assert.deepEqual(calls, [{ now: '2026-10-09T12:00:00.000Z', limit: 4 }]);
+});
+
 test('invalid modes, batch sizes and timestamps are rejected', async () => {
   for (const input of [
     { mode: 'all' }, { mode: 'activate', limit: 0 }, { mode: 'activate', limit: 501 },
@@ -58,4 +74,5 @@ test('invalid modes, batch sizes and timestamps are rejected', async () => {
   }
   assert.equal(lifecycleFlag('activate'), 'BILLING_SUBSCRIPTION_ACTIVATION_ENABLED');
   assert.equal(lifecycleFlag('renewal-reminders'), 'BILLING_RENEWAL_REMINDERS_ENABLED');
+  assert.equal(lifecycleFlag('enforce-access'), 'BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED');
 });

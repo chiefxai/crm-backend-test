@@ -68,6 +68,12 @@ function createMysqlPaymentSubmissionRepository({ pool } = {}) {
     } else {
       if (!quote) throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'The selected quote was not found for this organization.');
       record.validateQuote(quote);
+      const pendingQuotePayment = rowsOf(await tx.query(
+        `SELECT id FROM billing_payment_requests WHERE org_id=? AND quote_id=?
+          AND status IN ('pending_verification','needs_clarification','clarification_requested') LIMIT 1 FOR UPDATE`,
+        [record.orgId, record.quoteId],
+      ));
+      if (pendingQuotePayment.length) throw new BillingDomainError(DOMAIN_ERROR_CODES.CONFLICT, 'This subscription quote already has a payment awaiting review.');
       if (String(quote.status).toLowerCase() === 'draft') {
         await tx.query(
           `UPDATE billing_quotes SET status='accepted',accepted_at=?,accepted_by=?,updated_at=?,version=version+1

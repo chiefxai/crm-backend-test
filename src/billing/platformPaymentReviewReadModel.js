@@ -1,8 +1,16 @@
 'use strict';
 
-const { getPool } = require('../db/pool');
 const { validateId } = require('./kernel/scope');
-const { dateIso } = require('./overviewReadModel');
+
+function dateIso(value) {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  const raw = String(value);
+  const normalized = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?$/.test(raw) ? `${raw.replace(' ', 'T')}Z` : raw;
+  const date = new Date(normalized);
+  if (!Number.isFinite(date.valueOf())) throw new TypeError('Invalid billing timestamp in storage.');
+  return date.toISOString();
+}
 
 function parsePage(value) {
   if (value == null) return 30;
@@ -30,6 +38,24 @@ function parseCursor(value) {
   }
 }
 function mapRow(row) {
+  let subscriptionUpgrade;
+  if (row.quote_type === 'adjustment' && row.quote_snapshot_json != null) {
+    try {
+      const snapshot = typeof row.quote_snapshot_json === 'string' ? JSON.parse(row.quote_snapshot_json) : row.quote_snapshot_json;
+      const adjustment = snapshot?.adjustment;
+      if (snapshot?.schemaVersion === 1 && snapshot?.purpose === 'adjustment' && adjustment?.kind === 'immediate_upgrade'
+          && adjustment.currentPlan && adjustment.targetPlan && adjustment.prorationAmount && adjustment.incrementalIncludedCredits
+          && typeof adjustment.renewalAnchorAt === 'string') {
+        subscriptionUpgrade = {
+          currentPlan: { id: adjustment.currentPlan.id, version: Number(adjustment.currentPlan.version) },
+          targetPlan: { id: adjustment.targetPlan.id, version: Number(adjustment.targetPlan.version) },
+          prorationAmount: adjustment.prorationAmount,
+          incrementalIncludedCredits: adjustment.incrementalIncludedCredits,
+          renewalAnchorAt: adjustment.renewalAnchorAt,
+        };
+      }
+    } catch (_) { /* malformed historical quote snapshots are omitted from this read-only DTO */ }
+  }
   return {
     id: row.id,
     orgId: row.org_id,
@@ -44,11 +70,13 @@ function mapRow(row) {
     submittedAt: dateIso(row.submitted_at || row.created_at),
     reviewedAt: dateIso(row.reviewed_at),
     ...(row.workspace_addon_name ? {workspaceAddon:{name:row.workspace_addon_name,invoiceId:row.invoice_id}} : {}),
+    ...(subscriptionUpgrade ? { subscriptionUpgrade } : {}),
   };
 }
 
 async function listPlatformPaymentReviews({ status = 'pending_verification', limit, cursor, orgId } = {},
-  { pool = getPool() } = {}) {
+  { pool: suppliedPool } = {}) {
+  const pool = suppliedPool || require('../db/pool').getPool();
   if (!['pending_verification', 'needs_clarification', 'approved', 'rejected', 'all'].includes(status)) {
     const error = new TypeError('Invalid review status.');
     error.statusCode = 400;
@@ -59,21 +87,26 @@ async function listPlatformPaymentReviews({ status = 'pending_verification', lim
   const after = parseCursor(cursor);
   let where = ' WHERE 1=1';
   const args = [];
-  if (status !== 'all') { where += ' AND status=?'; args.push(status); }
-  if (orgId) { where += ' AND org_id=?'; args.push(orgId); }
+  if (status !== 'all') { where += ' AND billing_payment_requests.status=?'; args.push(status); }
+  if (orgId) { where += ' AND billing_payment_requests.org_id=?'; args.push(orgId); }
   if (after) {
-    where += ' AND (created_at<? OR (created_at=? AND id<?))';
+    where += ' AND (billing_payment_requests.created_at<? OR (billing_payment_requests.created_at=? AND billing_payment_requests.id<?))';
     args.push(after.createdAt, after.createdAt, after.id);
   }
   args.push(size + 1);
-  const result = await pool.query(`SELECT id,org_id,purpose,status,version,expected_amount_units,
-    received_amount_units,asset,scale,payment_reference,proof_object_key,submitted_at,reviewed_at,created_at,
-    invoice_id,
+  const result = await pool.query(`SELECT billing_payment_requests.id,billing_payment_requests.org_id,billing_payment_requests.purpose,
+    billing_payment_requests.status,billing_payment_requests.version,billing_payment_requests.expected_amount_units,
+    billing_payment_requests.received_amount_units,billing_payment_requests.asset,billing_payment_requests.scale,
+    billing_payment_requests.payment_reference,billing_payment_requests.proof_object_key,billing_payment_requests.submitted_at,
+    billing_payment_requests.reviewed_at,billing_payment_requests.created_at,billing_payment_requests.invoice_id,
+    q.quote_type,q.terms_snapshot_json AS quote_snapshot_json,
     (SELECT a.name FROM billing_workspace_addon_cycles c
       JOIN billing_workspace_addons a ON a.org_id=c.org_id AND a.id=c.addon_id
       WHERE c.org_id=billing_payment_requests.org_id AND c.invoice_id=billing_payment_requests.invoice_id LIMIT 1) AS workspace_addon_name,
-    DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor
-    FROM billing_payment_requests${where} ORDER BY created_at DESC,id DESC LIMIT ?`, args);
+    DATE_FORMAT(billing_payment_requests.created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor
+    FROM billing_payment_requests LEFT JOIN billing_quotes q
+      ON q.org_id=billing_payment_requests.org_id AND q.id=billing_payment_requests.quote_id
+      ${where} ORDER BY billing_payment_requests.created_at DESC,billing_payment_requests.id DESC LIMIT ?`, args);
   if (!Array.isArray(result?.rows)) throw new TypeError('Invalid billing query result.');
   const hasMore = result.rows.length > size;
   const rows = result.rows.slice(0, size);

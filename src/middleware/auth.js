@@ -23,6 +23,7 @@ const provider = require("../auth");        // plug-and-play provider
 const { getLogger } = require("../observability/logger");
 const log = getLogger("middleware.auth");
 const crypto = require("crypto");
+const { enforceSubscriptionAccess } = require('./subscriptionAccessGate');
 
 const DEV_ORG_ID  = "dev-org";
 const DEV_USER_ID = "dev-user";
@@ -126,6 +127,7 @@ async function requireAuth(req, res, next) {
     attachAuthorization(req,policy.authorization({ orgRole: 'Organization Admin',workspaceRole: 'Workspace Admin' }));
     res.set("X-Organization-Id", req.orgId);
     res.set("X-Workspace-Id", req.workspaceId);
+    if (!await enforceSubscriptionAccess(req, res)) return undefined;
     return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, () => policy.enforceRequest(req,res,next));
   }
 
@@ -188,6 +190,7 @@ async function requireAuth(req, res, next) {
       platformAdmin: isPlatformAdminIdentity(payload,userEmail),membership,
       allowInactiveWorkspace: /^\/api\/billing(?:\/|$)/.test(req.originalUrl || req.url)
         || ['/api/auth/me','/api/settings/workspaces','/api/settings/workspace-policy'].includes((req.originalUrl || req.url).split('?')[0]) }));
+    if (!await enforceSubscriptionAccess(req, res)) return undefined;
     req.workspaceMemberFeatureOverride = req.isPlatformAdmin || !membership.memberId
       ? null : await workspaces.getMemberFeatureOverride(req.orgId, req.workspaceId, membership.memberId);
     res.set("X-Organization-Id", req.orgId);

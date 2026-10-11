@@ -7,6 +7,7 @@ const credits = require('../../../src/db/migrations/2026100713-billing-credit-al
 const operations = require('../../../src/db/migrations/2026100714_billing_operations');
 const proofs = require('../../../src/db/migrations/2026100716-billing-payment-submission-fields');
 const workspaceAddons = require('../../../src/db/migrations/2026100722-workspace-addon-purchases');
+const subscriptionLifecycle = require('../../../src/db/migrations/2026100727-subscription-lifecycle');
 const {
   WORKSPACE_TABLES,
   BILLING_TABLES,
@@ -34,7 +35,7 @@ describe('billing schema registration and ownership inventory', () => {
   });
 
   test('accounts for every new billing table without sending billing tables through generic workspace CRUD', () => {
-    const schemaTables = [foundation,credits,operations,proofs,workspaceAddons].flatMap(createdTables);
+    const schemaTables = [foundation,credits,operations,proofs,workspaceAddons,subscriptionLifecycle].flatMap(createdTables);
     expect(new Set(schemaTables).size).toBe(schemaTables.length);
     expect(new Set(schemaTables)).toEqual(BILLING_TABLES);
     expect(BILLING_PLATFORM_TABLES.size + BILLING_ORG_TABLES.size).toBe(BILLING_TABLES.size);

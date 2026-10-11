@@ -29,7 +29,7 @@ function topupGrantAmount(request) {
 }
 
 function createPaymentDecisionService({
-  unitOfWork, repository, creditRepository, periodLifecycle, invoiceRepository, outbox, idSource, clock, authorizeDecision,
+  unitOfWork, repository, creditRepository, periodLifecycle, subscriptionRepository, invoiceRepository, outbox, idSource, clock, authorizeDecision,
 } = {}) {
   if (typeof unitOfWork?.runFinancial !== 'function') throw new TypeError('Payment decision service requires the billing UnitOfWork.');
   for (const method of ['getForUpdate', 'saveDecision', 'markQuotePaid', 'createFulfillment']) {
@@ -104,6 +104,9 @@ function createPaymentDecisionService({
                 || BigInt(request.quote.amount.units) !== BigInt(request.expectedAmount.units)) {
                 throw new BillingDomainError(DOMAIN_ERROR_CODES.VERSION_CONFLICT, 'The accepted quote is stale, already paid, or no longer matches the submitted payment.', { details: { quoteId: request.quoteId } });
               }
+              if (request.quote.type === 'adjustment') {
+                throw new BillingDomainError(DOMAIN_ERROR_CODES.CONFLICT, 'Upgrade payment approval is disabled until effective workspace and member entitlements are applied atomically.');
+              }
               await repository.markQuotePaid(tx, { orgId: request.orgId, quoteId: request.quoteId, now });
             }
           }
@@ -118,6 +121,12 @@ function createPaymentDecisionService({
             funding = await periodLifecycle.schedulePaidRenewalInTransaction({
               tx, orgId: request.orgId, paymentRequestId: request.id,
             });
+            if (typeof subscriptionRepository?.fundPeriodLinkForQuote === 'function') {
+              await subscriptionRepository.fundPeriodLinkForQuote(tx, {
+                orgId: request.orgId, quoteId: request.quoteId, paymentRequestId: request.id,
+                periodId: funding.id, effectiveAt: funding.startAt, now,
+              });
+            }
             funding = Object.freeze({ status: 'scheduled', periodId: funding.id, startsAt: funding.startAt, endsAt: funding.endAt });
           } else if (decision.decision === 'approve' && request.purpose === 'topup') {
             funding = await issueTopup(tx, request, decision.context.actor, decision.context.operationId, now);

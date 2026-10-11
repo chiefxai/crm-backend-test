@@ -8,6 +8,7 @@ const KEYS = {
   industryMinimumBalance: "billing.industryMinimumBalance",
   systemMinimumBalance: "billing.systemMinimumBalance",
   workspacePlans: "billing.workspacePlans",
+  subscriptionTermsPolicy: "billing.subscriptionTermsPolicy",
 };
 
 const DEFAULT_WORKSPACE_PLANS = Object.freeze({
@@ -198,6 +199,86 @@ async function setWorkspacePlans(actor, input) {
   return next;
 }
 
+function normalizeSubscriptionTermsPolicy(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw Object.assign(new Error("Provide subscription billing terms."), { statusCode: 400 });
+  }
+  const includedDistinctIndustries = input.includedDistinctIndustries;
+  const maxDistinctIndustries = input.maxDistinctIndustries;
+  if (!Number.isSafeInteger(includedDistinctIndustries) || includedDistinctIndustries < 1
+    || (maxDistinctIndustries !== null && (!Number.isSafeInteger(maxDistinctIndustries) || maxDistinctIndustries < includedDistinctIndustries))) {
+    throw Object.assign(new Error("Included and maximum distinct industries must be valid whole numbers."), { statusCode: 400 });
+  }
+  if (!Array.isArray(input.taxes) || input.taxes.length > 50) {
+    throw Object.assign(new Error("Taxes must be an array of at most 50 rules. Set an empty array only when no tax applies."), { statusCode: 400 });
+  }
+  const taxCodes = new Set();
+  const appliesToOptions = new Set(["subscription", "additional_workspace", "additional_industry", "additional_seat"]);
+  const taxes = input.taxes.map((tax, index) => {
+    const code = String(tax?.code || "").trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(code) || taxCodes.has(code)) {
+      throw Object.assign(new Error(`Tax rule ${index + 1} needs a unique stable code.`), { statusCode: 400 });
+    }
+    if (!Number.isSafeInteger(tax.rateBps) || tax.rateBps < 0 || tax.rateBps > 10000
+      || typeof tax.inclusive !== "boolean" || !Array.isArray(tax.appliesTo) || tax.appliesTo.length < 1
+      || tax.appliesTo.some((value) => !appliesToOptions.has(value)) || new Set(tax.appliesTo).size !== tax.appliesTo.length) {
+      throw Object.assign(new Error(`Tax rule ${code} has invalid rate, inclusivity or applicability.`), { statusCode: 400 });
+    }
+    taxCodes.add(code);
+    return { code, rateBps: tax.rateBps, appliesTo: [...tax.appliesTo].sort(), inclusive: tax.inclusive };
+  }).sort((a, b) => a.code.localeCompare(b.code));
+  const postpaid = input.postpaid;
+  if (!postpaid || typeof postpaid !== "object" || typeof postpaid.eligible !== "boolean"
+    || !Array.isArray(postpaid.workspaceModes) || postpaid.workspaceModes.some((mode) => !["limited", "unlimited"].includes(mode))
+    || new Set(postpaid.workspaceModes).size !== postpaid.workspaceModes.length
+    || (!postpaid.eligible && postpaid.workspaceModes.length)
+    || (postpaid.organizationExposureLimit !== null && (!postpaid.organizationExposureLimit
+      || postpaid.organizationExposureLimit.asset !== "INR" || !/^\d+$/.test(String(postpaid.organizationExposureLimit.units))
+      || postpaid.organizationExposureLimit.scale !== 2))) {
+    throw Object.assign(new Error("Postpaid terms must explicitly define eligibility, modes and an INR exposure limit or null."), { statusCode: 400 });
+  }
+  const serviceAfterExpiry = input.serviceAfterExpiry;
+  if (!serviceAfterExpiry || !["suspend", "grace", "continue_postpaid"].includes(serviceAfterExpiry.mode)
+    || (serviceAfterExpiry.mode === "grace" && (!Number.isSafeInteger(serviceAfterExpiry.graceSeconds) || serviceAfterExpiry.graceSeconds < 1 || serviceAfterExpiry.graceSeconds > 2678400))
+    || (serviceAfterExpiry.mode !== "grace" && serviceAfterExpiry.graceSeconds !== undefined && serviceAfterExpiry.graceSeconds !== 0)
+    || (serviceAfterExpiry.mode === "continue_postpaid" && !postpaid.eligible)) {
+    throw Object.assign(new Error("Service-after-expiry terms are invalid or conflict with postpaid eligibility."), { statusCode: 400 });
+  }
+  return {
+    includedDistinctIndustries,
+    maxDistinctIndustries,
+    taxes,
+    postpaid: {
+      eligible: postpaid.eligible,
+      workspaceModes: [...postpaid.workspaceModes].sort(),
+      organizationExposureLimit: postpaid.organizationExposureLimit === null ? null : {
+        asset: "INR", units: String(postpaid.organizationExposureLimit.units), scale: 2,
+      },
+    },
+    serviceAfterExpiry: { mode: serviceAfterExpiry.mode, graceSeconds: serviceAfterExpiry.mode === "grace" ? serviceAfterExpiry.graceSeconds : 0 },
+  };
+}
+
+async function getSubscriptionTermsPolicy() {
+  const stored = await platformSettings.getSetting(KEYS.subscriptionTermsPolicy, null);
+  if (!stored || typeof stored !== "object" || !Number.isSafeInteger(stored.version) || !stored.policy) {
+    return { configured: false, version: 0, policy: null };
+  }
+  return { configured: true, version: stored.version, policy: normalizeSubscriptionTermsPolicy(stored.policy),
+    ...(stored.updatedAt ? { updatedAt: stored.updatedAt } : {}), ...(stored.updatedBy ? { updatedBy: stored.updatedBy } : {}) };
+}
+
+async function setSubscriptionTermsPolicy(actor, input) {
+  const current = await getSubscriptionTermsPolicy();
+  if (!Number.isSafeInteger(input?.expectedVersion) || input.expectedVersion !== current.version) {
+    throw Object.assign(new Error("Subscription billing policy changed. Refresh before saving."), { statusCode: 409, code: "VERSION_CONFLICT" });
+  }
+  const policy = normalizeSubscriptionTermsPolicy(input.policy);
+  const next = { version: current.version + 1, policy, updatedAt: new Date().toISOString(), updatedBy: actor?.userId || null };
+  await platformSettings.setSetting(KEYS.subscriptionTermsPolicy, next);
+  return { configured: true, ...next };
+}
+
 module.exports = {
   KEYS,
   DEFAULT_WORKSPACE_PLANS,
@@ -212,4 +293,7 @@ module.exports = {
   getWorkspacePlans,
   setWorkspacePlans,
   normalizeWorkspacePlans,
+  getSubscriptionTermsPolicy,
+  setSubscriptionTermsPolicy,
+  normalizeSubscriptionTermsPolicy,
 };

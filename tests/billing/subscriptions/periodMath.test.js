@@ -2,6 +2,7 @@
 
 const {
   addCalendarInterval,
+  shiftCalendarDays,
   previewSubscriptionPeriod,
   previewEarlyRenewal,
   previewPostpaidPeriod,
@@ -9,6 +10,10 @@ const {
 } = require('../../../src/billing/modules/subscriptions/periodMath');
 
 describe('subscription period math', () => {
+  test('shifts calendar days in the billing timezone across daylight saving changes', () => {
+    expect(shiftCalendarDays('2025-03-10T12:00:00.000Z', -1, { timeZone: 'America/New_York' }))
+      .toBe('2025-03-09T12:00:00.000Z');
+  });
   test('preserves a monthly anchor through short months', () => {
     expect(addCalendarInterval('2025-01-31T15:45:00.000Z', { unit: 'month', count: 1 }))
       .toBe('2025-02-28T15:45:00.000Z');

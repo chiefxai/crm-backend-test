@@ -5,12 +5,13 @@ const { BillingDomainError, DOMAIN_ERROR_CODES } = require('../../contracts/erro
 const { organizationScope, validateId } = require('../../kernel/scope');
 const { validateAmount } = require('../../kernel/amount');
 const { planIssueGrant } = require('../credits/domain');
-const { evaluatePeriodActivation } = require('./periodMath');
+const { evaluatePeriodActivation, addCalendarInterval } = require('./periodMath');
+const { resolveSubscriptionPolicy } = require('./policy');
 
 function stableId(prefix, value) { return `${prefix}-${crypto.createHash('sha256').update(value).digest('hex').slice(0, 40)}`; }
 function fingerprint(value) { return `sha256:${crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
 
-function createPeriodActivationService({ unitOfWork, periodRepository, creditRepository, outbox, clock } = {}) {
+function createPeriodActivationService({ unitOfWork, periodRepository, creditRepository, subscriptionRepository, outbox, clock, subscriptionPolicy } = {}) {
   if (typeof unitOfWork?.runFinancial !== 'function') throw new TypeError('Period activation requires UnitOfWork.runFinancial().');
   for (const method of ['getPeriod', 'getPeriodFunding', 'listPeriods', 'transitionPeriod']) {
     if (typeof periodRepository?.[method] !== 'function') throw new TypeError(`Period repository requires ${method}().`);
@@ -20,6 +21,7 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
   }
   if (typeof outbox?.enqueue !== 'function') throw new TypeError('Period activation requires a transactional outbox.');
   if (typeof clock?.now !== 'function') throw new TypeError('Period activation requires a clock.');
+  const policy = resolveSubscriptionPolicy(subscriptionPolicy || {});
 
   async function activatePeriod({ orgId, periodId, now = clock.now() } = {}) {
     validateId(orgId, 'orgId'); validateId(periodId, 'periodId');
@@ -48,6 +50,20 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
         orgId, periodId, expectedStatus: 'scheduled', status: 'active',
         fields: { activatedAt: now, updatedAt: clock.now() }, fundingProof: { paymentRequestId: funding.paymentRequestId },
       });
+
+      if (typeof subscriptionRepository?.activateLinkedPeriod === 'function') {
+        const serviceAfterExpiry = period.termsSnapshot?.terms?.serviceAfterExpiry;
+        const explicitGraceSeconds = serviceAfterExpiry?.mode === 'grace' ? serviceAfterExpiry.graceSeconds : null;
+        const days = policy.postExpiryGraceDays;
+        const restrictionDeadline = Number.isSafeInteger(explicitGraceSeconds) && explicitGraceSeconds > 0
+          ? new Date(Date.parse(period.endAt) + explicitGraceSeconds * 1000).toISOString()
+          : days > 0
+            ? addCalendarInterval(period.endAt, { unit: 'day', count: days }, { timeZone: policy.billingTimeZone })
+            : period.endAt;
+        await subscriptionRepository.activateLinkedPeriod(tx, {
+          orgId, periodId, restrictionDeadline, now,
+        });
+      }
 
       const creditAmount = validateAmount(period.termsSnapshot?.terms?.includedCredits);
       let grantResult = null;

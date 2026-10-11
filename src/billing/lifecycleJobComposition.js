@@ -8,8 +8,12 @@ const { createMysqlOutboxStore } = require('./adapters/mysql/outboxStore');
 const { createMysqlPeriodRepository } = require('./modules/subscriptions/repositories/mysqlPeriodRepository');
 const { createMysqlCreditRepository } = require('./modules/credits/repositories/mysqlCreditRepository');
 const { createMysqlPeriodJobRepository } = require('./adapters/jobs/period/mysqlPeriodJobRepository');
+const { createMysqlSubscriptionAccessJobRepository } = require('./adapters/jobs/subscriptionAccess/mysqlSubscriptionAccessJobRepository');
 const { createPeriodActivationService } = require('./modules/subscriptions/periodActivationService');
 const { createSubscriptionPeriodJobs } = require('./modules/subscriptions/periodJobs');
+const { createMysqlSubscriptionRepository } = require('./modules/subscriptions/repositories/mysqlSubscriptionRepository');
+const { createSubscriptionAccessJobs } = require('./modules/subscriptions/accessJobs');
+const { resolveSubscriptionPolicy } = require('./modules/subscriptions/policy');
 
 /**
  * Compose existing billing lifecycle services for an explicit bounded tick.
@@ -22,25 +26,37 @@ function createBillingLifecycleJobs({
 } = {}) {
   const unitOfWork = createMysqlUnitOfWork({ pool, operationStore, clock, idSource });
   const outbox = createMysqlOutboxStore({ pool, clock, tokenSource: idSource });
+  const policy = resolveSubscriptionPolicy();
   const activationService = createPeriodActivationService({
     unitOfWork,
     periodRepository: createMysqlPeriodRepository(),
     creditRepository: createMysqlCreditRepository({ idSource, clock }),
+    subscriptionRepository: createMysqlSubscriptionRepository(),
     outbox,
     clock,
+    subscriptionPolicy: policy,
   });
-  return createSubscriptionPeriodJobs({
+  const periodJobs = createSubscriptionPeriodJobs({
     unitOfWork,
     candidateRepository: createMysqlPeriodJobRepository({ pool }),
     activationService,
     outbox,
     clock,
   });
+  const accessJobs = createSubscriptionAccessJobs({
+    unitOfWork,
+    candidateRepository: createMysqlSubscriptionAccessJobRepository({ pool }),
+    subscriptionRepository: createMysqlSubscriptionRepository(),
+    outbox,
+    clock,
+    policy,
+  });
+  return Object.freeze({ ...periodJobs, ...accessJobs });
 }
 
-const LIFECYCLE_MODES = Object.freeze(['activate', 'renewal-reminders']);
+const LIFECYCLE_MODES = Object.freeze(['activate', 'renewal-reminders', 'enforce-access']);
 function validateRunOptions({ mode, limit = 25, now = new Date().toISOString(), leadTimeSeconds = 7 * 86400 } = {}) {
-  if (!LIFECYCLE_MODES.includes(mode)) throw new TypeError('mode must be activate or renewal-reminders.');
+  if (!LIFECYCLE_MODES.includes(mode)) throw new TypeError(`mode must be one of ${LIFECYCLE_MODES.join(', ')}.`);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('limit must be between 1 and 100.');
   if (typeof now !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?Z$/.test(now)
     || !Number.isFinite(Date.parse(now))) throw new TypeError('now must be a UTC ISO-8601 timestamp.');
@@ -51,7 +67,9 @@ function validateRunOptions({ mode, limit = 25, now = new Date().toISOString(), 
 }
 
 function lifecycleFlag(mode) {
-  return mode === 'activate' ? 'BILLING_SUBSCRIPTION_ACTIVATION_ENABLED' : 'BILLING_RENEWAL_REMINDERS_ENABLED';
+  if (mode === 'activate') return 'BILLING_SUBSCRIPTION_ACTIVATION_ENABLED';
+  if (mode === 'renewal-reminders') return 'BILLING_RENEWAL_REMINDERS_ENABLED';
+  return 'BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED';
 }
 
 async function runBillingLifecycleOnce(options, {
@@ -64,7 +82,8 @@ async function runBillingLifecycleOnce(options, {
   }
   const jobs = jobsFactory();
   if (run.mode === 'activate') return jobs.activateDuePeriods({ now: run.now, limit: run.limit });
-  return jobs.queueDueRenewalEvents({ now: run.now, limit: run.limit, leadTimeSeconds: run.leadTimeSeconds });
+  if (run.mode === 'renewal-reminders') return jobs.queueDueRenewalEvents({ now: run.now, limit: run.limit, leadTimeSeconds: run.leadTimeSeconds });
+  return jobs.enforceExpiredAccess({ now: run.now, limit: run.limit });
 }
 
 module.exports = { createBillingLifecycleJobs, runBillingLifecycleOnce, validateRunOptions, lifecycleFlag };

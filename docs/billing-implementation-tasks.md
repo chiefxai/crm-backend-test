@@ -2,6 +2,7 @@
 
 Progress: BILL-07 through BILL-18 have backend modules or foundations implemented. BILL-16 provider enforcement remains explicitly disabled pending purchased credit rates and BILL-19 composition. BILL-19 still owns route registration, event-consumer registration, worker composition and scheduler triggers.
 Architecture authority: [billing-credits-architecture.md](billing-credits-architecture.md).
+Initial subscription purchase, renewal, upgrade, suspension and grace integration tasks: [subscription-lifecycle-tasks.md](subscription-lifecycle-tasks.md). These tasks supplement the existing billing modules and explicitly track missing product flows and scheduler wiring.
 Backend: /Users/sanjay/Documents/chiefxai/crm-backend-test
 Frontend: /Users/sanjay/Documents/chiefxai/com-frontend-test
 

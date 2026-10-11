@@ -107,6 +107,14 @@ function addCalendarInterval(anchor, intervalValue, { timeZone = 'UTC', anchorDa
   return localToUtc(target, timeZone).toISOString();
 }
 
+function shiftCalendarDays(anchor, count, { timeZone = 'UTC' } = {}) {
+  if (!Number.isSafeInteger(count)) throw new TypeError('count must be a safe integer.');
+  const base = instant(anchor, 'anchor');
+  const local = zonedParts(base, timeZone);
+  const date = new Date(Date.UTC(local.year, local.month - 1, local.day + count));
+  return localToUtc({ ...local, year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() }, timeZone).toISOString();
+}
+
 function boundaryAt(anchor, step, index, timeZone, anchorDay) {
   if (!Number.isSafeInteger(index) || index < 0) throw new TypeError('period index must be a non-negative integer.');
   if (index === 0) return instant(anchor, 'anchor').toISOString();
@@ -198,6 +206,7 @@ function evaluatePeriodActivation({ period, now, existingPeriods = [], funded = 
 
 module.exports = {
   addCalendarInterval,
+  shiftCalendarDays,
   previewSubscriptionPeriod,
   previewEarlyRenewal,
   previewPostpaidPeriod,

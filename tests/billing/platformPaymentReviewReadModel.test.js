@@ -42,6 +42,21 @@ test('review queue applies optional organization filter, never to browser-contro
   assert.equal(parameters[0], 'org_1');
 });
 
+test('maps linked upgrade quote terms to the platform review DTO without exposing the full quote snapshot', () => {
+  const { mapRow } = require('../../src/billing/platformPaymentReviewReadModel');
+  const row = record('payment_3', '2026-10-09 12:00:00.000003');
+  row.quote_type = 'adjustment';
+  row.quote_snapshot_json = JSON.stringify({ schemaVersion: 1, purpose: 'adjustment',
+    adjustment: { kind: 'immediate_upgrade', currentPlan: { id: 'starter', version: 1 }, targetPlan: { id: 'pro', version: 3 },
+      prorationAmount: { asset: 'INR', units: '1250', scale: 0 }, incrementalIncludedCredits: { asset: 'INR', units: '400', scale: 0 },
+      renewalAnchorAt: '2026-11-01T00:00:00.000Z' }, fingerprint: 'internal-only' });
+  const mapped = mapRow(row);
+  assert.deepEqual(mapped.subscriptionUpgrade, { currentPlan: { id: 'starter', version: 1 }, targetPlan: { id: 'pro', version: 3 },
+    prorationAmount: { asset: 'INR', units: '1250', scale: 0 },
+    incrementalIncludedCredits: { asset: 'INR', units: '400', scale: 0 }, renewalAnchorAt: '2026-11-01T00:00:00.000Z' });
+  assert.equal(JSON.stringify(mapped).includes('internal-only'), false);
+});
+
 test('invalid page sizes and cursors are rejected', () => {
   for (const size of ['0', '101', 'bogus']) assert.throws(() => parsePage(size), { statusCode: 400 });
   for (const raw of ['invalid%%', 'a']) assert.throws(() => parseCursor(raw), { statusCode: 400 });

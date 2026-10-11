@@ -6,6 +6,34 @@
 //   container today and can be replaced by EventBridge Scheduler tomorrow.
 const schedules = [
   {
+    id: "billing-notification-outbox",
+    expression: process.env.BILLING_NOTIFICATION_OUTBOX_SCHEDULE || "* * * * *",
+    run: async () => {
+      await require('../billing/notificationOutboxComposition').runBillingNotificationOutboxOnce();
+    },
+  },
+  {
+    id: "billing-subscription-period-activation",
+    expression: process.env.BILLING_SUBSCRIPTION_ACTIVATION_SCHEDULE || "*/5 * * * *",
+    run: async () => {
+      await require('../billing/lifecycleJobComposition').runBillingLifecycleOnce({ mode: 'activate' });
+    },
+  },
+  {
+    id: "billing-subscription-renewal-reminders",
+    expression: process.env.BILLING_RENEWAL_REMINDERS_SCHEDULE || "0 * * * *",
+    run: async () => {
+      await require('../billing/lifecycleJobComposition').runBillingLifecycleOnce({ mode: 'renewal-reminders' });
+    },
+  },
+  {
+    id: "billing-subscription-access-enforcement",
+    expression: process.env.BILLING_SUBSCRIPTION_ACCESS_SCHEDULE || "*/5 * * * *",
+    run: async () => {
+      await require('../billing/lifecycleJobComposition').runBillingLifecycleOnce({ mode: 'enforce-access' });
+    },
+  },
+  {
     id: "workspace-addon-renewals",
     expression: "*/5 * * * *",
     run: async () => {

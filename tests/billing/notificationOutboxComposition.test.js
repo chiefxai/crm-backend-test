@@ -33,7 +33,10 @@ test('scoped worker forwards event allowlist to discovery and claim operations',
   assert.deepEqual(calls[0][1].allowedEventTypes, HANDLED_EMAIL_EVENTS);
   assert.deepEqual(calls[1][1].allowedEventTypes, HANDLED_EMAIL_EVENTS);
   assert.ok(!HANDLED_EMAIL_EVENTS.includes('CreditGrantAllocationRequested.v1'));
-  assert.ok(!HANDLED_EMAIL_EVENTS.includes('SubscriptionPeriodActivated.v1'));
+  for (const type of ['SubscriptionPeriodActivated.v1', 'SubscriptionAccessRestricted.v1',
+    'SubscriptionGraceRequested.v1', 'SubscriptionGraceApproved.v1', 'SubscriptionGraceDenied.v1']) {
+    assert.ok(HANDLED_EMAIL_EVENTS.includes(type));
+  }
 });
 
 test('database discover and claim queries filter by event type before leasing', async () => {
