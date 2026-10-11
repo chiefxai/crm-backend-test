@@ -76,11 +76,6 @@ async function listPaymentRequests(orgId, { limit, cursor, type } = {}, { pool =
   const after = decodeCursor(cursor);
   const filter = parsePaymentFilter(type);
   const args = [orgId];
-  let range = '';
-  if (after) {
-    range = ' AND (p.created_at<? OR (p.created_at=? AND p.id<?))';
-    args.push(after.createdAt, after.createdAt, after.id);
-  }
   // Filter at the database before LIMIT so each payment-history page has
   // real matching results, even with mixed invoice/top-up submissions.
   const typeWhere = filter === 'all' ? ''
@@ -88,6 +83,11 @@ async function listPaymentRequests(orgId, { limit, cursor, type } = {}, { pool =
     : filter === 'invoice' ? " AND p.purpose='invoice' AND c.id IS NULL"
     : " AND p.purpose=?";
   if (filter === 'topup' || filter === 'subscription') args.push(filter);
+  let range = '';
+  if (after) {
+    range = ' AND (p.created_at<? OR (p.created_at=? AND p.id<?))';
+    args.push(after.createdAt, after.createdAt, after.id);
+  }
   args.push(pageSize + 1);
   const result = await pool.query(`SELECT p.id,p.purpose,p.invoice_id,p.status,p.expected_amount_units,p.received_amount_units,p.asset,p.scale,
        p.submitted_at,p.reviewed_at,p.created_at,DATE_FORMAT(p.created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor,
