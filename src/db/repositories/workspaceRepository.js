@@ -195,6 +195,34 @@ async function getProfile(orgId, workspaceId) {
   return { ...profile,...workspace.settings,id: org.id,organizationId: org.id,
     workspaceId: workspace.id,workspaceName: workspace.name,industry: workspace.industry };
 }
+function parseFeatureOverride(value) {
+  if (value == null) return null;
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  return Array.isArray(parsed) ? parsed.filter(key => typeof key === 'string') : null;
+}
+async function getMemberFeatureOverride(orgId,workspaceId,memberId) {
+  if (!memberId) return null;
+  await db.ready;
+  const { rows } = await pool.query(`SELECT wm.feature_flags_json FROM workspace_members wm
+    INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
+    WHERE wm.org_id=? AND wm.workspace_id=? AND wm.member_id=? AND wm.status='Active'
+      AND COALESCE(NULLIF(m.status,''),'Active')='Active'`,[orgId,workspaceId,memberId]);
+  return parseFeatureOverride(rows[0]?.feature_flags_json);
+}
+async function setMemberFeatureOverride(orgId,workspaceId,memberId,features) {
+  await db.ready;
+  if (features !== null && (!Array.isArray(features) || features.some(key => typeof key !== 'string'))) {
+    throw Object.assign(new Error('Invalid workspace member feature permissions'),{statusCode:400});
+  }
+  const assignment = await getAssignment(orgId,workspaceId,memberId);
+  if (!assignment || assignment.status !== 'Active') {
+    throw Object.assign(new Error('An active workspace assignment is required'),{statusCode:404});
+  }
+  await pool.query(`UPDATE workspace_members SET feature_flags_json=?
+    WHERE org_id=? AND workspace_id=? AND member_id=? AND status='Active'`,
+    [features === null ? null : JSON.stringify([...new Set(features)]),orgId,workspaceId,memberId]);
+  return {workspaceId,memberId,featureFlags:features};
+}
 async function getAssignment(orgId,workspaceId,memberId) {
   await db.ready;
   const { rows } = await pool.query(`SELECT wm.role,wm.status,wm.role_source FROM workspace_members wm
@@ -207,14 +235,15 @@ async function listMembers(orgId,workspaceId) {
   await db.ready;
   const { rows } = await pool.query(`SELECT m.id AS member_id,m.name,m.email,m.role AS organization_role,
     m.status AS member_status,wm.role AS workspace_role,wm.status AS assignment_status,
-    wm.role_source,wm.created_at AS assigned_at
+    wm.role_source,wm.feature_flags_json,wm.created_at AS assigned_at
     FROM org_members m LEFT JOIN workspace_members wm
       ON wm.org_id=m.org_id AND wm.workspace_id=? AND wm.member_id=m.id
     WHERE m.org_id=? ORDER BY m.name,m.email,m.id`,[workspaceId,orgId]);
   return rows.map(row => ({ memberId: row.member_id,name: row.name,email: row.email,
     organizationRole: row.organization_role,memberStatus: row.member_status || 'Active',
     workspaceRole: row.workspace_role || null,assignmentStatus: row.assignment_status || null,
-    roleSource: row.role_source || null,assignedAt: row.assigned_at || null }));
+    roleSource: row.role_source || null,featureFlags: parseFeatureOverride(row.feature_flags_json),
+    assignedAt: row.assigned_at || null }));
 }
 async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Active') {
   await db.ready;
@@ -293,4 +322,4 @@ async function getWorkspaceSetup(orgId) {
     currentQuote: organizationPolicy.quote(policy,workspaces,seatCount),
     addBranchQuote: reservedLimit ? null : organizationPolicy.branchQuote(policy,workspaces,seatCount) };
 }
-module.exports = { getWorkspaceSetup, createWorkspaceInTransaction, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };
+module.exports = { getMemberFeatureOverride,setMemberFeatureOverride,getWorkspaceSetup, createWorkspaceInTransaction, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };
