@@ -22,6 +22,25 @@ const { WORKSPACE_ROLES } = require("../authorization/policy");
 const { multipleWorkspacesEnabled } = require("../workspaces/capabilities");
 const { enabledModules } = require("../workspaces/moduleEntitlements");
 
+function canManageWorkspaceTeam(req) {
+  return hasPermission(req,"workspace.members.manage");
+}
+function requireTeamCreatorPermission(req,res,next) {
+  return hasPermission(req,"organization.members.manage") || canManageWorkspaceTeam(req)
+    ? next() : res.status(403).json({ error:"Permission denied" });
+}
+function workspaceRoleRank(role) {
+  return ({ 'Workspace Admin': 3, Manager: 2, Member: 1, Viewer: 0 })[role] ?? -1;
+}
+function managerCanManageTarget(req,assignment) {
+  if (req.authorization?.workspaceRole !== 'Manager' || !assignment) return true;
+  const rank = workspaceRoleRank(assignment.role);
+  return ['Active','Inactive'].includes(assignment.status) && rank >= 0 && rank < workspaceRoleRank('Manager');
+}
+function isOrganizationPrivilegedRole(role) {
+  return ['Owner','Organization Admin','Super Admin','Billing Admin'].includes(String(role || '').trim());
+}
+
 // CRM stores human-readable job titles (Loan Agent, etc.). Only these
 // auth-level roles are blocked from org-admin team creation — Cognito
 // always provisions TeamMember regardless of the CRM title.
@@ -126,6 +145,12 @@ async function selectedWorkspaceProfile(req) {
 router.get('/workspace',requireAuth,async(req,res) => {
   try { res.json(await selectedWorkspaceProfile(req)); }
   catch(err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+});
+router.get('/workspace/assignable-features',requireAuth,async(req,res) => {
+  try {
+    const featureFlags = await require('../authorization/workspaceFeatures').assignableKeys(req);
+    res.json({ featureFlags });
+  } catch(err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
 });
 router.post('/workspace',requireAuth,requirePermission("workspace.settings.manage"),async(req,res) => {
   try {
@@ -365,7 +390,18 @@ router.put("/organization/workspace-features/:workspaceId", requireAuth, require
 
 // ── Team members ──
 router.get("/workspace/members", requireAuth, requirePermission("workspace.members.manage"), async (req, res) => {
-  try { res.json(await workspaceRepository.listMembers(req.orgId,req.workspaceId)); }
+  try {
+    const assignments = await workspaceRepository.listMembers(req.orgId,req.workspaceId);
+    const visibleAssignments = req.authorization?.workspaceRole === 'Manager'
+      ? assignments.filter(row => row.assignmentStatus === 'Active') : assignments;
+    res.json(visibleAssignments.map(row => {
+      const { createdByUserId,...member } = row;
+      return { ...member,
+        canDelete: req.authorization?.workspaceRole === 'Manager' && row.assignmentStatus === 'Active'
+          && createdByUserId === req.userId && workspaceRoleRank(row.workspaceRole) < workspaceRoleRank('Manager')
+      };
+    }));
+  }
   catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
@@ -373,6 +409,13 @@ router.put("/workspace/members/:memberId", requireAuth, requirePermission("works
   const role = String(req.body?.role || "").trim();
   if (!WORKSPACE_ROLES.includes(role)) return res.status(400).json({ error: "A valid workspace role is required" });
   try {
+    const existing = await workspaceRepository.getAssignment(req.orgId,req.workspaceId,req.params.memberId);
+    if (!managerCanManageTarget(req,existing)) return res.status(403).json({ error:"Managers can manage only Member and Viewer accounts in their workspace." });
+    const target = await db.getTeamMemberById(req.orgId,req.params.memberId);
+    if (!target || isOrganizationPrivilegedRole(target.role)) return res.status(403).json({ error:"Organization-level accounts cannot be managed from workspace settings." });
+    if (req.authorization?.workspaceRole === 'Manager' && workspaceRoleRank(role) >= workspaceRoleRank('Manager')) {
+      return res.status(403).json({ error:"Managers can assign only Member or Viewer roles." });
+    }
     const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,role);
     auditLog.record(req.orgId,req,"workspace.member.assign","workspace_member",req.params.memberId,{ workspaceId:req.workspaceId,role });
     res.json(assignment);
@@ -383,10 +426,29 @@ router.delete("/workspace/members/:memberId", requireAuth, requirePermission("wo
   try {
     const existing = await workspaceRepository.getAssignment(req.orgId,req.workspaceId,req.params.memberId);
     if (!existing || existing.status !== "Active") return res.status(404).json({ error: "Workspace member assignment not found" });
+    if (!managerCanManageTarget(req,existing)) return res.status(403).json({ error:"Managers can manage only Member and Viewer accounts in their workspace." });
+    if (isOrganizationPrivilegedRole(existing.organizationRole)) return res.status(403).json({ error:"Organization-level accounts cannot be removed from workspace settings." });
     const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,existing.role,"Inactive");
     auditLog.record(req.orgId,req,"workspace.member.revoke","workspace_member",req.params.memberId,{ workspaceId:req.workspaceId,role:existing.role });
     res.json(assignment);
   } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
+});
+
+router.put("/workspace/members/:memberId/features", requireAuth, requirePermission("workspace.members.manage"), async (req,res) => {
+  try {
+    const { featureFlags } = req.body || {};
+    if (!Array.isArray(featureFlags)) return res.status(400).json({ error:"featureFlags must be an array" });
+    const assignment = await workspaceRepository.getAssignment(req.orgId,req.workspaceId,req.params.memberId);
+    if (!assignment || assignment.status !== 'Active') return res.status(404).json({ error:"Active workspace membership not found" });
+    if (!managerCanManageTarget(req,assignment)) return res.status(403).json({ error:"Managers can grant features only to Member and Viewer accounts in their workspace." });
+    if (isOrganizationPrivilegedRole(assignment.organizationRole)) return res.status(403).json({ error:"Organization-level accounts cannot be changed from workspace settings." });
+    const sanitized = await require('../platform/featureFlags').sanitizeFeatureKeys(featureFlags);
+    const allowed = new Set(await require('../authorization/workspaceFeatures').assignableKeys(req));
+    if (sanitized.some(key => !allowed.has(key))) return res.status(403).json({ error:"You can grant only features available to your role in this workspace." });
+    const updated = await workspaceRepository.setMemberFeatureFlags(req.orgId,req.workspaceId,req.params.memberId,sanitized);
+    auditLog.record(req.orgId,req,"workspace.member.features.update","workspace_member",req.params.memberId,{workspaceId:req.workspaceId,featureFlags:sanitized});
+    res.json(updated);
+  } catch(err) { res.status(err.statusCode || 500).json({error:safeErrorMessage(err)}); }
 });
 
 router.get("/workspaces", requireAuth, async (req,res) => {
@@ -432,7 +494,7 @@ router.get("/me", requireAuth, async (req, res) => {
       db.getOrg(req.orgId),
     ]);
     const orgFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(Array.isArray(org?.featureFlags) ? org.featureFlags : []);
-    const memberFlags = Array.isArray(membership?.featureFlags) ? membership.featureFlags : [];
+    const memberFlags = Array.isArray(req.memberFeatureFlags) ? req.memberFeatureFlags : [];
     // Org admins get whatever the org-level flags are (controlled by super admin).
     // Other roles get the intersection of personal grants and org-level grants.
     const isOrgAdmin = hasPermission(req,"workspace.settings.manage");
@@ -456,18 +518,33 @@ router.get("/me", requireAuth, async (req, res) => {
 });
 
 router.get("/team", requireAuth, async (req, res) => {
-  try { res.json(await db.list("team", req.orgId)); }
+  try {
+    if (hasPermission(req,"organization.members.read")) {
+      return res.json((await db.list("team",req.orgId)).map(({createdByUserId,...member}) => member));
+    }
+    if (!canManageWorkspaceTeam(req)) return res.status(403).json({ error:"Permission denied" });
+    const assignments = await workspaceRepository.listMembers(req.orgId,req.workspaceId);
+    const activeIds = new Set(assignments.filter(row => row.assignmentStatus === 'Active').map(row => row.memberId));
+    res.json((await db.list("team",req.orgId)).filter(member => activeIds.has(member.id))
+      .map(({createdByUserId,...member}) => member));
+  }
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/team", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
+router.post("/team", requireAuth, requireTeamCreatorPermission, async (req, res) => {
   try {
-    const { featureFlags, role, ...memberFields } = req.body || {};
-    let availableFeatureFlags = [];
-    try {
-      availableFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
-    } catch (flagErr) {
-      log.warn("sanitizeFeatureKeys failed for team create, using no flags:", flagErr.message);
+    const { featureFlags, role, workspaceRole: requestedWorkspaceRole, ...memberFields } = req.body || {};
+    const orgMemberManager = hasPermission(req,"organization.members.manage");
+    const workspaceScoped = !orgMemberManager;
+    let workspaceRole = requestedWorkspaceRole || (WORKSPACE_ROLES.includes(role) ? role : null);
+    if (workspaceScoped) {
+      if (!workspaceRole) workspaceRole = 'Member';
+      if (!WORKSPACE_ROLES.includes(workspaceRole)) return res.status(400).json({ error:"A valid workspace role is required" });
+      if (req.authorization?.workspaceRole === 'Manager' && workspaceRoleRank(workspaceRole) >= workspaceRoleRank('Manager')) {
+        return res.status(403).json({ error:"Managers can assign only Member or Viewer roles." });
+      }
+    } else if (workspaceRole && !WORKSPACE_ROLES.includes(workspaceRole)) {
+      return res.status(400).json({ error:"A valid workspace role is required" });
     }
 
     if (isAuthPrivilegedRole(role)) {
@@ -477,7 +554,18 @@ router.post("/team", requireAuth, requirePermission("organization.members.manage
       return res.status(400).json({ error: "email is required" });
     }
 
-    const crmRole = role && String(role).trim() ? String(role).trim() : "Team Member";
+    const crmRole = workspaceScoped ? 'Member' : (role && String(role).trim() ? String(role).trim() : "Team Member");
+
+    const catalog = require("../platform/featureFlags");
+    const sanitizedRequestedFlags = await catalog.sanitizeFeatureKeys(featureFlags);
+    let availableFeatureFlags = sanitizedRequestedFlags;
+    if (workspaceScoped) {
+      const assignable = new Set(await require('../authorization/workspaceFeatures').assignableKeys(req));
+      if (sanitizedRequestedFlags.some(key => !assignable.has(key))) {
+        return res.status(403).json({ error:"You can grant only features available to your role in this workspace." });
+      }
+      availableFeatureFlags = [];
+    }
 
     const existingMember = await db.findOrgMemberByEmail(memberFields.email);
     if (existingMember) {
@@ -493,7 +581,19 @@ router.post("/team", requireAuth, requirePermission("organization.members.manage
       ...memberFields,
       role: crmRole,
       feature_flags: availableFeatureFlags,
+      created_by_user_id: req.userId,
     });
+
+    if (workspaceRole) {
+      try {
+        await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,m.id,workspaceRole);
+        if (workspaceScoped) await workspaceRepository.setMemberFeatureFlags(req.orgId,req.workspaceId,m.id,sanitizedRequestedFlags);
+      } catch (assignmentError) {
+        await db.remove("team",req.orgId,m.id).catch(() => {});
+        throw assignmentError;
+      }
+    }
+    const { createdByUserId,...publicMember } = m;
 
     if ((process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {
       try {
@@ -524,7 +624,7 @@ router.post("/team", requireAuth, requirePermission("organization.members.manage
           role: crmRole,
           authUserId,
         });
-        return res.status(201).json({ ...m, userId: authUserId, role: crmRole, credsSent: true });
+        return res.status(201).json({ ...publicMember, userId: authUserId, role: crmRole, workspaceRole, credsSent: true });
       } catch (authErr) {
         // Do not leave an org member record that cannot authenticate.
         await db.remove("team", req.orgId, m.id).catch((cleanupErr) =>
@@ -552,7 +652,7 @@ router.post("/team", requireAuth, requirePermission("organization.members.manage
 
     global.broadcastLog(`👤 Registered team member: ${m.name}`, { type: "settings" });
     auditLog.record(req.orgId, req, "team.add", "team_member", m.id, { name: m.name, role: crmRole, authUserId });
-    res.status(201).json({ ...m, userId: authUserId, role: crmRole, credsSent: false });
+    res.status(201).json({ ...publicMember, userId: authUserId, role: crmRole, workspaceRole, credsSent: false });
   } catch (err) {
     log.error("POST /api/settings/team failed:", err.message);
     if (err.statusCode) return res.status(err.statusCode).json({ error: safeErrorMessage(err) });
@@ -571,7 +671,7 @@ router.patch("/team/:id/flags", requireAuth, requirePermission("organization.mem
     const target = await db.getTeamMemberById(req.orgId,req.params.id);
     if (target && isAuthPrivilegedRole(target.role) && !req.isPlatformAdmin) return res.status(403).json({ error: 'Privileged memberships require platform administration' });
     const sanitizedFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
-    const updated = await db.patch("team", req.orgId, req.params.id, { featureFlags: sanitizedFeatureFlags });
+    const updated = await db.setTeamMemberFeatureFlags(req.orgId,req.params.id,sanitizedFeatureFlags);
     if (!updated) return res.status(404).json({ error: "Team member not found" });
     auditLog.record(req.orgId, req, "team.flags_update", "team_member", req.params.id, { featureFlags: sanitizedFeatureFlags });
     res.json(updated);
@@ -599,9 +699,18 @@ router.patch("/team/:id", requireAuth, requirePermission("organization.members.m
   } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.delete("/team/:id", requireAuth, requirePermission("organization.members.manage"), async (req, res) => {
+router.delete("/team/:id", requireAuth, requireTeamCreatorPermission, async (req, res) => {
   try {
     const existing = await db.getTeamMemberById(req.orgId,req.params.id);
+    if (!hasPermission(req,"organization.members.manage")) {
+      if (req.authorization?.workspaceRole !== 'Manager') return res.status(403).json({ error:"Only Managers may delete members they created." });
+      if (!existing || existing.createdByUserId !== req.userId) return res.status(403).json({ error:"Managers may delete only members they created." });
+      const assignment = await workspaceRepository.getAssignment(req.orgId,req.workspaceId,req.params.id);
+      if (!assignment || !managerCanManageTarget(req,assignment)) return res.status(403).json({ error:"Managers may delete only Member or Viewer accounts in their workspace." });
+      if (await workspaceRepository.countActiveAssignments(req.orgId,req.params.id) > 1) {
+        return res.status(409).json({ error:"This member is assigned to another workspace. Ask an Organization Admin to remove them organization-wide." });
+      }
+    }
     if (existing?.role === "Owner") return res.status(409).json({ error: "Transfer organization ownership before removing the Owner membership." });
     if (existing && isAuthPrivilegedRole(existing.role) && !req.isPlatformAdmin) return res.status(403).json({ error: 'Privileged organization memberships require platform administration' });
     await db.remove("team", req.orgId, req.params.id);

@@ -17,7 +17,7 @@ router.get("/audit-log", requireAuth, requirePermission("workspace.audit.read"),
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.get("/billing", requireAuth, requirePermission("billing.read"), async (req, res) => {
+router.get("/billing", requireAuth, requirePermission("billing.organization.read"), async (req, res) => {
   try {
     const info = await billingEngine.getBillingInfo(req.orgId);
     if (!info) return res.status(404).json({ error: "Organization not found" });
@@ -25,7 +25,7 @@ router.get("/billing", requireAuth, requirePermission("billing.read"), async (re
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.get("/billing/console", requireAuth, requirePermission("billing.read"), async (req, res) => {
+router.get("/billing/console", requireAuth, requirePermission("billing.organization.read"), async (req, res) => {
   try {
     const billingConsole = require("../billing/billingConsole");
     const data = await billingConsole.getOrganizationBillingConsole(req.orgId);
@@ -111,11 +111,10 @@ router.get("/logs-stream", requireSseTicket, (req, res) => {
   req.on("close", () => { clearInterval(timer); removeLogClient(client); });
 });
 
-// Stub for WhatsApp template broadcasts.
+// Delivery is not wired to a WhatsApp provider or durable queue. Fail closed
+// instead of claiming that logging an activity event delivered messages.
 router.post("/broadcast", requireAuth, requirePermission("workspace.settings.manage"), (req, res) => {
-  const { audiencePhones, templateName } = req.body;
-  global.broadcastLog(`📢 WhatsApp Broadcast (${templateName}) to ${audiencePhones?.length || 0} customers`, { type: "broadcast" });
-  res.json({ sent: audiencePhones?.length || 0, failed: 0 });
+  res.status(501).json({ error: "WhatsApp broadcast delivery is not configured; no messages were sent.", deliveryStatus: "not_configured", sent: 0 });
 });
 
 // Lists Gemini models supporting bidiGenerateContent (live audio).

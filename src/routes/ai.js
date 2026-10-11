@@ -147,7 +147,11 @@ router.post("/gemini/insights", expensiveAiLimiter, requireAuthOrInternal, async
 
 // ── Lead Scoring ──
 router.post("/gemini/score-lead", expensiveAiLimiter, requireAuthOrInternal, async (req, res) => {
-  const { lead } = req.body;
+  const { lead } = req.body || {};
+
+  if (!lead || typeof lead !== "object" || Array.isArray(lead)) {
+    return res.status(400).json({ success: false, error: "A lead object is required." });
+  }
 
   if (!aiReady) {
     const score = lead.financialInfo ? Math.max(10, Math.min(100, Math.round((lead.financialInfo.creditScore - 300) / 5.2 + (lead.financialInfo.monthlyIncome > 8000 ? 20 : 5) - lead.financialInfo.debtToIncome * 30))) : 50;
@@ -160,32 +164,48 @@ router.post("/gemini/score-lead", expensiveAiLimiter, requireAuthOrInternal, asy
     const response = await (await getOrgAiClient(req)).models.generateContent({ model: "gemini-2.5-flash", contents: `Assess loan eligibility (0-100): ${JSON.stringify(lead)}`, config: { responseMimeType: "application/json", responseSchema: { type: Type.OBJECT, properties: { score: { type: Type.INTEGER }, tags: { type: Type.ARRAY, items: { type: Type.STRING } }, decision: { type: Type.STRING } }, required: ["score","tags","decision"] } } });
     res.json({ success: true, ...JSON.parse(response.text || "{}") });
   } catch (_) {
-    res.json({ success: true, degraded: true, score: 75, tags: ["Standard-Profile"], decision: "Candidate meets standard thresholds." });
+    res.status(503).json({ success: false, error: "Lead scoring is unavailable. No score or eligibility decision was produced." });
   }
 });
 
 // ── Document OCR/Verification ──
 router.post("/gemini/verify-doc", expensiveAiLimiter, requireAuthOrInternal, async (req, res) => {
-  const { docType, docName, fileContent } = req.body;
+  const { docType, docName, fileContent } = req.body || {};
+
+  if (typeof docType !== "string" || !docType.trim() || typeof docName !== "string" || !docName.trim() ||
+      typeof fileContent !== "string" || !fileContent.trim()) {
+    return res.status(422).json({ success: false, error: "Document text is required. Profile data or a file name cannot be used as document evidence." });
+  }
 
   if (!aiReady) {
-    return res.json({ success: true, degraded: true, ocrData: { extractedName: "Sarah Jenkins", confidenceScore: 98, issues: [] }, status: "Verified" });
+    return res.status(503).json({ success: false, error: "Document analysis is unavailable. The document was not verified." });
   }
 
   try {
     const { Type } = require("@google/genai");
-    const prompt = `Act as an automated document parser. Extract structural details from:\nCategory: ${docType}\nFile: ${docName}\nText: "${fileContent || "Jane Doe, Net Income: $6,500"}"`;
+    const prompt = `Extract only details explicitly present in this supplied document text. This is extraction, not verification.\nCategory: ${docType}\nFile: ${docName}\nDocument text: "${fileContent}"`;
     const response = await (await getOrgAiClient(req)).models.generateContent({ model: "gemini-2.5-flash", contents: prompt, config: { responseMimeType: "application/json", responseSchema: { type: Type.OBJECT, properties: { extractedName: { type: Type.STRING }, extractedIncome: { type: Type.NUMBER }, extractedEmployer: { type: Type.STRING }, confidenceScore: { type: Type.INTEGER }, issues: { type: Type.ARRAY, items: { type: Type.STRING } } }, required: ["extractedName","confidenceScore","issues"] } } });
     const ocrData = JSON.parse(response.text || "{}");
-    res.json({ success: true, ocrData, status: ocrData.issues.length > 0 ? "Rejected" : "Verified" });
-  } catch (_) {
-    res.json({ success: true, degraded: true, ocrData: { extractedName: "Sarah Jenkins", confidenceScore: 90, issues: [] }, status: "Verified" });
+    if (!ocrData || typeof ocrData.extractedName !== "string" || !Number.isFinite(ocrData.confidenceScore) || !Array.isArray(ocrData.issues)) {
+      throw new Error("AI document analysis returned an invalid response.");
+    }
+    res.json({ success: true, ocrData, status: "Needs Review" });
+  } catch (error) {
+    log.error("Document analysis failed", { error: error?.message });
+    res.status(503).json({ success: false, error: "Document analysis failed. The document was not verified." });
   }
 });
 
 // ── Voice Call Simulator ──
 router.post(["/simulate-call", "/gemini/simulate-call"], requireAuthOrInternal, async (req, res) => {
-  const { leadName, loanAmount, prompt, transcript, customerUtterance } = req.body;
+  const { leadName, loanAmount, prompt, transcript, customerUtterance } = req.body || {};
+
+  if (typeof leadName !== "string" || !leadName.trim() || !Number.isFinite(Number(loanAmount)) ||
+      typeof prompt !== "string" || !Array.isArray(transcript) ||
+      !transcript.every((item) => item && typeof item.speaker === "string" && typeof item.text === "string") ||
+      typeof customerUtterance !== "string" || !customerUtterance.trim()) {
+    return res.status(400).json({ success: false, error: "A lead name, numeric loan amount, prompt, transcript, and customer response are required." });
+  }
 
   if (!aiReady) {
     const lower = customerUtterance.toLowerCase();

@@ -4,6 +4,9 @@ const { safeErrorMessage } = require("../observability/safeError");
 const router = require("express").Router();
 const { requireAuth } = require("../middleware/auth");
 const db = require("../db/repository");
+const { scopeForOrg } = require("../workspaces/scope");
+const { createKhataPaymentService } = require("../crm/khataPayments");
+const khataPaymentService = createKhataPaymentService(db.pool);
 const { getLogger } = require("../observability/logger");
 const log = getLogger("routes.catalog");
 
@@ -82,13 +85,23 @@ router.get("/customers/:id", requireAuth, async (req, res) => {
 // ── Khata (credit ledger) ──
 router.post("/khata/:customerId/payment", requireAuth, async (req, res) => {
   try {
-    const list = await db.list("customers", req.orgId);
-    const c = list.find((x) => x.id === req.params.customerId);
-    if (!c) return res.sendStatus(404);
-    const updated = await db.patch("customers", req.orgId, req.params.customerId, { khata: Math.max(0, (c.khata || 0) - Number(req.body.amount || 0)) });
-    global.broadcastLog(`💳 Payment of ₹${req.body.amount} for ${updated.name}. Khata: ₹${updated.khata}`, { type: "payment", customerId: req.params.customerId });
-    res.json(updated);
-  } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+    const scope = scopeForOrg(req.orgId);
+    const payment = await khataPaymentService.apply({
+      orgId: req.orgId,
+      workspaceId: scope.workspaceId,
+      customerId: req.params.customerId,
+      amount: req.body?.amount,
+      idempotencyKey: req.get("Idempotency-Key") || req.body?.idempotencyKey,
+    });
+    const customer = payment.customer || (await db.list("customers", req.orgId)).find((x) => x.id === req.params.customerId);
+    if (!customer) return res.sendStatus(404);
+    if (!payment.replayed) {
+      global.broadcastLog(`💳 Payment of ₹${payment.amount} for ${customer.name}. Khata: ₹${payment.balanceAfter}`, {
+        type: "payment", customerId: req.params.customerId, orgId: req.orgId, workspaceId: scope.workspaceId,
+      });
+    }
+    res.json({ ...customer, payment: { amount: payment.amount, balanceAfter: payment.balanceAfter, replayed: payment.replayed } });
+  } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
 });
 
 router.post("/khata/:customerId/reminder", requireAuth, async (req, res) => {
@@ -96,8 +109,7 @@ router.post("/khata/:customerId/reminder", requireAuth, async (req, res) => {
     const list = await db.list("customers", req.orgId);
     const c = list.find((x) => x.id === req.params.customerId);
     if (!c) return res.sendStatus(404);
-    global.broadcastLog(`💬 Khata reminder sent to ${c.name} (${c.phone}) for ₹${c.khata}`, { type: "notification", customerId: c.id });
-    res.json({ sent: true });
+    return res.status(501).json({ error: "Khata reminder delivery is not configured; no message was sent.", deliveryStatus: "not_configured", sent: false });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 

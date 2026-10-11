@@ -81,7 +81,7 @@ async function handleIncomingMessage(parsedMessage) {
       channel.org_id, channel, parsedMessage.from, parsedMessage.contactName
     );
 
-    await channelsEngine.addMessage(channel.org_id, conversation.id, {
+    const inbound = await channelsEngine.addMessage(channel.org_id, conversation.id, {
       direction: "inbound",
       sender: "contact",
       body: parsedMessage.text,
@@ -89,6 +89,7 @@ async function handleIncomingMessage(parsedMessage) {
       externalMessageId: parsedMessage.messageId
     });
 
+    if (inbound.duplicate) return;
     if (!channel.config.aiAutoReply || !parsedMessage.text) return;
 
     try {

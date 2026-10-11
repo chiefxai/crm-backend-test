@@ -225,17 +225,23 @@ async function setMemberFeatureOverride(orgId,workspaceId,memberId,features) {
 }
 async function getAssignment(orgId,workspaceId,memberId) {
   await db.ready;
-  const { rows } = await pool.query(`SELECT wm.role,wm.status,wm.role_source FROM workspace_members wm
+  const { rows } = await pool.query(`SELECT wm.role,wm.status,wm.role_source,m.role AS organizationRole FROM workspace_members wm
     INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
     WHERE wm.org_id=? AND wm.workspace_id=? AND wm.member_id=?
     AND COALESCE(NULLIF(m.status,''),'Active')='Active'`,[orgId,workspaceId,memberId]);
   return rows[0] || null;
 }
+async function countActiveAssignments(orgId,memberId) {
+  await db.ready;
+  const { rows } = await pool.query(`SELECT COUNT(*) AS assignment_count FROM workspace_members
+    WHERE org_id=? AND member_id=? AND status='Active'`,[orgId,memberId]);
+  return Number(rows[0]?.assignment_count || 0);
+}
 async function listMembers(orgId,workspaceId) {
   await db.ready;
   const { rows } = await pool.query(`SELECT m.id AS member_id,m.name,m.email,m.role AS organization_role,
     m.status AS member_status,wm.role AS workspace_role,wm.status AS assignment_status,
-    wm.role_source,wm.feature_flags_json,wm.created_at AS assigned_at
+    wm.role_source,wm.feature_flags_json,m.created_by_user_id,wm.created_at AS assigned_at
     FROM org_members m LEFT JOIN workspace_members wm
       ON wm.org_id=m.org_id AND wm.workspace_id=? AND wm.member_id=m.id
     WHERE m.org_id=? ORDER BY m.name,m.email,m.id`,[workspaceId,orgId]);
@@ -243,7 +249,11 @@ async function listMembers(orgId,workspaceId) {
     organizationRole: row.organization_role,memberStatus: row.member_status || 'Active',
     workspaceRole: row.workspace_role || null,assignmentStatus: row.assignment_status || null,
     roleSource: row.role_source || null,featureFlags: parseFeatureOverride(row.feature_flags_json),
+    createdByUserId: row.created_by_user_id || null,
     assignedAt: row.assigned_at || null }));
+}
+async function setMemberFeatureFlags(orgId,workspaceId,memberId,featureFlags) {
+  return setMemberFeatureOverride(orgId,workspaceId,memberId,featureFlags);
 }
 async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Active') {
   await db.ready;
@@ -298,7 +308,7 @@ async function getAuthorizationState(orgId,workspaceId,memberId) {
   const { rows } = await pool.query(`SELECT CASE WHEN a.id IS NOT NULL
     AND (CASE WHEN a.auto_renew=1 THEN a.grace_ends_at ELSE a.period_ends_at END)<=UTC_TIMESTAMP(6)
     THEN 'Suspended' ELSE w.status END AS workspace_status,o.status AS organization_status,
-    wm.role,wm.status,wm.role_source FROM workspaces w
+    wm.role,wm.status,wm.role_source,wm.feature_flags AS workspace_feature_flags FROM workspaces w
     INNER JOIN organizations o ON o.id=w.org_id
     LEFT JOIN billing_workspace_addons a ON a.org_id=w.org_id AND a.workspace_id=w.id
     LEFT JOIN workspace_members wm ON wm.org_id=w.org_id AND wm.workspace_id=w.id AND wm.member_id=?
@@ -322,4 +332,4 @@ async function getWorkspaceSetup(orgId) {
     currentQuote: organizationPolicy.quote(policy,workspaces,seatCount),
     addBranchQuote: reservedLimit ? null : organizationPolicy.branchQuote(policy,workspaces,seatCount) };
 }
-module.exports = { getMemberFeatureOverride,setMemberFeatureOverride,getWorkspaceSetup, createWorkspaceInTransaction, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };
+module.exports = { getMemberFeatureOverride,setMemberFeatureOverride,getWorkspaceSetup, createWorkspaceInTransaction, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, countActiveAssignments, listMembers, setMemberAssignment, setMemberFeatureFlags, getAuthorizationState };

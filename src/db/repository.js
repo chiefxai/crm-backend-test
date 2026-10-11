@@ -29,6 +29,7 @@ const { planOrganizationDeletion } = require("./organizationDeletionPlan");
 const aiUsageRepository = require("./repositories/aiUsageRepository");
 const { scopeForOrg, getScope } = require("../workspaces/scope");
 const { WORKSPACE_TABLES } = require("../workspaces/tables");
+const { matchMembershipsByNormalizedEmail } = require("./membershipEmail");
 const workspaceIdForOrg = orgId => scopeForOrg(orgId).workspaceId;
 const log = getLogger("db.repository");
 
@@ -194,7 +195,7 @@ const ENTITIES = {
     fields: {
       id: "id", name: "name", email: "email", phone: "phone", role: "role", status: "status",
       performanceScore: "performance_score", assignedLeadsCount: "assigned_leads_count",
-      featureFlags: "feature_flags",
+      featureFlags: "feature_flags", createdByUserId: "created_by_user_id",
       createdAt: "created_at"
     }
   },
@@ -915,13 +916,15 @@ async function replaceAll(entity, orgId, apiArray) {
 async function replaceTeamMembers(orgId, apiArray) {
   const { data: existing, error: existingErr } = await supabase
     .from("org_members")
-    .select("id, user_id, email, feature_flags")
+    .select("id, user_id, email, feature_flags, created_by_user_id")
     .eq("org_id", orgId);
   if (existingErr) throw new Error(`[db.replaceTeamMembers] read existing: ${existingErr.message}`);
 
   const memberIdByEmail = new Map((existing || []).filter(r => r.email).map(r => [r.email.toLowerCase(), r.id]));
   const userIdById = new Map((existing || []).filter((r) => r.user_id).map((r) => [r.id, r.user_id]));
   const userIdByEmail = new Map((existing || []).filter((r) => r.user_id && r.email).map((r) => [r.email.toLowerCase(), r.user_id]));
+  const creatorById = new Map((existing || []).map((r) => [r.id,r.created_by_user_id || null]));
+  const creatorByEmail = new Map((existing || []).filter(r => r.email).map((r) => [r.email.toLowerCase(),r.created_by_user_id || null]));
   // Preserve feature_flags that were set via the dedicated /team POST — the frontend
   // TeamMember type doesn't carry featureFlags so the sync payload won't include them.
   const featureFlagsById = new Map((existing || []).map((r) => [r.id, r.feature_flags || []]));
@@ -950,6 +953,9 @@ async function replaceTeamMembers(orgId, apiArray) {
     // Always preserve feature_flags from DB — never let the sync overwrite them with null.
     const preservedFlags = featureFlagsById.get(o.id) || featureFlagsByEmail.get((o.email || "").toLowerCase()) || row.feature_flags || [];
     row.feature_flags = preservedFlags;
+    // Creator attribution controls Manager deletion rights and must never be
+    // writable through the legacy whole-team synchronization route.
+    row.created_by_user_id = creatorById.get(o.id) ?? creatorByEmail.get((o.email || '').toLowerCase()) ?? null;
     return row;
   });
   // Preserve row identities and child workspace assignments. Deleting every
@@ -1378,7 +1384,7 @@ async function assertSeatCapacity(client, orgId, maxSeats, additionalSeats = 1) 
   if (Number(rows[0]?.seat_count || 0) + additionalSeats > maxSeats) throw seatLimitError(maxSeats);
 }
 
-async function addOrgMember(orgId, userId, { name, email, phone, role, feature_flags } = {}) {
+async function addOrgMember(orgId, userId, { name, email, phone, role, feature_flags, created_by_user_id } = {}) {
   const normalizedEmail = email ? email.toLowerCase() : email;
   const client = await _pool.connect();
   try {
@@ -1387,8 +1393,8 @@ async function addOrgMember(orgId, userId, { name, email, phone, role, feature_f
     if (!orgs[0]) throw Object.assign(new Error('Organization not found'), { statusCode: 404 });
     await assertSeatCapacity(client, orgId, seatMaximum(orgs[0]));
     const id = require('crypto').randomUUID();
-    await client.query(`INSERT INTO org_members (id,org_id,user_id,name,email,phone,role,status,performance_score,assigned_leads_count,feature_flags,created_at)
-      VALUES (?,?,?,?,?,?,?,'Active',0,0,?,?)`, [id,orgId,userId || null,name,normalizedEmail,phone || null,role || 'Organization Admin',JSON.stringify(feature_flags || []),new Date().toISOString()]);
+    await client.query(`INSERT INTO org_members (id,org_id,user_id,name,email,phone,role,status,performance_score,assigned_leads_count,feature_flags,created_by_user_id,created_at)
+      VALUES (?,?,?,?,?,?,?,'Active',0,0,?,?,?)`, [id,orgId,userId || null,name,normalizedEmail,phone || null,role || 'Organization Admin',JSON.stringify(feature_flags || []),created_by_user_id || null,new Date().toISOString()]);
     const { rows } = await client.query('SELECT * FROM org_members WHERE org_id=? AND id=?', [orgId,id]);
     await client.query('COMMIT');
     return fromDbRow('team', rows[0]);
@@ -1421,6 +1427,25 @@ async function patchTeamMember(orgId, id, patch) {
     await client.query('COMMIT');
     return fromDbRow('team', rows[0]);
   } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { /* retain original failure */ }
+    throw error;
+  } finally { client.release(); }
+}
+
+async function setTeamMemberFeatureFlags(orgId,id,featureFlags) {
+  const client = await _pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: members } = await client.query('SELECT id FROM org_members WHERE org_id=? AND id=? FOR UPDATE',[orgId,id]);
+    if (!members[0]) { await client.query('ROLLBACK'); return null; }
+    await client.query('UPDATE org_members SET feature_flags=? WHERE org_id=? AND id=?',[JSON.stringify(featureFlags),orgId,id]);
+    // Organization Admin grants are authoritative and replace any workspace
+    // overrides so an empty org-level grant disables features everywhere.
+    await client.query('UPDATE workspace_members SET feature_flags=NULL WHERE org_id=? AND member_id=?',[orgId,id]);
+    const { rows } = await client.query('SELECT * FROM org_members WHERE org_id=? AND id=?',[orgId,id]);
+    await client.query('COMMIT');
+    return fromDbRow('team',rows[0]);
+  } catch(error) {
     try { await client.query('ROLLBACK'); } catch { /* retain original failure */ }
     throw error;
   } finally { client.release(); }
@@ -2239,14 +2264,15 @@ async function listMembershipsForUser(userId, email) {
     const { data: byEmail, error: emailErr } = await supabase
       .from("org_members")
       .select("id, org_id, role, name, feature_flags, email, status")
-      .ilike("email", email.toLowerCase())
       .is("user_id", null);
 
     if (emailErr) {
       throw new Error(`[db.listMembershipsForUser email] ${emailErr.message}`);
     }
 
-    rows = byEmail || [];
+    // Compare normalized values in application code. LIKE/ILIKE interprets
+    // '%' and '_' in an address as patterns, and database collations vary.
+    rows = matchMembershipsByNormalizedEmail(byEmail, email);
   }
 
   const memberships = await Promise.all(
@@ -2317,15 +2343,16 @@ async function findMembershipForUser(userId, email, requestedOrgId = null) {
 
   const { data: byEmail, error: emailErr } = await supabase
     .from("org_members")
-    .select("id, org_id, role, name, feature_flags, status")
-    .ilike("email", email.toLowerCase())
+    .select("id, org_id, role, name, feature_flags, email, status")
     .is("user_id", null);
 
   if (emailErr) {
     throw new Error(`[db.findMembershipForUser email] ${emailErr.message}`);
   }
 
-  const byEmailRows = byEmail || [];
+  // Treat the address as data, never as a SQL pattern. Normalize both sides
+  // so historical mixed-case invitations still match safely.
+  const byEmailRows = matchMembershipsByNormalizedEmail(byEmail, email);
 
   const byEmailSelected = requestedOrgId
     ? byEmailRows.find((row) => row.org_id === requestedOrgId)
@@ -2931,6 +2958,7 @@ module.exports = {
   MAX_RETRY_ATTEMPTS,
   addOrgMember,
   patchTeamMember,
+  setTeamMemberFeatureFlags,
   findOrgMemberByEmail,
   updateOrgMemberUserId,
   listMembershipsForUser,

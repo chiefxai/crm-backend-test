@@ -11,7 +11,7 @@ const ORG_PERMISSIONS = {
 };
 const WORKSPACE_PERMISSIONS = {
   'Workspace Admin': ['workspace.read','workspace.write','workspace.delete','workspace.settings.manage','workspace.members.manage','workspace.audit.read','workspace.call','workspace.share.propose','workspace.share.copy','billing.read'],
-  Manager: ['workspace.read','workspace.write','workspace.delete','workspace.call','workspace.share.propose','workspace.share.copy'],
+  Manager: ['workspace.read','workspace.write','workspace.delete','workspace.call','workspace.share.propose','workspace.share.copy','workspace.members.manage'],
   Member: ['workspace.read','workspace.write','workspace.call','workspace.share.propose','workspace.share.copy'],
   Viewer: ['workspace.read'],
 };
@@ -64,8 +64,15 @@ function requestPermission(req) {
   if (/^\/api\/billing\/(?:allocations|transfers)(?:\/|$)/.test(path))
     return read ? 'billing.organization.read' : 'billing.credit.allocate';
   if (path === '/api/billing/workspace-addons' && read) return 'billing.organization.read';
+  // These compatibility and ledger endpoints expose organization-wide
+  // balances, payment activity, invoice terms, and financial projections.
+  // Workspace billing readers must not gain access through the shared router.
+  if (read && ['/api/billing/legacy-overview','/api/billing/overview','/api/billing/payments','/api/billing','/api/billing/console'].includes(path)) return 'billing.organization.read';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';
   if (/^\/api\/settings\/workspace\/members(?:\/|$)/.test(path)) return 'workspace.members.manage';
+  if (path === '/api/settings/team' && req.method === 'POST') return null; // Route checks org or workspace member management.
+  if (/^\/api\/settings\/team\/[^/]+$/.test(path) && req.method === 'DELETE') return null; // Route enforces scoped deletion.
+  if (/^\/api\/settings\/team\/[^/]+\/flags$/.test(path)) return 'organization.members.manage';
   if (/^\/api\/settings\/team(?:\/|$)/.test(path)) return read ? 'organization.members.read' : 'organization.members.manage';
   if (path === '/api/settings/org') return read ? 'organization.read' : 'organization.manage';
   if (path === '/api/metrics' || path === '/api/list-models') return 'platform.manage';
@@ -78,6 +85,12 @@ function requestPermission(req) {
 }
 function enforceRequest(req,res,next) {
   const permission = requestPermission(req);
+  const path = new URL(req.originalUrl || req.url,'http://local').pathname.toLowerCase().replace(/\/+$/,'');
+  if (req.method === 'GET' && path === '/api/settings/team'
+    && (hasPermission(req,'organization.members.read') || hasPermission(req,'workspace.members.manage'))) {
+    const { enforceFeatureRequest } = require('./workspaceFeatures');
+    return enforceFeatureRequest(req,res,() => requestAuthority.run({ ...req.authorization,orgId: req.orgId,workspaceId: req.workspaceId },next));
+  }
   if (permission && !hasPermission(req,permission)) return res.status(403).json({ error: 'Permission denied',permission });
   const { enforceFeatureRequest } = require('./workspaceFeatures');
   return enforceFeatureRequest(req,res,() => requestAuthority.run({ ...req.authorization,orgId: req.orgId,workspaceId: req.workspaceId },next));

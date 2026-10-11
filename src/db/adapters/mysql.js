@@ -129,7 +129,7 @@ const TABLES = {
     columns: {
       id: "text", org_id: "text", user_id: "text", name: "text", email: "text", phone: "text",
       role: "text", status: "text", performance_score: "int",
-      assigned_leads_count: "int", feature_flags: "array", created_at: "text"
+      assigned_leads_count: "int", feature_flags: "array", created_by_user_id: "text", created_at: "text"
     }
   },
   leads: {
@@ -434,6 +434,7 @@ const TABLES = {
   },
   messages: {
     pk: "id",
+    uniqueKeys: [["org_id", "external_message_id"]],
     columns: {
       id: "text", org_id: "text", conversation_id: "text", direction: "text",
       sender: "text", body: "text", media_url: "text", message_type: "text",
@@ -625,6 +626,7 @@ const VARCHAR_COLUMNS = new Map([
   ["next_dial_at", "VARCHAR(64)"],
   ["last_message_at", "VARCHAR(64)"],
   ["conversation_id", "VARCHAR(191)"],
+  ["external_message_id", "VARCHAR(191)"],
   ["stage_id", "VARCHAR(191)"],
   ["started_at", "VARCHAR(64)"],
 ]);

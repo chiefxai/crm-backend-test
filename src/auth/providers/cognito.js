@@ -24,6 +24,7 @@ const {
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
   AdminDeleteUserCommand,
+  GetUserCommand,
   CreateGroupCommand,
   UsernameExistsException,
   GroupExistsException,
@@ -84,22 +85,22 @@ async function verifyToken(token) {
 // Resolve the email from Cognito itself when an authenticated endpoint needs
 // identity-level authorization (for example the platform-admin allowlist).
 async function resolveIdentity(token, payload = {}) {
-  if (payload?.email || payload?.preferred_username) return payload;
-  if (!token || !REGION) return payload;
+  if (payload?.email_verified === true || payload?.email_verified === false) return payload;
+  // Cognito ID tokens carry email_verified. Access tokens generally do not,
+  // so read the authenticated user's attributes through Cognito's GetUser
+  // API instead of treating an unverified/missing claim as verified.
+  if (payload?.token_use !== 'access' || !token || !REGION) return payload;
 
   try {
-    const users = await getIdpClient().send(new ListUsersCommand({
-      UserPoolId: USER_POOL_ID,
-      Filter: `sub = "${String(payload.sub).replace(/"/g, '\\"')}"`,
-      Limit: 1,
-    }));
-    const user = users?.Users?.[0];
+    const user = await getIdpClient().send(new GetUserCommand({ AccessToken: token }));
     const email = getAttribute(user, 'email');
     const name = getAttribute(user, 'name');
+    const emailVerified = getAttribute(user, 'email_verified') === 'true';
     return {
       ...payload,
       ...(email ? { email } : {}),
       ...(name ? { name } : {}),
+      email_verified: emailVerified,
     };
   } catch (err) {
     log.warn('⚠️ Cognito identity enrichment failed', { error: err.message });
@@ -260,6 +261,7 @@ async function deleteUser(username) {
 
 module.exports = {
   verifyToken,
+  resolveIdentity,
   decodeToken,
   provisionUser,
   syncUserRole,

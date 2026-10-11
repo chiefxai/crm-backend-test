@@ -17,6 +17,11 @@ function dateIso(value) {
 function amount(asset, units, scale) {
   return { asset, units: String(units), scale: Number(scale) };
 }
+function monthlySubscriptionCreditAllowance(org) {
+  const value = org?.workspacePolicy?.pricing?.monthlySubscriptionCreditsInr;
+  const rupees = Number.isFinite(value) && value >= 0 ? value : 0;
+  return amount('INR', String(Math.round(rupees * 100)), 2);
+}
 function period(row) {
   if (!row) return null;
   return { id: row.id, startsAt: dateIso(row.starts_at), endsAt: dateIso(row.ends_at),
@@ -111,6 +116,7 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = (...ar
     const result = {
       orgId,
       billingMethod: fallbackMode === 'prepaid' ? 'recharge_based' : 'pay_as_you_go',
+      monthlySubscriptionCredits: monthlySubscriptionCreditAllowance(org),
       activePeriod: period(active),
       nextPeriod: period(upcoming),
       balances: aggregateBalances(balanceRows.rows),
@@ -129,4 +135,4 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = (...ar
   }
 }
 
-module.exports = { readBillingOverview, aggregateBalances, dateIso };
+module.exports = { readBillingOverview, aggregateBalances, dateIso, monthlySubscriptionCreditAllowance };

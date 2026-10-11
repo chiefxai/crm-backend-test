@@ -1,4 +1,5 @@
 const { scopeForOrg, runWithScope } = require("../workspaces/scope");
+const crypto = require("crypto");
 // ============================================================
 // services/channelsEngine.js
 //
@@ -316,25 +317,62 @@ async function findOrCreateConversation(orgId, channel, contactExternalId, conta
 
 async function addMessage(orgId, conversationId, { direction, sender, body, mediaUrl, messageType, externalMessageId }) {
   requireDb();
-  const { data, error } = await db.supabase
-    .from("messages")
-    .insert({
-      org_id: orgId,
-      conversation_id: conversationId,
-      direction,
-      sender: sender || "contact",
-      body: body || null,
-      media_url: mediaUrl || null,
-      message_type: messageType || "text",
-      external_message_id: externalMessageId || null
-    })
-    .select()
-    .single();
-  if (error) throw new Error(`[channelsEngine.addMessage] ${error.message}`);
+  const findExisting = async () => {
+    if (!externalMessageId) return null;
+    const { data: existing, error: lookupError } = await db.supabase
+      .from("messages")
+      .select("*")
+      .eq("org_id", orgId)
+      .eq("external_message_id", externalMessageId)
+      .maybeSingle();
+    if (lookupError) throw new Error(`[channelsEngine.addMessage] ${lookupError.message}`);
+    return existing;
+  };
 
-  await db.supabase.from("conversations").update({ last_message_at: new Date().toISOString() }).eq("id", conversationId);
+  // This read avoids a write for ordinary retries. The unique DB key below is
+  // the concurrency boundary: two provider retries can both pass this lookup.
+  const existing = await findExisting();
+  if (existing) return { ...messageRowToApi(existing), duplicate: true };
 
-  return messageRowToApi(data);
+  const insertId = crypto.randomUUID();
+  let data;
+  try {
+    const result = await db.supabase
+      .from("messages")
+      .insert({
+        id: insertId,
+        org_id: orgId,
+        conversation_id: conversationId,
+        direction,
+        sender: sender || "contact",
+        body: body || null,
+        media_url: mediaUrl || null,
+        message_type: messageType || "text",
+        external_message_id: externalMessageId || null
+      })
+      .select()
+      .single();
+    if (result.error) throw Object.assign(new Error(result.error.message), result.error);
+    data = result.data;
+  } catch (error) {
+    if (externalMessageId && ["ER_DUP_ENTRY", "23505", "SQLITE_CONSTRAINT_UNIQUE"].includes(error?.code)) {
+      const duplicate = await findExisting();
+      if (duplicate) return { ...messageRowToApi(duplicate), duplicate: true };
+    }
+    throw new Error(`[channelsEngine.addMessage] ${error.message}`);
+  }
+
+  // The MySQL compatibility adapter uses ON DUPLICATE KEY UPDATE and returns
+  // the row already stored under the scoped provider ID. Compare IDs so that
+  // concurrent retries can be recognized even when the adapter does not
+  // surface a duplicate-key exception.
+  const duplicate = !!externalMessageId && data.id !== insertId;
+
+  if (!duplicate) {
+    await db.supabase.from("conversations").update({ last_message_at: new Date().toISOString() }).eq("id", conversationId);
+  }
+
+  return { ...messageRowToApi(data), duplicate };
 }
 
 module.exports = {

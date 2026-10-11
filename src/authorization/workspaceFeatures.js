@@ -45,6 +45,11 @@ async function effectiveKeys(orgKeys, workspaceKeys, memberKeys, isWorkspaceAdmi
   const member = new Set(memberWorkspaceOverride === null ? memberKeys : memberWorkspaceOverride);
   return [...workspace].filter(k => member.has(k));
 }
+async function assignableKeys(req) {
+  const isWorkspaceAdmin = req.authorization?.workspaceRole === 'Workspace Admin';
+  const configured = await listWorkspaceGrants(req.orgId, req.workspaceId);
+  return effectiveKeys(req.orgFeatureFlags || [], configured, req.memberFeatureFlags || [], isWorkspaceAdmin);
+}
 async function enforceFeatureRequest(req, res, next) {
   const key = mappedFeature(req.originalUrl || req.url);
   if (!key || !req.orgId || !req.workspaceId) return next();
@@ -63,4 +68,4 @@ async function enforceFeatureRequest(req, res, next) {
     next();
   } catch (error) { next(error); }
 }
-module.exports = { mappedFeature, listWorkspaceGrants, effectiveKeys, enforceFeatureRequest };
+module.exports = { mappedFeature, listWorkspaceGrants, effectiveKeys, assignableKeys, enforceFeatureRequest };

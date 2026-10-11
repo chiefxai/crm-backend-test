@@ -55,27 +55,30 @@ router.get("/whatsapp", verifyHandshake);
 router.get("/instagram", verifyHandshake);
 
 router.post("/whatsapp", requireMetaSignature, async (req, res) => {
-  // Ack immediately — Meta retries aggressively on anything but a fast 200.
-  res.sendStatus(200);
   try {
     const messages = whatsapp.parseInboundWebhook(req.body);
     for (const msg of messages) {
       await whatsapp.handleIncomingMessage(msg);
     }
+    // Acknowledge only after provider events have been stored/handled. A 5xx
+    // leaves Meta able to retry if the database was unavailable.
+    res.sendStatus(200);
   } catch (err) {
     log.error("❌ WhatsApp webhook processing error:", err.message);
+    if (!res.headersSent) res.status(503).json({ error: "Webhook processing failed; please retry." });
   }
 });
 
 router.post("/instagram", requireMetaSignature, async (req, res) => {
-  res.sendStatus(200);
   try {
     const messages = instagram.parseInboundWebhook(req.body);
     for (const msg of messages) {
       await instagram.handleIncomingMessage(msg);
     }
+    res.sendStatus(200);
   } catch (err) {
     log.error("❌ Instagram webhook processing error:", err.message);
+    if (!res.headersSent) res.status(503).json({ error: "Webhook processing failed; please retry." });
   }
 });
 

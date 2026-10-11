@@ -17,7 +17,7 @@ router.get('/capabilities', requireAuth, requirePermission('billing.read'), (_re
   res.json({ topupAvailable: topupAvailable() });
 });
 
-router.get('/legacy-overview', requireAuth, requirePermission('billing.read'), async (req, res) => {
+router.get('/legacy-overview', requireAuth, requirePermission('billing.organization.read'), async (req, res) => {
   try {
     const { getOrganizationBillingConsole } = require('../billing/billingConsole');
     const result = await getOrganizationBillingConsole(req.orgId);
@@ -44,7 +44,7 @@ router.get('/subscription-credit-status', requireAuth, requirePermission('billin
 });
 
 // New billing read model; never substitute legacy INR balances for credit units.
-router.get('/overview', requireAuth, requirePermission('billing.read'), async (req, res) => {
+router.get('/overview', requireAuth, requirePermission('billing.organization.read'), async (req, res) => {
   try {
     const { readBillingOverview } = require('../billing/overviewReadModel');
     const overview = await readBillingOverview(req.orgId);
@@ -60,7 +60,7 @@ router.get('/overview', requireAuth, requirePermission('billing.read'), async (r
 });
 
 
-router.get('/payments', requireAuth, requirePermission('billing.read'), async (req, res) => {
+router.get('/payments', requireAuth, requirePermission('billing.organization.read'), async (req, res) => {
   try {
     const { listPaymentRequests } = require('../billing/paymentReadModel');
     const result = await listPaymentRequests(req.orgId, {

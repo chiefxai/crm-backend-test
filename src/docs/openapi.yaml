@@ -804,6 +804,11 @@ paths:
           in: path
           required: true
           schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Required unless idempotencyKey is supplied in the request body.
+          schema: { type: string, maxLength: 191 }
       requestBody:
         content:
           application/json:
@@ -811,9 +816,12 @@ paths:
               type: object
               properties:
                 amount: { type: number }
+                idempotencyKey: { type: string, maxLength: 191, description: Alternative to the Idempotency-Key request header. }
                 note:   { type: string }
       responses:
-        '200': { description: Recorded }
+        '200': { description: Recorded; retries with the same key do not apply the payment twice. }
+        '400': { description: Invalid amount or missing idempotency key }
+        '409': { description: Amount exceeds the outstanding balance or key conflicts with an earlier payment }
 
   /khata/{customerId}/reminder:
     post:
@@ -825,7 +833,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
-        '200': { description: Reminder sent }
+        '501': { description: Reminder delivery is not configured; no message was sent }
 
   /questions:
     get:
@@ -1383,7 +1391,8 @@ paths:
   /admin/broadcast:
     post:
       tags: [Admin]
-      summary: Broadcast message to SSE log clients
+      summary: Request WhatsApp broadcast
+      description: WhatsApp delivery is not configured; this endpoint returns a not-configured response and sends nothing.
       requestBody:
         content:
           application/json:
@@ -1392,7 +1401,7 @@ paths:
               properties:
                 message: { type: string }
       responses:
-        '200': { description: Broadcast sent }
+        '501': { description: WhatsApp broadcast delivery is not configured; no message was sent }
 
   # ── Platform ──────────────────────────────────────────────────────────────
   /platform/whoami:

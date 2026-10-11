@@ -101,9 +101,22 @@ describe("workspace and platform authorization", () => {
   });
   test("configured operator email is recognized consistently", async () => {
     process.env.PLATFORM_ADMIN_EMAILS = " MEMBER@EXAMPLE.COM ";
+    provider.verifyToken.mockResolvedValue({ sub: "user-a", email: "member@example.com", email_verified: true });
     const res = await request(app).get("/api/auth/workspaces").set("Authorization", "Bearer valid").expect(200);
     expect(res.body[0].orgId).toBe("org-b");
     await request(app).get("/api/operator").set("Authorization", "Bearer valid").expect(204);
+  });
+  test("unverified allowlisted email cannot grant platform-admin access or email membership lookup", async () => {
+    process.env.PLATFORM_ADMIN_EMAILS = "member@example.com";
+    provider.verifyToken.mockResolvedValue({ sub: "user-a", email: "member@example.com", email_verified: false });
+    await request(app).get("/api/operator").set("Authorization", "Bearer valid").expect(403);
+    await request(app).get("/api/resource").set("Authorization", "Bearer valid").expect(200);
+    expect(db.findMembershipForUser).toHaveBeenCalledWith("user-a", null, null);
+  });
+  test("missing verification claim cannot grant platform-admin email allowlist access", async () => {
+    process.env.PLATFORM_ADMIN_EMAILS = "member@example.com";
+    provider.verifyToken.mockResolvedValue({ sub: "user-a", email: "member@example.com" });
+    await request(app).get("/api/operator").set("Authorization", "Bearer valid").expect(403);
   });
   test("ordinary users and string-valued administrator claims cannot access operator routes", async () => {
     provider.verifyToken.mockResolvedValue({ sub: "user-a", platformAdmin: "true", admin: "false" });

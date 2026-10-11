@@ -14,18 +14,18 @@ test('billing router is mounted under /api/billing', () => {
   assert.match(index, /router\.use\(["']\/api\/billing["'], require\(["']\.\/billing["']\)\)/);
 });
 
-test('legacy billing overview is protected by authentication and billing.read', () => {
-  assert.match(routes, /router\.get\(['"]\/legacy-overview['"],\s*requireAuth,\s*requirePermission\(['"]billing\.read['"]\)/);
+test('legacy billing overview is protected by authentication and organization billing read', () => {
+  assert.match(routes, /router\.get\(['"]\/legacy-overview['"],\s*requireAuth,\s*requirePermission\(['"]billing\.organization\.read['"]\)/);
   assert.match(routes, /getOrganizationBillingConsole\(req\.orgId\)/);
 });
 
 test('new overview is scoped, authenticated, and uses the ledger read model', () => {
-  assert.match(routes, /router\.get\(['"]\/overview['"],\s*requireAuth,\s*requirePermission\(['"]billing\.read['"]\)/);
+  assert.match(routes, /router\.get\(['"]\/overview['"],\s*requireAuth,\s*requirePermission\(['"]billing\.organization\.read['"]\)/);
   assert.match(routes, /readBillingOverview\(req\.orgId\)/);
   assert.match(routes, /BILLING_ACCOUNT_NOT_INITIALIZED/);
 });
 
-test('payment history uses authenticated organization and billing.read permission', () => {
-  assert.match(routes, /router\.get\(['"]\/payments['"],\s*requireAuth,\s*requirePermission\(['"]billing\.read['"]\)/);
+test('payment history uses authenticated organization and organization billing read permission', () => {
+  assert.match(routes, /router\.get\(['"]\/payments['"],\s*requireAuth,\s*requirePermission\(['"]billing\.organization\.read['"]\)/);
   assert.match(routes, /listPaymentRequests\(req\.orgId,/);
 });

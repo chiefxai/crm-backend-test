@@ -51,13 +51,29 @@ function extractToken(req) {
 function isPlatformAdminIdentity(payload, email) {
   if (payload?.platformAdmin === true || payload?.admin === true) return true;
   if (Array.isArray(payload?.realm_access?.roles) && payload.realm_access.roles.includes("platform-admin")) return true;
+  // Email allowlists require an explicit ownership assertion from the
+  // configured identity provider. Signed admin claims remain authoritative.
+  if (payload?.email_verified !== true) return false;
   const allowed = (process.env.PLATFORM_ADMIN_EMAILS || "")
     .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
   return allowed.length > 0 && !!email && allowed.includes(String(email).toLowerCase());
 }
 
 function resolvePayload(req, token) {
-  return provider.verifyToken(token);
+  return Promise.resolve(provider.verifyToken(token)).then((payload) =>
+    typeof provider.resolveIdentity === "function"
+      ? provider.resolveIdentity(token, payload)
+      : payload
+  );
+}
+
+function workspaceMemberFeatureFlags(workspaceFlags,organizationFlags) {
+  if (Array.isArray(workspaceFlags)) return workspaceFlags.filter(key => typeof key === 'string');
+  if (typeof workspaceFlags === 'string' && workspaceFlags) {
+    try { const parsed = JSON.parse(workspaceFlags); if (Array.isArray(parsed)) return parsed.filter(key => typeof key === 'string'); }
+    catch { /* use organization grant for legacy and malformed values */ }
+  }
+  return Array.isArray(organizationFlags) ? organizationFlags.filter(key => typeof key === 'string') : [];
 }
 
 async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdmin = false,membership: knownMembership,allowInactiveWorkspace = false }) {
@@ -73,7 +89,7 @@ async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdm
     if (allowInactiveWorkspace && (platformAdmin || ['Owner','Organization Admin','Billing Admin'].includes(orgRole))) {
       // Billing remains reachable for an admin to pay an overdue add-on. No
       // operational workspace role is granted through this recovery context.
-      return policy.authorization({orgRole,workspaceRole:null,platformAdmin});
+      return { ...policy.authorization({orgRole,workspaceRole:null,platformAdmin}), memberFeatureFlags: membership?.featureFlags || [] };
     }
     throw Object.assign(new Error('Active workspace required'),{statusCode:403});
   }
@@ -89,10 +105,12 @@ async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdm
       ? policy.legacyWorkspaceRole(membership.role)
       : (policy.WORKSPACE_ROLES.includes(state.role) ? state.role : null);
   }
-  return policy.authorization({ orgRole: policy.organizationRole(membership?.role),workspaceRole,platformAdmin });
+  return { ...policy.authorization({ orgRole: policy.organizationRole(membership?.role),workspaceRole,platformAdmin }),
+    memberFeatureFlags: workspaceMemberFeatureFlags(state.workspace_feature_flags,membership?.featureFlags) };
 }
 function attachAuthorization(req,value) {
   req.authorization = value;
+  if (Array.isArray(value.memberFeatureFlags)) req.memberFeatureFlags = value.memberFeatureFlags;
   req.organizationRole = value.organizationRole;
   req.workspaceRole = value.workspaceRole;
   req.isPlatformAdmin = value.platformAdmin;
@@ -119,7 +137,7 @@ async function requireAuth(req, res, next) {
     }
 
     const userId    = payload.sub;
-    const userEmail = payload.email || null;
+    const userEmail = payload.email_verified === true && payload.email ? payload.email : null;
 
     // The workspace switcher sends the selected organization explicitly.
     // The database membership lookup remains the authorization boundary.
@@ -156,6 +174,7 @@ async function requireAuth(req, res, next) {
     req.workspaceId = requestedWorkspaceId || membership.orgId;
     req.userId    = userId;
     req.userEmail = userEmail;
+    req.emailVerified = !!userEmail;
     req.userName  = payload.name || membership.name || null;
     req.orgId     = membership.orgId;
     req.organization = org;
@@ -193,7 +212,8 @@ async function requireAuthIdentityOnly(req, res, next) {
     let payload = await resolvePayload(req, token);
     if (!payload?.sub) return res.status(401).json({ error: "Invalid token payload" });
     req.userId         = payload.sub;
-    req.userEmail      = payload.email || payload.preferred_username || null;
+    req.emailVerified  = payload.email_verified === true && !!payload.email;
+    req.userEmail      = req.emailVerified ? payload.email : null;
     req.userName       = payload.name || null;
     req.authClaims = payload;
     req.keycloakRoles = payload.realm_access?.roles || [];
