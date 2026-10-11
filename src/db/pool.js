@@ -11,6 +11,17 @@ const mysql = require("mysql2/promise");
  * containing '$1' are not modified.
  */
 function normalizeSql(sql, params = []) {
+  // mysql2 binds strings literally. MySQL DATETIME accepts a SQL timestamp,
+  // not an ISO-8601 timezone suffix (for example, `2026-10-11T04:43:49.952Z`).
+  // Billing clocks and API timestamps are ISO instants, so normalize only
+  // complete ISO timestamp parameters to UTC DATETIME values at the DB edge.
+  const normalizeParameter = (value) => {
+    if (typeof value !== "string"
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(value)) {
+      return value;
+    }
+    return value.replace("T", " ").replace(/Z$/, "");
+  };
   const text = String(sql);
   const values = Array.isArray(params) ? params : [];
   const out = [];
@@ -57,7 +68,7 @@ function normalizeSql(sql, params = []) {
         throw new Error(`[db/pool] SQL placeholder $${text.slice(i + 1, j)} has no matching parameter`);
       }
       result += "?";
-      out.push(values[index]);
+      out.push(normalizeParameter(values[index]));
       consumed.add(index);
       i = j;
       continue;
@@ -73,7 +84,7 @@ function normalizeSql(sql, params = []) {
         throw new Error("[db/pool] SQL placeholder ? has no matching parameter");
       }
       result += "?";
-      out.push(values[index]);
+      out.push(normalizeParameter(values[index]));
       consumed.add(index);
       i += 1;
       continue;
