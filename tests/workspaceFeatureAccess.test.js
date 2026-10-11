@@ -7,10 +7,10 @@ const workspaceRepository = require('../src/db/repositories/workspaceRepository'
 const platformFeatures = require('../src/platform/featureFlags');
 const { mappedFeature, enforceFeatureRequest, effectiveKeys } = require('../src/authorization/workspaceFeatures');
 
-function invoke({ granted, member = ['leads'], org = ['leads'], role = 'Member', url = '/api/leads' } = {}) {
+function invoke({ granted, member = ['leads'], org = ['leads'], role = 'Member', url = '/api/leads', override = null } = {}) {
   const req = { orgId:'org-a',workspaceId:'branch-b',originalUrl:url,
     orgFeatureFlags:org,memberFeatureFlags:member,
-    authorization:{workspaceRole:role} };
+    workspaceMemberFeatureOverride:override,authorization:{workspaceRole:role} };
   workspaceRepository.getActive.mockResolvedValue({ settings: granted === null ? {} : {enabledFeatures:granted} });
   const res = { status:jest.fn().mockReturnThis(),json:jest.fn() };
   const next = jest.fn();
@@ -64,4 +64,23 @@ test('common dialing, reporting, and workflow paths are mapped', () => {
   expect(mappedFeature('/api/dialer-tasks')).toBe('dialer');
   expect(mappedFeature('/api/question-flows')).toBe('workflows');
   expect(mappedFeature('/api/audit-log')).toBe('audit_log');
+});
+
+test('a member can have different explicit feature access in each workspace', async () => {
+  const inWorkspaceA = await invoke({ granted:['leads'],member:[],override:['leads'] });
+  expect(inWorkspaceA.next).toHaveBeenCalledTimes(1);
+  const inWorkspaceB = await invoke({ granted:['leads'],member:['leads'],override:[] });
+  expect(inWorkspaceB.res.status).toHaveBeenCalledWith(403);
+  // Inherited grants continue to behave as before.
+  const inherited = await invoke({ granted:['leads'],member:['leads'],override:null });
+  expect(inherited.next).toHaveBeenCalledTimes(1);
+});
+test('workspace feature ceilings and explicit empty overrides are enforced for admins', async () => {
+  expect((await invoke({ granted:['leads'],override:[],role:'Workspace Admin' })).res.status).toHaveBeenCalledWith(403);
+  expect((await invoke({ granted:[],override:['leads'],role:'Workspace Admin' })).res.status).toHaveBeenCalledWith(403);
+  expect((await invoke({ granted:['leads'],org:[],override:['leads'] })).res.status).toHaveBeenCalledWith(403);
+  expect((await invoke({ granted:null,org:['leads'],member:[],override:['leads'] })).next).toHaveBeenCalled();
+  expect((await invoke({ granted:null,org:['leads'],member:['leads'],override:[] })).res.status).toHaveBeenCalledWith(403);
+  expect(await effectiveKeys(['leads','reports'],['leads'],['reports'],false,['leads'])).toEqual(['leads']);
+  expect(await effectiveKeys(['leads'],['leads'],['leads'],true,[])).toEqual([]);
 });
