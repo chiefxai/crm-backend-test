@@ -167,7 +167,7 @@ async function requireAuth(req, res, next) {
       platformAdmin: isPlatformAdminIdentity(payload,userEmail),membership,
       allowInactiveWorkspace: /^\/api\/billing(?:\/|$)/.test(req.originalUrl || req.url)
         || ['/api/auth/me','/api/settings/workspaces','/api/settings/workspace-policy'].includes((req.originalUrl || req.url).split('?')[0]) }));
-    req.workspaceMemberFeatureOverride = req.isPlatformAdmin
+    req.workspaceMemberFeatureOverride = req.isPlatformAdmin || !membership.memberId
       ? null : await workspaces.getMemberFeatureOverride(req.orgId, req.workspaceId, membership.memberId);
     res.set("X-Organization-Id", req.orgId);
     res.set("X-Workspace-Id", req.workspaceId);
