@@ -86,13 +86,22 @@ async function verifyToken(token) {
 // identity-level authorization (for example the platform-admin allowlist).
 async function resolveIdentity(token, payload = {}) {
   if (payload?.email_verified === true || payload?.email_verified === false) return payload;
-  // Cognito ID tokens carry email_verified. Access tokens generally do not,
-  // so read the authenticated user's attributes through Cognito's GetUser
-  // API instead of treating an unverified/missing claim as verified.
-  if (payload?.token_use !== 'access' || !token || !REGION) return payload;
+  // Hosted UI access tokens with only OIDC scopes cannot call GetUser.
+  // Resolve those users with the backend's existing Cognito IAM permission,
+  // binding the returned attributes to the subject of the verified JWT.
+  if (payload?.token_use !== 'access' || !payload.sub || !token || !REGION) return payload;
 
   try {
-    const user = await getIdpClient().send(new GetUserCommand({ AccessToken: token }));
+    const scopes = String(payload.scope || '').split(/\s+/);
+    const user = scopes.includes('aws.cognito.signin.user.admin')
+      ? await getIdpClient().send(new GetUserCommand({ AccessToken: token }))
+      : await getIdpClient().send(new AdminGetUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: payload.username || payload.sub,
+      }));
+    if (getAttribute(user, 'sub') !== payload.sub) {
+      throw new Error('Cognito identity subject mismatch');
+    }
     const email = getAttribute(user, 'email');
     const name = getAttribute(user, 'name');
     const emailVerified = getAttribute(user, 'email_verified') === 'true';
