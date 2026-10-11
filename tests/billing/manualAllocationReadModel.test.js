@@ -1,3 +1,4 @@
+jest.mock('../../src/db/pool', () => ({ getPool: jest.fn() }));
 const {
   availableUnits, groupBalances, previewManualAllocation, readManualAllocationOverview,
 } = require('../../src/billing/manualAllocationReadModel');
