@@ -55,6 +55,8 @@ function requestPermission(req) {
   if (/^\/api\/workspace-sharing\/grants(?:\/|$)/.test(path)) return read ? 'workspace.read' : 'workspace.settings.manage';
   if (path === '/api/billing/workspace-budget' && !read) return 'workspace.settings.manage';
   if (/^\/api\/billing\/workspace-addons(?:\/|$)/.test(path) && !read) return 'billing.payment.submit';
+  if (/^\/api\/billing\/manual-allocations(?:\/|$)/.test(path))
+    return read ? 'billing.organization.read' : 'billing.credit.allocate';
   if (/^\/api\/billing\/allocation-rules(?:\/|$)/.test(path))
     return read ? 'billing.organization.read' : 'billing.allocation_rules.manage';
   if (/^\/api\/billing\/(?:allocations|transfers)(?:\/|$)/.test(path))
