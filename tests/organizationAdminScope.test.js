@@ -38,6 +38,9 @@ describe('organization-wide admins are distinct from workspace admins', () => {
     ['/api/billing/allocation-rules', 'PUT', 'billing.allocation_rules.manage'],
     ['/api/billing/allocation-rules', 'GET', 'billing.organization.read'],
     ['/api/billing/allocations', 'GET', 'billing.organization.read'],
+    ['/api/billing/manual-allocations', 'GET', 'billing.organization.read'],
+    ['/api/billing/manual-allocations/preview', 'POST', 'billing.credit.allocate'],
+    ['/api/billing/manual-allocations/transfer', 'POST', 'billing.credit.allocate'],
   ])('financial route %s %s needs %s', (url, method, permission) => {
     expect(requestPermission({ originalUrl:url, method })).toBe(permission);
   });
