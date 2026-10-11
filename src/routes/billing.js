@@ -60,6 +60,9 @@ router.get('/payments', requireAuth, requirePermission('billing.read'), async (r
   }
 });
 
+// Organization credit allocation uses the existing ledger and stays write-gated.
+router.use(require('../billing/manualAllocationRouter').router);
+
 // Organization top-up quote creation is separately feature gated.
 router.use(require('../billing/topupQuoteRouter').router);
 router.use(require('../billing/workspaceAddonRouter').router);
