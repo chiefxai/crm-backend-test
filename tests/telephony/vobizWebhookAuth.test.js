@@ -23,6 +23,12 @@ describe("vobizWebhookAuth", () => {
     expect(url).toBe("https://api.example.com/api/vobiz/incoming");
   });
 
+  test('buildVobizIncomingWebhookUrl includes a durable route id for account-authenticated callbacks', () => {
+    delete process.env.VOBIZ_WEBHOOK_SECRET;
+    expect(buildVobizIncomingWebhookUrl('https://api.example.com', { routeId: 'route-123', routeToken: 'route-secret' }))
+      .toBe('https://api.example.com/api/vobiz/incoming?telephony_route_id=route-123&telephony_route_token=route-secret');
+  });
+
   test("extractSuppliedVobizWebhookSecret reads query and body", () => {
     expect(
       extractSuppliedVobizWebhookSecret({ get: () => null, query: { webhook_secret: "q" }, body: {} })

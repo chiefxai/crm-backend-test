@@ -16,6 +16,7 @@ router.use("/api/conversations", conversationsRouter);
 
 // Platform admin
 router.use("/api/platform", require("./platform"));
+router.use("/api/telephony", require("./telephonyConnectors").createOrgRouter());
 
 // Billing compatibility API (authenticated and tenant-scoped).
 router.use("/api/billing", require("./billing"));

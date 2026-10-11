@@ -66,6 +66,32 @@ function billedAiTokenCost(aiUsageSummary) {
   };
 }
 
+function callRecordOwner(record) {
+  let snapshot = record?.snapshot || {};
+  if (typeof snapshot === "string") { try { snapshot = JSON.parse(snapshot); } catch (_) { snapshot = {}; } }
+  return record?.telephonyOwnerType || record?.telephony_owner_type || snapshot?.telephonyOwnerType || null;
+}
+
+function isCallProviderChargeBillable(record, legacySelfManaged = false) {
+  const ownerType = callRecordOwner(record);
+  if (ownerType === "organization") return false;
+  if (ownerType === "platform") return true;
+  return !legacySelfManaged;
+}
+
+async function phoneChargesAreBillable(org, legacySelfManaged, { allTime = false } = {}) {
+  let records = [];
+  try { records = await db.list("callbillingrecords", org.id); } catch (_) { /* retain legacy classification on read failures */ }
+  const end = org.billingPeriodEnd ? new Date(org.billingPeriodEnd).getTime() : Infinity;
+  const start = Number.isFinite(end) ? addDays(end, -BILLING_PERIOD_DAYS).getTime() : 0;
+  const relevant = allTime ? records : records.filter(record => {
+    const createdAt = new Date(record.createdAt || record.created_at || 0).getTime();
+    return createdAt >= start && createdAt < end;
+  });
+  if (!relevant.length) return !legacySelfManaged;
+  return relevant.some(record => isCallProviderChargeBillable(record, legacySelfManaged));
+}
+
 // Resets usage + rolls the billing period forward if the current period
 // has ended (or was never set). Idempotent — calling this repeatedly
 // within an active period is a no-op.
@@ -100,6 +126,7 @@ async function getBillingInfo(orgId) {
     costProviders.getProviderByKey("gemini", "ai").catch(() => null),
     isCallProviderSelfManaged(orgId, "vobiz"),
   ]);
+  const phoneChargesBillable = await phoneChargesAreBillable(org, phoneChargesSelfManaged);
 
   return {
     aiMinutesUsed,
@@ -115,7 +142,7 @@ async function getBillingInfo(orgId) {
     // above is an ESTIMATE for the org's own reference only, not
     // something owed to the platform. The frontend must not present it
     // as a bill/payment when this is false.
-    phoneChargesBillable: !phoneChargesSelfManaged,
+    phoneChargesBillable,
     callProvider: callProvider ? {
       key: callProvider.key, label: callProvider.label,
       rateUnit: callProvider.rateUnit, rateAmount: callProvider.rateAmount, taxPercent: callProvider.taxPercent || 0,
@@ -165,6 +192,7 @@ async function getFinalBillingSnapshot(orgId) {
     isCallProviderSelfManaged(orgId, "vobiz"),
   ]);
   const aiProviderNow = await costProviders.getProviderByKey("gemini", "ai").catch(() => null);
+  const phoneChargesBillable = await phoneChargesAreBillable(org, phoneChargesSelfManaged, { allTime: true });
 
   // Same locked-in-at-finalize-time sum as getBillingInfo — see
   // billedAiTokenCost() above.
@@ -182,7 +210,7 @@ async function getFinalBillingSnapshot(orgId) {
     aiMinutesCostInr,
     phoneCharges: org.phoneCharges || 0,
     phoneCostPerMinute,
-    phoneChargesBillable: !phoneChargesSelfManaged,
+    phoneChargesBillable,
     callProvider: callProvider ? {
       key: callProvider.key, label: callProvider.label,
       rateUnit: callProvider.rateUnit, rateAmount: callProvider.rateAmount, taxPercent: callProvider.taxPercent || 0,
@@ -203,4 +231,4 @@ async function getFinalBillingSnapshot(orgId) {
   };
 }
 
-module.exports = { ensureCurrentPeriod, getBillingInfo, getFinalBillingSnapshot };
+module.exports = { ensureCurrentPeriod, getBillingInfo, getFinalBillingSnapshot, callRecordOwner, isCallProviderChargeBillable, phoneChargesAreBillable };

@@ -116,6 +116,11 @@ const ENTITIES = {
       // in-process event of its own; it just polls for a call_logs row
       // with this value.
       providerCallSid: "provider_call_sid",
+      telephonyProviderKey: "telephony_provider_key",
+      telephonyConnectorAccountId: "telephony_connector_account_id",
+      telephonyPhoneNumberId: "telephony_phone_number_id",
+      telephonyAssignmentId: "telephony_assignment_id",
+      telephonyOwnerType: "telephony_owner_type",
       // Set when a call ends with the caller asking to be called back
       // later ("I'm busy, call me after 6pm") — see callFinalizer.js and
       // src/ai/postCallAgents.js:extractFollowUp. status is "Callback
@@ -2865,8 +2870,41 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
     );
     const ordered = planOrganizationDeletion(existing, foreignKeys || [], preferredOrder);
 
+    // Connector accounts use owner_org_id (rather than org_id), so generic
+    // tenant-table discovery cannot clean them up. Platform-owned inventory
+    // is retained when its customer is deleted; make those numbers available
+    // again before the tenant-scoped assignment history is removed below.
+    const hasTelephonyAssignments = existing.includes("telephony_number_assignments");
+    if (hasTelephonyAssignments) {
+      await client.query(
+        `UPDATE telephony_phone_numbers n
+         INNER JOIN telephony_connector_accounts a ON a.id=n.connector_account_id
+         INNER JOIN telephony_number_assignments assignment
+           ON assignment.phone_number_id=n.id AND assignment.released_at IS NULL
+         SET n.inventory_status='available', n.updated_at=?
+         WHERE assignment.org_id=? AND a.owner_type='platform' AND n.inventory_status='assigned'`,
+        [new Date().toISOString(), orgId]
+      );
+    }
+
     for (const table of ordered) {
       await client.query(`DELETE FROM \`${table}\` WHERE org_id = ?`, [orgId]);
+    }
+
+    if (hasTelephonyAssignments) {
+      // Organization-owned connectors and inventory have no org_id column,
+      // so remove them explicitly after their assignment rows are gone.
+      await client.query(
+        `DELETE FROM telephony_phone_numbers
+         WHERE connector_account_id IN (
+           SELECT id FROM telephony_connector_accounts
+           WHERE owner_type='organization' AND owner_org_id=?
+         )`, [orgId]
+      );
+      await client.query(
+        "DELETE FROM telephony_connector_accounts WHERE owner_type='organization' AND owner_org_id=?",
+        [orgId]
+      );
     }
 
     // organization_cloud_projects deliberately has organization_id, not

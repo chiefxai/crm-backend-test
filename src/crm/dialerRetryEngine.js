@@ -14,6 +14,11 @@ const { getLogger } = require("../observability/logger");
 const log = getLogger("crm.dialerRetryEngine");
 const telephony = require("../telephony/registry");
 
+function connectorCallRoutingEnabled() {
+  return process.env.TELEPHONY_CONNECTOR_ACCOUNTS_ENABLED === "true"
+    && process.env.TELEPHONY_CONNECTOR_CALL_ROUTING_ENABLED === "true";
+}
+
 // Real cron schedule (was a bare setInterval) — every 5 minutes, on the
 // clock (:00, :05, :10, ...) rather than 5 minutes after whenever the
 // process happened to boot. `noOverlap: true` is node-cron's own
@@ -151,6 +156,7 @@ async function processDueRetries(callLogId = null) {
         taskId: retryContext.taskId, leadId: retryContext.leadId,
         campaignId: retryContext.campaignId || retryContext.taskId || null,
         provider: retryContext.provider || row.provider || telephony.getDefaultProvider(),
+        telephonyContext: retryContext.telephonyContext || null,
       });
     } catch (err) {
       log.error(`❌ [dialerRetryEngine] Auto-redial failed for ${row.leadName} (org ${row.orgId}):`, err.message);
@@ -174,11 +180,30 @@ async function handlePlaceRedialJob(data) {
 }
 
 async function handlePlaceRedialJobScoped(data) {
-  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, campaignId, provider = telephony.getDefaultProvider() } = data;
+  const { orgId, workspaceId = orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, campaignId, telephonyContext: priorTelephonyContext, provider = telephony.getDefaultProvider() } = data;
   try {
+    if (priorTelephonyContext && !connectorCallRoutingEnabled()) {
+      log.warn(`⏸️ [dialerRetryEngine] Connector retry ${rowId} was stopped because connector call routing is disabled.`);
+      await db.patch("calllogs", orgId, rowId, { retryStatus: "exhausted", retryClaimedAt: null });
+      return;
+    }
+    let telephonyContext = null;
+    if (priorTelephonyContext) {
+      const resolved = await require('../telephony/connectorCredentialResolver').resolveAssignedNumber({
+        orgId, workspaceId, phoneNumberId: priorTelephonyContext.phoneNumberId,
+      });
+      const sameAssignment = resolved.providerKey === priorTelephonyContext.providerKey
+        && resolved.connectorAccountId === priorTelephonyContext.connectorAccountId
+        && resolved.assignmentId === priorTelephonyContext.assignmentId
+        && resolved.ownerType === priorTelephonyContext.ownerType
+        && resolved.credentialVersion === Number(priorTelephonyContext.credentialVersion);
+      if (!sameAssignment) throw Object.assign(new Error('Assigned telephony connector changed since the original call; retry was stopped safely.'), { statusCode: 409 });
+      telephonyContext = resolved;
+    }
     await telephony.triggerOutboundCall(provider, orgId, dialTarget, {
       baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId,
       campaignId: campaignId || taskId || null,
+      workspaceId, telephonyContext,
     });
     await db.patch("calllogs", orgId, rowId, { retryStatus: "retried", retryClaimedAt: null });
   } catch (err) {
@@ -201,4 +226,4 @@ function registerDialerRetryWorker() {
   }
 }
 
-module.exports = { processDueRetries, registerDialerRetryWorker };
+module.exports = { processDueRetries, registerDialerRetryWorker, handlePlaceRedialJobScoped };

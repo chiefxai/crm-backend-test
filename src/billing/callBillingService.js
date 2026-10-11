@@ -25,13 +25,15 @@ async function sumAiSessionCostsForCall(orgId, callId) {
   };
 }
 
-async function computeCallBillingBreakdown({ org, providerKey = "vobiz", durationSeconds = 0, callId = null }) {
+async function computeCallBillingBreakdown({ org, providerKey = "vobiz", durationSeconds = 0, callId = null, telephonyOwnerType = null }) {
   const services = getOrgServiceProfile(org);
   const aiCosts = callId ? await sumAiSessionCostsForCall(org.id, callId) : { voiceCostInr: 0, postCallCostInr: 0, totalAiCostInr: 0, sessions: [] };
 
   let providerCost = null;
   let phoneNumberCostInr = 0;
-  if (services.phoneEnabled) {
+  // Organization-owned provider accounts incur their own provider charges.
+  // Preserve legacy billing when ownership is unknown (existing calls).
+  if (services.phoneEnabled && telephonyOwnerType !== "organization") {
     const resolved = await resolveCallProviderPricing(providerKey, org);
     const provider = resolved?.provider;
     if (provider?.active && provider.rateAmount) {
@@ -58,6 +60,7 @@ async function computeCallBillingBreakdown({ org, providerKey = "vobiz", duratio
     postCallAgentCostInr: services.aiEnabled ? aiCosts.postCallCostInr : 0,
     aiCostInr: services.aiEnabled ? aiCosts.totalAiCostInr : 0,
     telephonyProvider: services.phoneEnabled ? providerKey : null,
+    telephonyOwnerType: ["platform", "organization"].includes(telephonyOwnerType) ? telephonyOwnerType : null,
     providerPricingVersion: providerCost?.pricingVersion || null,
     providerRateAmount: providerCost?.rateAmount ?? null,
     providerRateUnit: providerCost?.rateUnit ?? null,
@@ -69,7 +72,7 @@ async function computeCallBillingBreakdown({ org, providerKey = "vobiz", duratio
   };
 }
 
-async function recordCallBilling({ orgId, callId, providerKey = "vobiz", durationSeconds = 0, billingMethod = null }) {
+async function recordCallBilling({ orgId, callId, providerKey = "vobiz", durationSeconds = 0, billingMethod = null, telephonyOwnerType = null }) {
   const org = await db.getOrg(orgId);
   if (!org || !callId) return null;
 
@@ -78,6 +81,7 @@ async function recordCallBilling({ orgId, callId, providerKey = "vobiz", duratio
     providerKey,
     durationSeconds,
     callId,
+    telephonyOwnerType,
   });
 
   const existing = await db.list("callbillingrecords", orgId, { callId });
@@ -90,6 +94,7 @@ async function recordCallBilling({ orgId, callId, providerKey = "vobiz", duratio
     postCallAgentCostInr: breakdown.postCallAgentCostInr,
     aiCostInr: breakdown.aiCostInr,
     telephonyProvider: breakdown.telephonyProvider,
+    telephonyOwnerType: breakdown.telephonyOwnerType,
     providerPricingVersion: breakdown.providerPricingVersion,
     providerRateAmount: breakdown.providerRateAmount,
     providerRateUnit: breakdown.providerRateUnit,

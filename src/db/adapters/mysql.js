@@ -224,6 +224,8 @@ const TABLES = {
       // polling for a call_logs row with this value, with no in-process
       // event needed.
       provider_call_sid: "text",
+      telephony_provider_key: "text", telephony_connector_account_id: "text",
+      telephony_phone_number_id: "text", telephony_assignment_id: "text", telephony_owner_type: "text",
       callback_time: "text",
       // True only when the callee actually engaged in the call — see
       // callFinalizer.js. False for a pickup with no real talk (hung up

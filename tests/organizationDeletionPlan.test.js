@@ -98,4 +98,21 @@ describe('foreign-key-safe organization deletion', () => {
     expect(fn.indexOf('INSERT INTO')).toBeLessThan(fn.indexOf('planOrganizationDeletion('));
     expect(fn.indexOf('planOrganizationDeletion(')).toBeLessThan(fn.indexOf('DELETE FROM '+String.fromCharCode(96)+'organizations'));
   });
+
+  test('releases platform-owned inventory and removes organization-owned connector rows in FK-safe order', () => {
+    const source=fs.readFileSync(path.join(__dirname,'../src/db/repository.js'),'utf8');
+    const fn=source.slice(source.indexOf('async function deleteOrganizationData('),
+      source.indexOf('async function listCostArchive('));
+    const releasePlatformNumbers=fn.indexOf("a.owner_type='platform'");
+    const deleteAssignments=fn.indexOf('for (const table of ordered)');
+    const deleteOrgInventory=fn.indexOf('DELETE FROM telephony_phone_numbers');
+    const deleteOrgConnectors=fn.indexOf('DELETE FROM telephony_connector_accounts WHERE owner_type');
+    const deleteOrganization=fn.indexOf('DELETE FROM `organizations`');
+    expect(releasePlatformNumbers).toBeGreaterThan(-1);
+    expect(releasePlatformNumbers).toBeLessThan(deleteAssignments);
+    expect(deleteAssignments).toBeLessThan(deleteOrgInventory);
+    expect(deleteOrgInventory).toBeLessThan(deleteOrgConnectors);
+    expect(deleteOrgConnectors).toBeLessThan(deleteOrganization);
+    expect(fn).toContain('hasTelephonyAssignments = existing.includes("telephony_number_assignments")');
+  });
 });

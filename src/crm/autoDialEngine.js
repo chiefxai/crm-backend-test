@@ -24,6 +24,12 @@ const { getQueue } = require("../queue");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("crm.autoDialEngine");
 const telephony = require("../telephony/registry");
+const connectorCredentialResolver = require("../telephony/connectorCredentialResolver");
+
+function connectorCallRoutingEnabled() {
+  return process.env.TELEPHONY_CONNECTOR_ACCOUNTS_ENABLED === "true"
+    && process.env.TELEPHONY_CONNECTOR_CALL_ROUTING_ENABLED === "true";
+}
 
 const INTER_CALL_DELAY_MS = 3 * 1000; // matches the frontend's prior pacing between one call ending and the next starting
 const STUCK_CALL_MAX_AGE_MS = 30 * 60 * 1000; // same bound as the 30-min Map TTLs triggerVobizOutboundCall itself uses
@@ -425,8 +431,23 @@ async function handlePlaceDialJobScoped(data) {
       return;
     }
 
+    let telephonyContext = null;
+    if (connectorCallRoutingEnabled() && from) {
+      try {
+        telephonyContext = await connectorCredentialResolver.resolveAssignedNumber({
+          orgId, workspaceId: data.workspaceId || orgId, phoneNumberE164: from,
+        });
+        if (telephonyContext.providerKey !== provider) {
+          throw Object.assign(new Error("Assigned connector number provider changed before auto-dial placement"), { statusCode: 409 });
+        }
+      } catch (error) {
+        if (error.code !== "ASSIGNMENT_NOT_FOUND") throw error;
+      }
+    }
+
     const result = await telephony.triggerOutboundCall(provider, orgId, leadPhone, {
       baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId, campaignId: campaignId || taskId, retryPolicy, autoDialRunId,
+      workspaceId: data.workspaceId || orgId, telephonyContext,
     });
 
     // The provider can answer/hang up very quickly. The finalizer may have
