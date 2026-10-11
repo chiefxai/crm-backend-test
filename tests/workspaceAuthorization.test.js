@@ -1,4 +1,9 @@
-jest.mock('../src/db/repositories/workspaceRepository', () => ({ getDefault: jest.fn(async orgId => ({ id: orgId, orgId, isDefault: true })) }));
+jest.mock('../src/db/repositories/workspaceRepository', () => ({
+  getDefault: jest.fn(async orgId => ({ id: orgId, orgId, isDefault: true })),
+  listForOrg: jest.fn(),
+  listForMember: jest.fn(),
+  ensureDefaultMembership: jest.fn(),
+}));
 jest.mock("../src/db/repository", () => ({
   findMembershipForUser: jest.fn(), getOrg: jest.fn(), listMembershipsForUser: jest.fn(),
 }));
@@ -12,6 +17,7 @@ const request = require("supertest");
 const db = require("../src/db/repository");
 const provider = require("../src/auth");
 const platform = require("../src/platform/admin");
+const workspaceRepo = require('../src/db/repositories/workspaceRepository');
 const { requireAuth, requireAuthIdentityOnly, requirePlatformAdmin } = require("../src/middleware/auth");
 
 const app = express();
@@ -43,6 +49,32 @@ describe("workspace and platform authorization", () => {
     const res = await request(app).get("/api/auth/workspaces").set("Authorization", "Bearer valid").expect(200);
     expect(res.body).toEqual([{ orgId: "org-a", role: "Agent", workspaceId: "org-a", workspace: { id: "org-a", orgId: "org-a", isDefault: true } }]);
     expect(platform.listOrganizations).not.toHaveBeenCalled();
+  });
+  test('Organization Admin sees every workspace without being labeled Workspace Admin', async () => {
+    const oldFlag = process.env.MULTI_WORKSPACE_ENABLED;
+    const oldIsolation = process.env.WORKSPACE_ISOLATION_VERIFIED;
+    try {
+      process.env.MULTI_WORKSPACE_ENABLED = 'true';
+      process.env.WORKSPACE_ISOLATION_VERIFIED = 'true';
+      db.listMembershipsForUser.mockResolvedValue([{
+        orgId:'org-a', role:'Organization Admin', membershipId:'member-org-admin',
+      }]);
+      workspaceRepo.listForOrg.mockResolvedValue([
+        { id:'org-a', orgId:'org-a', name:'Default workspace' },
+        { id:'branch-b', orgId:'org-a', name:'Branch B' },
+      ]);
+      const response = await request(app).get('/api/auth/workspaces')
+        .set('Authorization','Bearer valid').expect(200);
+      expect(response.body.map(row => row.workspaceId)).toEqual(['org-a','branch-b']);
+      expect(response.body.every(row => row.role === 'Organization Admin' && row.workspaceRole === null)).toBe(true);
+      expect(workspaceRepo.listForOrg).toHaveBeenCalledWith('org-a');
+      expect(workspaceRepo.listForMember).not.toHaveBeenCalled();
+    } finally {
+      if (oldFlag === undefined) delete process.env.MULTI_WORKSPACE_ENABLED;
+      else process.env.MULTI_WORKSPACE_ENABLED = oldFlag;
+      if (oldIsolation === undefined) delete process.env.WORKSPACE_ISOLATION_VERIFIED;
+      else process.env.WORKSPACE_ISOLATION_VERIFIED = oldIsolation;
+    }
   });
   test("ordinary users cannot select another organization", async () => {
     await request(app).get("/api/resource").set("Authorization", "Bearer valid").set("X-Organization-Id", "org-b").expect(403);
