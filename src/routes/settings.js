@@ -439,7 +439,7 @@ router.get("/me", requireAuth, async (req, res) => {
     const workspaceFeatures = require("../authorization/workspaceFeatures");
     const configuredKeys = await workspaceFeatures.listWorkspaceGrants(req.orgId,req.workspaceId);
     const featureFlags = await workspaceFeatures.effectiveKeys(
-      orgFlags,configuredKeys,memberFlags,isOrgAdmin
+      orgFlags,configuredKeys,memberFlags,isOrgAdmin,req.workspaceMemberFeatureOverride ?? null
     );
     res.json({
       userId: req.userId,
