@@ -24,7 +24,9 @@ test('payment history is scoped by authenticated organization and capped', async
   const page = await listPaymentRequests('org_123', { limit: '1' }, { pool });
   assert.equal(calls[0].args[0], 'org_123');
   assert.equal(calls[0].args.at(-1), 2);
-  assert.match(calls[0].sql, /WHERE org_id=\?/);
+  assert.match(calls[0].sql, /WHERE p\.org_id=\?/);
+  assert.match(calls[0].sql, /c\.org_id=p\.org_id AND c\.invoice_id=p\.invoice_id/);
+  assert.match(calls[0].sql, /a\.org_id=c\.org_id AND a\.id=c\.addon_id/);
   assert.equal(page.rows.length, 1);
   assert.equal(page.rows[0].expectedAmount.units, '9007199254740993');
   assert.deepEqual(decodeCursor(page.nextCursor), {
@@ -61,4 +63,28 @@ test('maps persisted clarification status to the frontend status contract', asyn
   const page = await listPaymentRequests('org_123', {}, { pool });
   assert.equal(page.rows[0].status, 'needs_information');
   assert.equal(page.rows[0].receivedAmount, null);
+});
+
+test('classifies workspace addon payments without treating other invoices as workspace payments', async () => {
+  const pool = { async query() {
+    return { rows: [
+      makeRow('payment-workspace', '2026-10-09 12:00:00.000003', {
+        purpose: 'invoice', invoice_id: 'invoice-addon', workspace_addon_name: 'Mumbai',
+      }),
+      makeRow('payment-invoice', '2026-10-09 12:00:00.000002', {
+        purpose: 'invoice', invoice_id: 'invoice-general', workspace_addon_name: null,
+      }),
+      makeRow('payment-topup', '2026-10-09 12:00:00.000001', {
+        purpose: 'topup', invoice_id: null, workspace_addon_name: null,
+      }),
+    ] };
+  } };
+  const page = await listPaymentRequests('org_123', { limit: '10' }, { pool });
+  assert.equal(page.rows.length, 3);
+  assert.equal(page.rows[0].workspaceAddonName, 'Mumbai');
+  assert.equal(page.rows[0].invoiceId, 'invoice-addon');
+  assert.equal(page.rows[1].workspaceAddonName, null);
+  assert.equal(page.rows[1].purpose, 'invoice');
+  assert.equal(page.rows[2].workspaceAddonName, null);
+  assert.equal(page.rows[2].purpose, 'topup');
 });
