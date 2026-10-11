@@ -14,6 +14,16 @@ function validatePolicy(input, primaryIndustry, industries) {
   }
   const includedWorkspaces = input.mode === 'single' ? 1 : pricing.includedWorkspaces;
   if (!Number.isInteger(includedWorkspaces) || includedWorkspaces < 1 || includedWorkspaces > 1000) throw invalid('Included workspaces must be between 1 and 1000 for a multi-workspace plan.');
+  // Monthly usage credits are an organization-level *plan entitlement*.
+  // Keep the value in the immutable organization policy snapshot, but never
+  // treat selecting a plan as proof of payment or mint ledger credits here.
+  const monthlyCredits = pricing.monthlySubscriptionCreditsInr ?? 0;
+  if (typeof monthlyCredits !== 'number' || !Number.isFinite(monthlyCredits)
+    || monthlyCredits < 0 || monthlyCredits > 100000000
+    || Math.round(monthlyCredits * 100) / 100 !== monthlyCredits) {
+    throw invalid('Monthly subscription credits must be a non-negative INR amount with at most two decimal places.');
+  }
+  result.monthlySubscriptionCreditsInr = monthlyCredits;
   result.includedWorkspaces = includedWorkspaces;
   result.maxWorkspaces = input.mode === 'single' ? 1 : pricing.maxWorkspaces == null ? null : pricing.maxWorkspaces;
   result.includedSeats = pricing.includedSeats;
