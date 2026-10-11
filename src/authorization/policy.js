@@ -55,8 +55,10 @@ function requestPermission(req) {
   if (/^\/api\/workspace-sharing\/grants(?:\/|$)/.test(path)) return read ? 'workspace.read' : 'workspace.settings.manage';
   if (path === '/api/billing/workspace-budget' && !read) return 'workspace.settings.manage';
   if (/^\/api\/billing\/workspace-addons(?:\/|$)/.test(path) && !read) return 'billing.payment.submit';
-  if (/^\/api\/billing\/allocation-rules(?:\/|$)/.test(path) && !read) return 'billing.allocation_rules.manage';
-  if (/^\/api\/billing\/(?:allocations|transfers)(?:\/|$)/.test(path) && !read) return 'billing.credit.allocate';
+  if (/^\/api\/billing\/allocation-rules(?:\/|$)/.test(path))
+    return read ? 'billing.organization.read' : 'billing.allocation_rules.manage';
+  if (/^\/api\/billing\/(?:allocations|transfers)(?:\/|$)/.test(path))
+    return read ? 'billing.organization.read' : 'billing.credit.allocate';
   if (path === '/api/billing/workspace-addons' && read) return 'billing.organization.read';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';
   if (/^\/api\/settings\/workspace\/members(?:\/|$)/.test(path)) return 'workspace.members.manage';
