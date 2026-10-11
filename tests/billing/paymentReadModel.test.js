@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { listPaymentRequests, decodeCursor, encodeCursor, parseLimit } = require('../../src/billing/paymentReadModel');
+const { listPaymentRequests, decodeCursor, encodeCursor, parseLimit, parsePaymentFilter } = require('../../src/billing/paymentReadModel');
 
 const makeRow = (id, createdCursor, overrides = {}) => ({
   id, purpose: 'subscription', status: 'pending_verification',
@@ -87,4 +87,26 @@ test('classifies workspace addon payments without treating other invoices as wor
   assert.equal(page.rows[1].purpose, 'invoice');
   assert.equal(page.rows[2].workspaceAddonName, null);
   assert.equal(page.rows[2].purpose, 'topup');
+});
+
+test('payment type filtering happens before limit and cursor pagination', async () => {
+  const expected = [
+    { type: 'workspace', match: /p\.purpose='invoice' AND c\.id IS NOT NULL/, args: ['org_123', 11] },
+    { type: 'invoice', match: /p\.purpose='invoice' AND c\.id IS NULL/, args: ['org_123', 11] },
+    { type: 'topup', match: /p\.purpose=\?/, args: ['org_123', 'topup', 11] },
+    { type: 'subscription', match: /p\.purpose=\?/, args: ['org_123', 'subscription', 11] },
+    { type: 'all', match: /WHERE p\.org_id=\?\s+ORDER BY/, args: ['org_123', 11] },
+  ];
+  for (const item of expected) {
+    const pool = { async query(sql, args) {
+      assert.match(sql, item.match);
+      assert.deepEqual(args, item.args);
+      return { rows: [makeRow('payment-1', '2026-10-09 12:00:00.000001')] };
+    } };
+    const page = await listPaymentRequests('org_123', { type: item.type, limit: '10' }, { pool });
+    assert.equal(page.rows.length, 1);
+  }
+  for (const bad of ['invoice OR 1=1', '', 'some-other-type', [], null]) {
+    assert.throws(() => parsePaymentFilter(bad), { statusCode: 400 });
+  }
 });
