@@ -38,3 +38,21 @@ test('workspace and legacy profile APIs cannot change an existing industry',()=>
   expect(()=>policy.validateIndustryChange('lending','automotive')).toThrow(/industry is fixed/);
   expect(()=>policy.validateIndustryChange('lending','lending')).not.toThrow();
 });
+
+test('organization creation retains monthly Enterprise included-credit snapshot without minting a grant', () => {
+  const config = { ...single, planId:'enterprise', planVersion:7, pricing:{
+    ...pricing, monthlySubscriptionCreditsInr:2500.25,
+  }};
+  const result = policy.validatePolicy(config,'lending',['lending']);
+  expect(result.planId).toBe('enterprise');
+  expect(result.planVersion).toBe(7);
+  expect(result.pricing.monthlySubscriptionCreditsInr).toBe(2500.25);
+  expect(policy.effectivePolicy({settings:{workspacePolicy:result}},first).pricing.monthlySubscriptionCreditsInr).toBe(2500.25);
+});
+test('legacy plan policies default monthly included credit entitlement to zero', () => {
+  const result = policy.validatePolicy(single,'lending',['lending']);
+  expect(result.pricing.monthlySubscriptionCreditsInr).toBe(0);
+});
+test.each([-1, NaN, Infinity, 25.001, '2500'])('rejects invalid monthly credit allowance %s', value => {
+  expect(() => policy.validatePolicy({...single,pricing:{...pricing,monthlySubscriptionCreditsInr:value}},'lending',['lending'])).toThrow(/Monthly subscription credits/);
+});
