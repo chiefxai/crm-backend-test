@@ -28,7 +28,7 @@ test('an additional paid workspace requires approved add-on purchase',()=>{
   expect(offer.paymentRequired).toBe(true);
   expect(()=>policy.authorizeCreation(sameIndustry,two,{
     industry:'lending',pricingAcceptanceToken:offer.token,
-  })).toThrow(/approved add-on purchase/);
+  })).toThrow(/payment approved/);
   expect(policy.authorizeCreation(sameIndustry,two,{
     industry:'lending',pricingAcceptanceToken:offer.token,paidAddon:true,
   }).mode).toBe('same_industry');
@@ -62,7 +62,7 @@ test('legacy organizations retain structure even with unconfigured prices',()=>{
   expect(policy.effectivePolicy({industry:'lending'},first)).toMatchObject({...single,pricing:null});
   expect(policy.effectivePolicy({industry:'lending'},[...first,{industry:'automotive'}]).mode).toBe('mixed_industry');
   expect(policy.quote({...single,pricing:null},first)).toBeNull();
-  expect(()=>policy.authorizeCreation({...single,pricing:null},first,{industry:'lending'})).toThrow(/Configure/);
+  expect(()=>policy.authorizeCreation({...single,pricing:null},first,{industry:'lending'})).toThrow(/Upgrade the subscription/);
 });
 test('prices reject negatives, invalid values, and missing prices while allowing zero',()=>{
   expect(()=>policy.validatePolicy({...single,pricing:{...pricing,baseMonthlyInr:-1}},'lending',['lending'])).toThrow();
