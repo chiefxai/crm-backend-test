@@ -87,12 +87,20 @@ router.get("/workspaces", requireAuthIdentityOnly, async (req, res) => {
     const rows = [];
     for (const membership of workspaces) {
       if (membership.membershipId) await workspaceRepository.ensureDefaultMembership(membership.orgId, membership.membershipId);
+      // Organization administrators and owners oversee all workspaces by
+      // organization membership. This does not grant the Workspace Admin role
+      // or operational workspace permissions.
+      const organizationAdministrator = ['Owner','Organization Admin','Super Admin'].includes(membership.role);
       const available = multipleWorkspacesEnabled()
-        ? await workspaceRepository.listForMember(membership.orgId,membership.membershipId)
+        ? organizationAdministrator
+          ? await workspaceRepository.listForOrg(membership.orgId)
+          : await workspaceRepository.listForMember(membership.orgId,membership.membershipId)
         : [await workspaceRepository.getDefault(membership.orgId)];
       for (const workspace of available.filter(Boolean)) rows.push({
         ...membership,workspaceId:workspace.id,workspace,
-        workspaceRole:workspace.role || (workspace.isDefault ? membership.role : null),
+        // Administrative scope comes from role, not an invented workspace role.
+        workspaceRole:organizationAdministrator ? null
+          : workspace.role || (workspace.isDefault ? membership.role : null),
       });
     }
     res.json(rows);
