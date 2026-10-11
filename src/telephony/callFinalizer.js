@@ -480,6 +480,7 @@ async function finalizeCallRecord({
   // kept out of the conversational callback/enquiry pipeline so no-answer
   // and machine outcomes remain separate.
   const callerWordCount = countMeaningfulCallerWords(mergedTranscriptLines);
+  const telephonyContext = retryContext?.telephonyContext || null;
 
   let { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
 
@@ -914,6 +915,11 @@ async function finalizeCallRecord({
         // by leadId/workflowId alone.
         campaignId: retryContext?.campaignId || retryContext?.taskId || null,
         providerCallSid,
+        telephonyProviderKey: telephonyContext?.providerKey || null,
+        telephonyConnectorAccountId: telephonyContext?.connectorAccountId || null,
+        telephonyPhoneNumberId: telephonyContext?.phoneNumberId || null,
+        telephonyAssignmentId: telephonyContext?.assignmentId || null,
+        telephonyOwnerType: telephonyContext?.ownerType || null,
         callbackTime: callbackTimeToStore,
         callbackReason: callbackReasonToStore,
         callAnswered,
@@ -1073,9 +1079,11 @@ async function finalizeCallRecord({
   db.incrementAiMinutesUsed(orgId, durationSeconds).catch(err =>
     log.error(`❌ [${provider}] AI-minutes metering error:`, err.message)
   );
-  db.incrementPhoneCharges(orgId, durationSeconds).catch(err =>
-    log.error(`❌ [${provider}] Phone-charges metering error:`, err.message)
-  );
+  if (telephonyContext?.ownerType !== "organization") {
+    db.incrementPhoneCharges(orgId, durationSeconds).catch(err =>
+      log.error(`❌ [${provider}] Phone-charges metering error:`, err.message)
+    );
+  }
 
   // Cost-track the post-call agents (sentiment, follow-up, workflow-
   // answers, summary — whichever actually ran for this call) as their own
@@ -1104,6 +1112,7 @@ async function finalizeCallRecord({
       const callBillingService = require("../billing/callBillingService");
       await callBillingService.recordCallBilling({
         orgId, callId, providerKey: provider, durationSeconds,
+        telephonyOwnerType: telephonyContext?.ownerType || null,
       }).catch((err) => log.error(`❌ [${provider}] call billing record error:`, err.message));
     }).catch(err => log.error(`❌ [${provider}] post-call-agents usage tracking error:`, err.message));
   }
@@ -1111,6 +1120,7 @@ async function finalizeCallRecord({
   const callBillingService = require("../billing/callBillingService");
   callBillingService.recordCallBilling({
     orgId, callId, providerKey: provider, durationSeconds,
+    telephonyOwnerType: telephonyContext?.ownerType || null,
   }).catch((err) => log.error(`❌ [${provider}] call billing record error:`, err.message));
 
   return { fullTranscript, mergedTranscriptLines };

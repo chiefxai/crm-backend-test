@@ -52,7 +52,7 @@ async function getReservationMinutes(org) {
   }
 }
 
-async function estimateReservation(orgId, providerKey, knownOrg = null) {
+async function estimateReservation(orgId, providerKey, knownOrg = null, { telephonyOwnerType = null } = {}) {
   const org = knownOrg || await db.getOrg(orgId);
   if (!org) {
     const err = new Error("Organization not found");
@@ -66,7 +66,11 @@ async function estimateReservation(orgId, providerKey, knownOrg = null) {
   const [ai, call, selfManaged] = await Promise.all([
     costProviders.computeAiCost({ providerKey: "gemini", orgId, totalTokens: 0, durationSeconds: reservationMinutes * 60 }).catch(() => null),
     scope === "ai_and_call_provider" ? costProviders.computeCallCost({ providerKey, seconds: reservationMinutes * 60 }).catch(() => null) : null,
-    scope === "ai_and_call_provider" ? isSelfManagedProvider(orgId, providerKey) : false,
+    scope === "ai_and_call_provider"
+      ? (telephonyOwnerType === "organization" ? true
+        : telephonyOwnerType === "platform" ? false
+          : isSelfManagedProvider(orgId, providerKey))
+      : false,
   ]);
 
   let amount = 0;
@@ -80,7 +84,10 @@ async function estimateReservation(orgId, providerKey, knownOrg = null) {
   return { allowed: true, org, billingMethod: method, chargeScope: scope, amount, selfManaged };
 }
 
-async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
+async function authorizeOutboundCall(orgId, { providerKey = "vobiz", telephonyOwnerType = null } = {}) {
+  if (telephonyOwnerType != null && !["platform", "organization"].includes(telephonyOwnerType)) {
+    throw Object.assign(new Error("telephonyOwnerType must be platform or organization"), { statusCode: 400 });
+  }
   const scope = workspaceScope.scopeForOrg(orgId);
   const workspaceId = scope.workspaceId;
   const workspaceBudgetSetting = await require("../db/repositories/workspaceRepository").getActive(orgId, workspaceId);
@@ -91,7 +98,7 @@ async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
   if (!org) throw Object.assign(new Error("Organization not found"), { statusCode: 404 });
   const billingMethod = normalizeBillingMethod(org.billingMethod);
   if (billingMethod !== "recharge_based" && !hasWorkspaceBudget) return null;
-  const estimate = await estimateReservation(orgId, providerKey, org);
+  const estimate = await estimateReservation(orgId, providerKey, org, { telephonyOwnerType });
 
   const reservationId = crypto.randomUUID();
   const amount = estimate.billingMethod === "recharge_based" ? estimate.amount : 0;
@@ -171,9 +178,12 @@ async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
     }
 
     await client.query(
-      `INSERT INTO recharge_billing_reservations (id,org_id,workspace_id,workspace_estimated_amount_inr,billing_method,provider,estimated_amount_inr,status,created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'reserved',$8)`,
-      [reservationId, orgId, workspaceId, budgetEnabled ? estimate.amount : 0, estimate.billingMethod, providerKey, amount, new Date().toISOString()]
+      `INSERT INTO recharge_billing_reservations
+       (id,org_id,workspace_id,workspace_estimated_amount_inr,billing_method,provider,telephony_owner_type,telephony_charge_scope,estimated_amount_inr,status,created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'reserved',$10)`,
+      [reservationId, orgId, workspaceId, budgetEnabled ? estimate.amount : 0, estimate.billingMethod,
+        providerKey, telephonyOwnerType, telephonyOwnerType ? estimate.chargeScope : null,
+        amount, new Date().toISOString()]
     );
 
     await client.query("COMMIT");
@@ -192,6 +202,14 @@ async function attachProviderCall(reservationId, providerCallSid) {
     provider_call_sid: providerCallSid,
     updated_at: new Date().toISOString()
   }).eq("id", reservationId);
+}
+
+async function attachCallRouteToReservation(reservationId, callRouteId) {
+  if (!reservationId || !callRouteId) return;
+  await db.pool.query(
+    "UPDATE recharge_billing_reservations SET telephony_call_route_id=$1,updated_at=$2 WHERE id=$3",
+    [callRouteId, new Date().toISOString(), reservationId]
+  );
 }
 
 async function releaseReservation(reservationId) {
@@ -250,9 +268,15 @@ async function settleReservation({ reservationId, durationSeconds = 0, aiCostInr
     const org = orgResult.rows[0];
     if (!org) throw new Error("Organization not found while settling recharge reservation");
 
-    const scope = normalizeChargeScope(org.charge_scope);
+    const scope = reservation.telephony_owner_type
+      ? normalizeChargeScope(reservation.telephony_charge_scope)
+      : normalizeChargeScope(org.charge_scope);
     const providerKey = reservation.provider || "vobiz";
-    const selfManaged = scope === "ai_and_call_provider" && await isSelfManagedProvider(reservation.org_id, providerKey);
+    const selfManaged = scope === "ai_and_call_provider" && (
+      reservation.telephony_owner_type === "organization" ? true
+        : reservation.telephony_owner_type === "platform" ? false
+          : await isSelfManagedProvider(reservation.org_id, providerKey)
+    );
 
     const [aiCost, callCost] = await Promise.all([
       costProviders.computeAiCost({ providerKey: "gemini", orgId: reservation.org_id, totalTokens: 0, durationSeconds: Number(durationSeconds) || 0 }).catch(() => null),
@@ -389,6 +413,7 @@ async function settleReservationForCall({ orgId, providerCallSid, durationSecond
 module.exports = {
   authorizeOutboundCall,
   attachProviderCall,
+  attachCallRouteToReservation,
   releaseReservation,
   settleReservation,
   settleReservationForCall,
@@ -396,4 +421,5 @@ module.exports = {
   getBillingState,
   normalizeBillingMethod,
   normalizeChargeScope,
+  estimateReservation,
 };

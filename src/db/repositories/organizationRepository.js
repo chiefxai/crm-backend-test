@@ -38,6 +38,7 @@ function split(apiObj) {
 
 async function createOrganizationSetup({
   name, workspaceName, industry, subscriptionPlan, featureFlags, adminEmail, adminName, gcpProject, callProvider,
+  platformTelephonyNumberId = null, platformTelephonyAssignedBy = null,
   billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
   dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
   dataRetentionPolicyId = null, dataRetentionPolicyName = null,
@@ -70,6 +71,30 @@ async function createOrganizationSetup({
       VALUES (?,?,0,'UTC','active',?,?)`,
       [orgId,normalizedBillingMethod === 'recharge_based' ? 'prepaid' : 'postpaid',now,now]);
     await require("./workspaceRepository").ensureDefault(orgId, client);
+    let telephonyAssignment = null;
+    if (platformTelephonyNumberId) {
+      const { rows: numberRows } = await client.query(`
+        SELECT n.id, n.provider_key, n.inventory_status, n.provisioning_status, a.status AS connector_status
+        FROM telephony_phone_numbers n
+        INNER JOIN telephony_connector_accounts a ON a.id=n.connector_account_id
+        WHERE n.id=? AND a.owner_type='platform' AND a.owner_org_id IS NULL
+        FOR UPDATE`, [platformTelephonyNumberId]);
+      const number = numberRows[0];
+      if (!number) throw Object.assign(new Error('Platform telephony number was not found.'), { statusCode: 404, code: 'TELEPHONY_NUMBER_NOT_FOUND', expose: true });
+      if (number.connector_status !== 'active') throw Object.assign(new Error('The platform telephony connector is not active.'), { statusCode: 409, code: 'TELEPHONY_CONNECTOR_INACTIVE', expose: true });
+      if (number.inventory_status !== 'available') throw Object.assign(new Error('The platform telephony number is no longer available.'), { statusCode: 409, code: 'TELEPHONY_NUMBER_UNAVAILABLE', expose: true });
+      if (number.provisioning_status !== 'ready') throw Object.assign(new Error('The platform telephony number must be verified before assignment.'), { statusCode: 409, code: 'TELEPHONY_NUMBER_NOT_READY', expose: true });
+      const assignmentId = crypto.randomUUID();
+      await client.query(`INSERT INTO telephony_number_assignments
+        (id,phone_number_id,org_id,workspace_id,assigned_by,assigned_at)
+        VALUES (?,?,?,?,?,?)`, [assignmentId, number.id, orgId, orgId, platformTelephonyAssignedBy, now]);
+      const updateResult = await client.query(`UPDATE telephony_phone_numbers
+        SET inventory_status='assigned',updated_at=? WHERE id=? AND inventory_status='available'`, [now, number.id]);
+      if (updateResult.affectedRows !== undefined && updateResult.affectedRows !== 1) {
+        throw Object.assign(new Error('The platform telephony number is no longer available.'), { statusCode: 409, code: 'TELEPHONY_NUMBER_UNAVAILABLE', expose: true });
+      }
+      telephonyAssignment = { id: assignmentId, phoneNumberId: number.id, providerKey: number.provider_key, orgId, workspaceId: orgId };
+    }
     await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
     if (callProvider) {
       // The route checks number availability, but a concurrent setup can
@@ -102,7 +127,7 @@ async function createOrganizationSetup({
 
     await client.query("COMMIT");
     const orgResult=await client.query(`SELECT * FROM organizations WHERE id = $1`,[orgId]); const cloudResult=await client.query(`SELECT * FROM organization_cloud_projects WHERE id = $1`,[cloudProjectId]);
-    return {org:toApi(orgResult.rows[0]),cloudProject:toApiCloudProject(cloudResult.rows[0]),memberId};
+    return {org:toApi(orgResult.rows[0]),cloudProject:toApiCloudProject(cloudResult.rows[0]),memberId,telephonyAssignment};
   } catch(err){ try{await client.query("ROLLBACK");}catch(_){} throw err; } finally{client.release();}
 }
 

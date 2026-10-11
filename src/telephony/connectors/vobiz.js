@@ -28,6 +28,10 @@ wss.on("connection", (ws, req) => startSession(vobiz.handleVobizSession, ws, req
 wssCascaded.on("connection", (ws, req) => startSession(vobiz.handleVobizSessionCascaded, ws, req));
 module.exports = {
   name: "vobiz", label: "Vobiz.ai",
+  credentialSchema: [
+    { key: "authId", label: "Auth ID", type: "text", required: true },
+    { key: "authToken", label: "Auth Token", type: "secret", required: true },
+  ],
   capabilities: { inbound: true, outbound: true, recording: true, streaming: true, dtmf: true, numberProvisioning: true, machineDetection: true },
   registerBackgroundWorkers() { vobiz.registerPostCallWorker(); },
   normalizeCallStatus, normalizeCallIdentity, normalizeWebhookEvent, normalizeAudio, normalizeRecording,

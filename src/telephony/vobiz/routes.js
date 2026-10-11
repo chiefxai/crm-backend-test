@@ -12,6 +12,8 @@ const { requireVobizWebhook } = require("./vobizWebhookAuth");
 const channelsEngine = require("../../channels/engine");
 const { getLogger } = require("../../observability/logger");
 const log = getLogger("routes.vobiz");
+const connectorCallRoutingEnabled = () => process.env.TELEPHONY_CONNECTOR_ACCOUNTS_ENABLED === "true"
+  && process.env.TELEPHONY_CONNECTOR_CALL_ROUTING_ENABLED === "true";
 const {
   vobizCallNumbers, vobizCallCallee, vobizCallOrgs, vobizCallWorkspaces, vobizCallDirection,
   vobizCallUuidToInternalId, vobizMachineDetectedCalls,
@@ -47,10 +49,31 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
     // safe call alias: separate workspaces can call the same person at once.
     const aliases = [CallUUID, ...collectVobizCallIds(req.body), ...collectVobizCallIds(req.query)];
     aliasVobizCallState(aliases);
+    const callRoute = req.telephonyCallRoute || null;
+    if (callRoute) {
+      const routeRepository = require('../callRouteRepository');
+      await routeRepository.attachProviderCallIds(callRoute.id, 'vobiz', aliases);
+      if (isHangupEvent) await routeRepository.updateCallRouteStatus(callRoute.id, 'ended');
+      else await routeRepository.activateCallRoute(callRoute.id);
+      const telephonyContext = {
+        providerKey: callRoute.providerKey, connectorAccountId: callRoute.connectorAccountId,
+        phoneNumberId: callRoute.phoneNumberId, assignmentId: callRoute.assignmentId,
+        ownerType: callRoute.ownerType, credentialVersion: callRoute.credentialVersion,
+      };
+      const routeRetryContext = {
+        provider: callRoute.providerKey, billingReservationId: callRoute.billingReservationId,
+        telephonyRouteId: callRoute.id, telephonyContext,
+        ...(callRoute.callContext || {}),
+      };
+      for (const alias of aliases) {
+        vobizCallRetryContext.set(alias, routeRetryContext);
+        setTimeout(() => vobizCallRetryContext.delete(alias), 1800000);
+      }
+    }
     let owner = vobizCallOrgs.has(CallUUID) ? {
       orgId: vobizCallOrgs.get(CallUUID),
       workspaceId: vobizCallWorkspaces.get(CallUUID) || vobizCallOrgs.get(CallUUID),
-    } : null;
+    } : callRoute ? { orgId: callRoute.orgId, workspaceId: callRoute.workspaceId } : null;
     if (!owner) owner = await db.findWorkspaceForVobizCallIds(aliases);
     if (!owner) {
       const inboundOwner = To ? await db.findWorkspaceForNumber(To) : null;
@@ -61,6 +84,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
       owner = inboundOwner || outboundOwner;
       if (owner) vobizCallDirection.set(CallUUID, inboundOwner ? "inbound" : "outbound");
     }
+    if (callRoute) vobizCallDirection.set(CallUUID, callRoute.direction);
     if (!owner || (!isHangupEvent && !await workspaces.getActive(owner.orgId, owner.workspaceId))) return res.status(403).send("Unable to resolve active workspace");
     return await runWithScope(owner, async () => {
       vobizCallOrgs.set(CallUUID, owner.orgId);
@@ -118,7 +142,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
       // Previously this lookup happened after the Hangup finalizer, so inbound
       // Hangup webhooks saw no orgId and never created call_logs/recordings.
       let hangupOrgId = (isHangupEvent && CallUUID)
-        ? (vobizCallOrgs.get(CallUUID) || null)
+        ? (vobizCallOrgs.get(CallUUID) || callRoute?.orgId || null)
         : null;
 
       if (isHangupEvent && CallUUID) {
@@ -166,10 +190,19 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
             // recording, transcript, busy-callback, or enquiry to attach, and
             // the campaign treats Completed as "this lead is done".
             const status = isMachineDetected ? "Answering Machine" : "No Answer";
-            const fallbackId = `call_vobiz_fallback_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            const fallbackId = callRoute
+              ? `call_vobiz_fallback_${callRoute.id}`
+              : `call_vobiz_fallback_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            const routeRepository = callRoute ? require('../callRouteRepository') : null;
+            if (routeRepository && !(await routeRepository.claimFallbackCallLog(callRoute.id, fallbackId))) {
+              log.info(`⏭️ Vobiz Hangup fallback already claimed for route ${callRoute.id}`);
+              return;
+            }
 
-            db.create("calllogs", orgId, {
+            try {
+              const savedLog = await db.create("calllogs", orgId, {
               id: fallbackId,
+              workspaceId: callRoute?.workspaceId || vobizCallWorkspaces.get(CallUUID) || orgId,
               leadName: calleeNumber,
               callerNumber: calleeNumber,
               duration,
@@ -177,13 +210,27 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
               direction: vobizCallDirection.get(CallUUID) || "outbound",
               createdAt: new Date().toISOString(),
               providerCallSid: CallUUID,
+              telephonyProviderKey: callRoute?.providerKey || null,
+              telephonyConnectorAccountId: callRoute?.connectorAccountId || null,
+              telephonyPhoneNumberId: callRoute?.phoneNumberId || null,
+              telephonyAssignmentId: callRoute?.assignmentId || null,
+              telephonyOwnerType: callRoute?.ownerType || null,
               ...db.computeRetryFields(attemptNumber, retryContext?.retryPolicy || db.DEFAULT_RETRY_POLICY, calleeNumber),
               retryContext
-            }).then((savedLog) => {
+              });
               global.broadcastLog(`📞 Vobiz call ended without a media session ever registering (${status}): ${calleeNumber}`, {
                 type: "call_completed", orgId, callLog: savedLog, providerCallSid: CallUUID
               });
-            }).catch((err) => log.error("❌ Failed to save Vobiz fallback call_logs row:", err.message));
+            } catch (err) {
+              if (routeRepository) await routeRepository.releaseFallbackCallLogClaim(callRoute.id, fallbackId).catch(() => {});
+              log.error("❌ Failed to save Vobiz fallback call_logs row:", err.message);
+              return;
+            }
+            if (retryContext?.billingReservationId) {
+              require('../../crm/rechargeBilling').settleReservation({
+                reservationId: retryContext.billingReservationId, durationSeconds: duration,
+              }).catch((err) => log.error(`Failed to settle fallback billing reservation ${retryContext.billingReservationId}:`, err.message));
+            }
           })
           .catch((err) => log.error("❌ Vobiz Hangup-webhook finalize failed:", err.message));
       }
@@ -309,6 +356,20 @@ router.post("/call", requireAuth, async (req, res) => {
 
   try {
     const { triggerVobizOutboundCall } = require("./vobizProxy");
+    let telephonyContext = null;
+    if (connectorCallRoutingEnabled() && from) {
+      const normalizedFrom = String(from).replace(/(?!^\+)[^0-9]/g, "");
+      try {
+        telephonyContext = await require('../connectorCredentialResolver').resolveAssignedNumber({
+          orgId: req.orgId, workspaceId: req.workspaceId, phoneNumberE164: normalizedFrom,
+        });
+        if (telephonyContext.providerKey !== 'vobiz') {
+          return res.status(409).json({ error: 'This call endpoint only supports Vobiz assigned numbers.' });
+        }
+      } catch (resolveError) {
+        if (resolveError.code !== 'ASSIGNMENT_NOT_FOUND') throw resolveError;
+      }
+    }
     let effectiveRetryPolicy = retryPolicy || null;
     if (taskId && !effectiveRetryPolicy) {
       const tasks = await db.list("dialertasks", req.orgId);
@@ -317,7 +378,7 @@ router.post("/call", requireAuth, async (req, res) => {
     }
     const result = await triggerVobizOutboundCall(req.orgId, phoneNumber, {
       questions, from, language, assignedContact, baseUrl, starhealthEnabled: !!starhealthEnabled, agentId, taskId, leadId,
-      retryPolicy: effectiveRetryPolicy,
+      retryPolicy: effectiveRetryPolicy, telephonyContext, workspaceId: req.workspaceId,
     });
     res.json(result);
   } catch (err) {
@@ -331,8 +392,10 @@ router.post("/hangup", requireAuth, async (req, res) => {
   const { callSid } = req.body;
   if (!callSid) return res.status(400).json({ error: "Missing callSid in request body" });
 
-  const callOrgId = vobizCallOrgs.get(callSid);
-  if (!callOrgId || callOrgId !== req.orgId || (vobizCallWorkspaces.get(callSid) || callOrgId) !== req.workspaceId) {
+  const callRoute = await require('../callRouteRepository').getCallRouteByProviderCallId('vobiz', callSid).catch(() => null);
+  const callOrgId = vobizCallOrgs.get(callSid) || callRoute?.orgId;
+  const callWorkspaceId = vobizCallWorkspaces.get(callSid) || callRoute?.workspaceId || callOrgId;
+  if (!callOrgId || callOrgId !== req.orgId || callWorkspaceId !== req.workspaceId) {
     return res.status(403).json({ error: "This active call does not belong to your workspace." });
   }
 
@@ -345,9 +408,19 @@ router.post("/hangup", requireAuth, async (req, res) => {
   // get caught, and turn into a 500 the frontend just logged to console —
   // so clicking "Disconnect Call" on a real, connected call silently did
   // nothing for any org using its own channel instead of the shared env.
-  const ownChannel = await channelsEngine.getChannel(req.orgId, "vobiz").catch(() => null);
-  const authId = ownChannel?.config?.authId;
-  const authToken = ownChannel?.config?.authToken;
+  let authId;
+  let authToken;
+  if (callRoute) {
+    const owner = { ownerType: callRoute.ownerType, ownerOrgId: callRoute.ownerType === 'organization' ? callRoute.orgId : null };
+    const account = await require('../connectorAccountService').getAccount(callRoute.connectorAccountId, owner);
+    const credentials = require('../../security/channelCredentials').decryptJson(account?.credential_ciphertext);
+    authId = credentials?.authId;
+    authToken = credentials?.authToken;
+  } else {
+    const ownChannel = await channelsEngine.getChannel(req.orgId, "vobiz").catch(() => null);
+    authId = ownChannel?.config?.authId;
+    authToken = ownChannel?.config?.authToken;
+  }
   if (!authId || !authToken) return res.status(500).json({ error: "Vobiz credentials are not configured for this organization. Configure the call provider in the platform admin organization settings." });
 
   try {

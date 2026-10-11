@@ -9,14 +9,20 @@ function getExpectedVobizWebhookSecret() {
 }
 
 /** Full URL to paste into Vobiz Answer / Hangup URL (includes shared secret query param). */
-function buildVobizIncomingWebhookUrl(baseUrl) {
+function buildVobizIncomingWebhookUrl(baseUrl, { routeId = null, routeToken = null } = {}) {
   const root = String(baseUrl || process.env.PUBLIC_URL || process.env.PUBLIC_API_BASE_URL || "")
     .trim()
     .replace(/\/$/, "");
   if (!root) return null;
+  const params = new URLSearchParams();
   const secret = getExpectedVobizWebhookSecret();
-  if (!secret) return `${root}/api/vobiz/incoming`;
-  return `${root}/api/vobiz/incoming?webhook_secret=${encodeURIComponent(secret)}`;
+  if (secret) params.set('webhook_secret', secret);
+  if (routeId && routeToken) {
+    params.set('telephony_route_id', String(routeId));
+    params.set('telephony_route_token', String(routeToken));
+  }
+  const query = params.toString();
+  return `${root}/api/vobiz/incoming${query ? `?${query}` : ''}`;
 }
 
 function extractSuppliedVobizWebhookSecret(req) {
@@ -44,6 +50,21 @@ function webhookSharedSecretOk(req) {
 }
 
 async function vobizSignatureOk(req) {
+  const routeId = req.query?.telephony_route_id || req.body?.telephony_route_id;
+  if (routeId) {
+    const route = await require('../callRouteRepository').getCallRouteById(routeId);
+    if (!route || route.providerKey !== 'vobiz') return false;
+    const routeToken = req.query?.telephony_route_token || req.body?.telephony_route_token;
+    if (!await require('../callRouteRepository').verifyCallRouteToken(routeId, routeToken)) return false;
+    const owner = { ownerType: route.ownerType, ownerOrgId: route.ownerType === 'organization' ? route.orgId : null };
+    const account = await require('../connectorAccountService').getAccount(route.connectorAccountId, owner).catch(() => null);
+    if (!account?.credential_ciphertext) return false;
+    const { decryptJson } = require('../../security/channelCredentials');
+    const credentials = decryptJson(account.credential_ciphertext);
+    if (!verifyVobizWebhookSignature(req, credentials?.authToken)) return false;
+    req.telephonyCallRoute = route;
+    return true;
+  }
   const channelsEngine = require("../../channels/engine");
   const to = req.body?.To || req.query?.To;
   const from = req.body?.From || req.query?.From;
@@ -63,20 +84,26 @@ async function vobizSignatureOk(req) {
   return false;
 }
 
+async function attachVobizCallRoute(req) {
+  const routeId = req.query?.telephony_route_id || req.body?.telephony_route_id;
+  if (!routeId) return true;
+  const route = await require('../callRouteRepository').getCallRouteById(routeId);
+  if (!route || route.providerKey !== 'vobiz') return false;
+  const routeToken = req.query?.telephony_route_token || req.body?.telephony_route_token;
+  if (!await require('../callRouteRepository').verifyCallRouteToken(routeId, routeToken)) return false;
+  req.telephonyCallRoute = route;
+  return true;
+}
+
 async function isVobizWebhookAuthorized(req) {
-  if (webhookSharedSecretOk(req)) return true;
+  if (webhookSharedSecretOk(req)) return attachVobizCallRoute(req);
   if (await vobizSignatureOk(req)) return true;
   return false;
 }
 
 async function requireVobizWebhook(req, res, next) {
   const expected = getExpectedVobizWebhookSecret();
-  if (!expected) {
-    if (process.env.NODE_ENV === "production") {
-      return res.status(503).json({ error: "Vobiz webhook authentication is not configured" });
-    }
-    return next();
-  }
+  if (!expected && process.env.NODE_ENV !== "production") return next();
 
   try {
     if (await isVobizWebhookAuthorized(req)) return next();
@@ -84,6 +111,8 @@ async function requireVobizWebhook(req, res, next) {
     log.error("Vobiz webhook auth error:", err.message);
     return res.status(500).json({ error: "Vobiz webhook authentication failed" });
   }
+
+  if (!expected) return res.status(503).json({ error: "Vobiz webhook authentication is not configured" });
 
   const hasSig = Boolean(
     req.get("X-Vobiz-Signature-V3")
@@ -107,4 +136,5 @@ module.exports = {
   extractSuppliedVobizWebhookSecret,
   getExpectedVobizWebhookSecret,
   isVobizWebhookAuthorized,
+  attachVobizCallRoute,
 };

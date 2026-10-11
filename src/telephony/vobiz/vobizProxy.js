@@ -127,11 +127,30 @@ for (const voice of Object.values(VOICE_MAP)) {
 // hang up on its own once a conversation naturally wraps up, instead of
 // leaving every call to end only when the caller hangs up first.
 async function hangupVobizCall(callId, orgId) {
+  const callRoute = await require('../callRouteRepository')
+    .getCallRouteByProviderCallId('vobiz', callId).catch(() => null);
+  if (callRoute && callRoute.orgId !== orgId) {
+    log.warn(`Ignoring Vobiz hangup for call ${callId}: persisted route belongs to another organization`);
+    return;
+  }
   // Prefer this org's own connected Vobiz account over the single shared
   // server-wide credentials — same reasoning as the /api/vobiz/call route.
-  const ownChannel = orgId ? await channelsEngine.getChannel(orgId, "vobiz").catch(() => null) : null;
-  const authId = ownChannel?.config?.authId;
-  const authToken = ownChannel?.config?.authToken;
+  let ownChannel = null;
+  let routeCredentialSource = false;
+  let authId;
+  let authToken;
+  if (callRoute) {
+    const owner = { ownerType: callRoute.ownerType, ownerOrgId: callRoute.ownerType === 'organization' ? callRoute.orgId : null };
+    const account = await require('../connectorAccountService').getAccount(callRoute.connectorAccountId, owner);
+    const credentials = require('../../security/channelCredentials').decryptJson(account?.credential_ciphertext);
+    authId = credentials?.authId;
+    authToken = credentials?.authToken;
+    routeCredentialSource = true;
+  } else {
+    ownChannel = orgId ? await channelsEngine.getChannel(orgId, "vobiz").catch(() => null) : null;
+    authId = ownChannel?.config?.authId;
+    authToken = ownChannel?.config?.authToken;
+  }
   // Diagnostic: "call not found" from Vobiz's DELETE API on a still-active
   // call usually means these credentials belong to a different Vobiz
   // account than the one that actually placed/received this call — log
@@ -371,12 +390,12 @@ function clearRingLiveSessionAliases(entry) {
   }
 }
 
-function rememberOutboundCall(ids, { orgId, direction, attemptNumber, retryContext, fromNumber, toNumber }) {
+function rememberOutboundCall(ids, { orgId, workspaceId, direction, attemptNumber, retryContext, fromNumber, toNumber }) {
   const all = uniqueCallIds(...ids);
   for (const id of all) {
     if (orgId) {
       rememberMap(vobizCallOrgs, id, orgId);
-      rememberMap(vobizCallWorkspaces, id, scopeForOrg(orgId).workspaceId);
+      rememberMap(vobizCallWorkspaces, id, workspaceId || scopeForOrg(orgId).workspaceId);
     }
     if (direction) rememberMap(vobizCallDirection, id, direction);
     if (attemptNumber) rememberMap(vobizCallAttemptNumber, id, attemptNumber);
@@ -593,14 +612,20 @@ function scheduleInboundVobizPrewarm(callId, orgId, callerPhone, didNumber) {
   rememberMap(vobizPrewarmedSetup, callId, promise);
 }
 
-async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null, campaignId = null, retryPolicy = null, autoDialRunId = null } = {}) {
+async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null, campaignId = null, retryPolicy = null, autoDialRunId = null, telephonyContext = null, workspaceId = null } = {}) {
   const channelsEngine = require("../../channels/engine");
   const billingEngine = require("../../crm/billingEngine");
   const rechargeBilling = require("../../crm/rechargeBilling");
   const complianceEngine = require("../../crm/complianceEngine");
 
   let fromNumber = null;
-  if (from) {
+  if (telephonyContext) {
+    if (telephonyContext.providerKey !== "vobiz" || telephonyContext.orgId !== orgId
+      || telephonyContext.workspaceId !== (workspaceId || scopeForOrg(orgId).workspaceId)) {
+      throw Object.assign(new Error("Assigned telephony number does not match the active workspace"), { statusCode: 403 });
+    }
+    fromNumber = telephonyContext.phoneNumberE164;
+  } else if (from) {
     const orgNumbers = await db.list("numbers", orgId).catch(() => []);
     const match = orgNumbers.find((n) => n.number === from && /vobiz/i.test(n.provider || ""));
     if (!match) throw new Error(`"${from}" is not a Vobiz number registered for this org (Settings > Numbers).`);
@@ -640,9 +665,9 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
 
   let billingReservation = null;
 
-  const ownChannel = await channelsEngine.getChannel(orgId, "vobiz").catch(() => null);
-  const authId = ownChannel?.config?.authId;
-  const authToken = ownChannel?.config?.authToken;
+  const ownChannel = telephonyContext ? null : await channelsEngine.getChannel(orgId, "vobiz").catch(() => null);
+  const authId = telephonyContext?.credentials?.authId || ownChannel?.config?.authId;
+  const authToken = telephonyContext?.credentials?.authToken || ownChannel?.config?.authToken;
   const vobizNumber = fromNumber || ownChannel?.config?.phoneNumber;
 
   if (!authId || !authToken || !vobizNumber) {
@@ -653,14 +678,37 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   }
 
   try {
-    billingReservation = await rechargeBilling.authorizeOutboundCall(orgId, { providerKey: "vobiz" });
+    billingReservation = await rechargeBilling.authorizeOutboundCall(orgId, {
+      providerKey: "vobiz", telephonyOwnerType: telephonyContext?.ownerType || null,
+    });
   } catch (err) {
     log.warn(`⚠️ Recharge billing blocked Vobiz call for org ${orgId}: ${err.message}`);
     throw err;
   }
 
+  let callRoute = null;
+  if (telephonyContext) {
+    try {
+      callRoute = await require('../callRouteRepository').createCallRoute({
+        orgId, workspaceId: telephonyContext.workspaceId, providerKey: telephonyContext.providerKey,
+        connectorAccountId: telephonyContext.connectorAccountId, phoneNumberId: telephonyContext.phoneNumberId,
+        assignmentId: telephonyContext.assignmentId, ownerType: telephonyContext.ownerType,
+        direction: 'outbound', credentialVersion: telephonyContext.credentialVersion,
+        callContext: { taskId, leadId, campaignId: campaignId || taskId || null, autoDialRunId, language,
+          agentId, starhealthEnabled, retryPolicy, questions, assignedContact },
+      });
+      if (billingReservation) await rechargeBilling.attachCallRouteToReservation(billingReservation.id, callRoute.id);
+    } catch (error) {
+      if (billingReservation) await rechargeBilling.releaseReservation(billingReservation.id).catch(() => {});
+      if (callRoute) await require('../callRouteRepository').updateCallRouteStatus(callRoute.id, 'failed', 'BILLING_ROUTE_LINK_FAILED').catch(() => {});
+      throw error;
+    }
+  }
+
   const { buildVobizIncomingWebhookUrl } = require("./vobizWebhookAuth");
-  const callbackUrl = buildVobizIncomingWebhookUrl(baseUrl) || `${baseUrl}/api/vobiz/incoming`;
+  const callbackUrl = buildVobizIncomingWebhookUrl(baseUrl, {
+    routeId: callRoute?.id, routeToken: callRoute?.callbackToken,
+  }) || `${baseUrl}/api/vobiz/incoming`;
   const machineDetectionUrl = `${baseUrl}/api/vobiz/machine-detection`;
 
   // Numbers stored via Settings > Numbers can carry spaces/dashes exactly
@@ -708,6 +756,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     if (billingReservation) {
       await rechargeBilling.releaseReservation(billingReservation.id).catch(() => {});
     }
+    if (callRoute) await require('../callRouteRepository').updateCallRouteStatus(callRoute.id, 'failed', 'PROVIDER_REQUEST_FAILED').catch(() => {});
     log.error("❌ Vobiz outbound call request failed:", err.message);
     throw err;
   }
@@ -721,6 +770,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     const rawErr = data.error || data.message || `Vobiz API error (Status: ${response.status})`;
     const errText = typeof rawErr === "string" ? rawErr : JSON.stringify(rawErr);
     if (billingReservation) await rechargeBilling.releaseReservation(billingReservation.id).catch(() => {});
+    if (callRoute) await require('../callRouteRepository').updateCallRouteStatus(callRoute.id, 'failed', 'PROVIDER_REJECTED').catch(() => {});
     log.error(`❌ Vobiz outbound call API rejected it — status ${response.status}, body:`, JSON.stringify(data));
     throw new Error(errText);
   }
@@ -733,10 +783,15 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   if (billingReservation) {
     await rechargeBilling.attachProviderCall(billingReservation.id, responseCallIds[0] || null);
   }
+  if (callRoute) {
+    const routeRepository = require('../callRouteRepository');
+    if (responseCallIds.length) await routeRepository.attachProviderCallIds(callRoute.id, 'vobiz', responseCallIds);
+    await routeRepository.activateCallRoute(callRoute.id);
+  }
   const callSids = rememberOutboundCall(
     responseCallIds.length ? responseCallIds : [`vobiz_outbound_${Date.now()}`],
     {
-      orgId,
+      orgId, workspaceId: telephonyContext?.workspaceId || workspaceId,
       direction: "outbound",
       attemptNumber,
       retryContext: {
@@ -745,6 +800,12 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
         provider: "vobiz",
         retryPolicy: retryPolicy || null,
         billingReservationId: billingReservation?.id || null,
+        telephonyContext: telephonyContext ? {
+          providerKey: telephonyContext.providerKey, connectorAccountId: telephonyContext.connectorAccountId,
+          phoneNumberId: telephonyContext.phoneNumberId, assignmentId: telephonyContext.assignmentId,
+          ownerType: telephonyContext.ownerType, credentialVersion: telephonyContext.credentialVersion,
+        } : null,
+        telephonyRouteId: callRoute?.id || null,
       },
       fromNumber: sanitizedFrom,
       toNumber: sanitizedTo,
@@ -2935,7 +2996,7 @@ async function extractContactAndTrigger(
 }
 
 module.exports = {
-  phoneCacheKey, handleVobizSession, vobizCallNumbers, vobizCallCallee, vobizCallQuestions, vobizCallTaskConfig, vobizCallOrgs, vobizCallWorkspaces, vobizCallDirection, vobizCallUuidToInternalId, vobizMachineDetectedCalls, vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, triggerVobizOutboundCall: (orgId, phone, options) => runWithScope(scopeForOrg(orgId), () => triggerVobizOutboundCall(orgId, phone, options)), vobizPrewarmedClients, scheduleInboundVobizPrewarm,
+  phoneCacheKey, handleVobizSession, vobizCallNumbers, vobizCallCallee, vobizCallQuestions, vobizCallTaskConfig, vobizCallOrgs, vobizCallWorkspaces, vobizCallDirection, vobizCallUuidToInternalId, vobizMachineDetectedCalls, vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, triggerVobizOutboundCall: (orgId, phone, options = {}) => runWithScope({ orgId, workspaceId: options.workspaceId || scopeForOrg(orgId).workspaceId }, () => triggerVobizOutboundCall(orgId, phone, options)), vobizPrewarmedClients, scheduleInboundVobizPrewarm,
   aliasVobizCallState, collectVobizCallIds, findCachedCallIdByPhone, syncDialerProviderCallSid,
   // Exported additionally so services/vobizPipeline.js (STT->LLM->TTS engine)
   // can reuse the exact same tool-call handlers, post-call processing, and

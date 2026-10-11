@@ -29,11 +29,22 @@ const log = getLogger("routes.platform");
 
 const router = express.Router();
 router.use(requireAuthIdentityOnly, requirePlatformAdmin);
+router.use("/telephony", require("./telephonyConnectors").createPlatformRouter());
 
 function handleError(err, res) {
   const status = err.statusCode || 500;
   if (status >= 500) log.error("❌ platformAdminRoutes:", err.message);
   res.status(status).json({ error: safeErrorMessage(err) });
+}
+
+function validatePlatformTelephonySelection({ numberId, callProvider, chargeScope, enabled }) {
+  if (numberId == null) return null;
+  if (!enabled) throw Object.assign(new Error('Platform telephony number allocation is not enabled.'), { statusCode: 409 });
+  if (chargeScope !== 'ai_and_call_provider') throw Object.assign(new Error('A platform telephony number can only be assigned when Charge Scope is AI + Call Provider.'), { statusCode: 400 });
+  if (callProvider != null) throw Object.assign(new Error('Choose either existing call-provider credentials or a platform telephony number, not both.'), { statusCode: 400 });
+  const normalized = String(numberId).trim();
+  if (!normalized) throw Object.assign(new Error('A platform telephony number ID is required.'), { statusCode: 400 });
+  return normalized;
 }
 
 
@@ -350,7 +361,7 @@ router.post("/organizations", async (req, res) => {
   try {
     const {
       name, workspaceName, industry, subscriptionPlan: requestedPlan, workspacePlanId, workspacePlanVersion, adminEmail, adminName, featureFlags,
-      gcpProjectMode = "existing", gcpProject, callProvider,
+      gcpProjectMode = "existing", gcpProject, callProvider, platformTelephonyNumberId = null,
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
       dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null, retentionPolicyId, retentionPolicyVersion,
       initialWorkspaces: requestedWorkspaces = [], firstBranchName = null
@@ -411,10 +422,17 @@ router.post("/organizations", async (req, res) => {
     // be created without a Vobiz number/channel.
     let provider = null;
     let validatedCallProvider = null;
+    const validatedPlatformTelephonyNumberId = validatePlatformTelephonySelection({
+      numberId: platformTelephonyNumberId,
+      callProvider,
+      chargeScope,
+      enabled: process.env.TELEPHONY_CONNECTOR_ACCOUNTS_ENABLED === 'true',
+    });
     if (chargeScope === "ai_and_call_provider") {
-      if (!callProvider || typeof callProvider !== "object") {
+      if (!validatedPlatformTelephonyNumberId && (!callProvider || typeof callProvider !== "object")) {
         return res.status(400).json({ error: "Call provider configuration is required when Charge Scope is AI + Call Provider." });
       }
+      if (!validatedPlatformTelephonyNumberId) {
       provider = String(callProvider.provider || "vobiz").trim().toLowerCase();
       if (provider !== "vobiz") {
         return res.status(400).json({ error: "Unsupported call provider. Currently supported: vobiz." });
@@ -434,6 +452,7 @@ router.post("/organizations", async (req, res) => {
         return res.status(409).json({ error: "This call-provider number is already connected to another organization." });
       }
       validatedCallProvider = { provider, authId, authToken, phoneNumber };
+      }
     }
 
     // The service-account JSON is the source of truth for the Google Cloud
@@ -519,7 +538,7 @@ router.post("/organizations", async (req, res) => {
     const effectiveRetentionOverrides = selectedRetention ? selectedRetention.retention : dataRetentionOverrides;
     const effectiveBackup = selectedRetention ? selectedRetention.backup : backup;
 
-    const { org, cloudProject, memberId } = await db.createOrganizationSetup({
+    const { org, cloudProject, memberId, telephonyAssignment } = await db.createOrganizationSetup({
       name, workspaceName, industry: workspacePolicy.primaryIndustry, subscriptionPlan,
       workspacePolicy, initialWorkspaces, firstBranchName: firstBranchName?.trim() || null,
       featureFlags: orgFeatureFlags,
@@ -531,6 +550,8 @@ router.post("/organizations", async (req, res) => {
         credentialsEncrypted: validatedGcp.credentialsEncrypted,
       },
       callProvider: validatedCallProvider,
+      platformTelephonyNumberId: validatedPlatformTelephonyNumberId,
+      platformTelephonyAssignedBy: req.userId || null,
       billingMethod,
       chargeScope,
       initialRechargeAmountInr: initialRecharge,
@@ -604,6 +625,8 @@ router.post("/organizations", async (req, res) => {
         name, workspaceName, adminEmail, gcpProjectMode: "existing", gcpProjectId: validatedGcp.project.projectId,
         callProvider: validatedCallProvider?.provider || null,
         callProviderPhoneNumber: validatedCallProvider?.phoneNumber || null,
+        platformTelephonyNumberId: validatedPlatformTelephonyNumberId,
+        telephonyAssignmentId: telephonyAssignment?.id || null,
         billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge, workspacePolicy, initialWorkspaceCount: initialWorkspaces.length + 1, retentionPolicyId: selectedRetention?.policyId || null
       });
 
@@ -616,6 +639,7 @@ router.post("/organizations", async (req, res) => {
         status: cloudProject.status,
       },
       adminEmailSent: !!(adminEmail && tempPassword),
+      ...(telephonyAssignment ? { telephonyAssignment } : {}),
       ...(initialSubscriptionPurchase ? { initialSubscriptionPurchase } : {}),
     });
   } catch (err) {
@@ -963,4 +987,5 @@ router.use(require('../billing/platformPaymentDecisionRouter').router);
 router.use(require('../billing/subscriptionGraceRouter').createPlatformSubscriptionGraceRouter());
 router.use(require('../billing/subscriptionReconciliationRouter').createSubscriptionReconciliationRouter());
 
+router.validatePlatformTelephonySelection = validatePlatformTelephonySelection;
 module.exports = router;
