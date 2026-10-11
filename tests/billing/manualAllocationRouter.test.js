@@ -1,3 +1,4 @@
+jest.mock('../../src/db/pool', () => ({ getPool: jest.fn() }));
 jest.mock('../../src/middleware/auth', () => ({
   requireAuth: (req, _res, next) => {
     const role=req.get('X-Test-Role') || 'Member';
