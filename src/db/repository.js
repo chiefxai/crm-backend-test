@@ -2820,10 +2820,13 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
     ];
 
     const { rows } = await client.query(
-      `SELECT DISTINCT TABLE_NAME AS table_name
-         FROM information_schema.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND COLUMN_NAME = 'org_id'`
+      `SELECT DISTINCT c.TABLE_NAME AS table_name
+         FROM information_schema.COLUMNS c
+         JOIN information_schema.TABLES t
+           ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME
+        WHERE c.TABLE_SCHEMA = DATABASE()
+          AND c.COLUMN_NAME = 'org_id'
+          AND t.TABLE_TYPE = 'BASE TABLE'`
     );
     const existing = (rows || []).map(row => row.table_name);
     const { rows: foreignKeys } = await client.query(
