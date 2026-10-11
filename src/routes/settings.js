@@ -497,8 +497,8 @@ router.get("/me", requireAuth, async (req, res) => {
     const memberFlags = Array.isArray(req.memberFeatureFlags) ? req.memberFeatureFlags : [];
     // Org admins get whatever the org-level flags are (controlled by super admin).
     // Other roles get the intersection of personal grants and org-level grants.
-    const isOrgAdmin = hasPermission(req,"workspace.settings.manage");
     const workspaceFeatures = require("../authorization/workspaceFeatures");
+    const isOrgAdmin = workspaceFeatures.hasInheritedAdminFeatures(req);
     const configuredKeys = await workspaceFeatures.listWorkspaceGrants(req.orgId,req.workspaceId);
     const featureFlags = await workspaceFeatures.effectiveKeys(
       orgFlags,configuredKeys,memberFlags,isOrgAdmin,req.workspaceMemberFeatureOverride ?? null

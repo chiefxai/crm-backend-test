@@ -105,7 +105,7 @@ async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdm
       ? policy.legacyWorkspaceRole(membership.role)
       : (policy.WORKSPACE_ROLES.includes(state.role) ? state.role : null);
   }
-  return { ...policy.authorization({ orgRole: policy.organizationRole(membership?.role),workspaceRole,platformAdmin }),
+  return { ...policy.authorization({ orgRole: policy.organizationRole(membership?.role),workspaceRole,platformAdmin,activeWorkspace:true }),
     memberFeatureFlags: workspaceMemberFeatureFlags(state.workspace_feature_flags,membership?.featureFlags) };
 }
 function attachAuthorization(req,value) {

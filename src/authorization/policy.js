@@ -1,6 +1,7 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
 const requestAuthority = new AsyncLocalStorage();
-// Organization privileges never imply access to operational workspace data.
+// Organization administrators can operate within an authenticated active
+// workspace in their organization. Feature grants remain a separate ceiling.
 const ORGANIZATION_ROLES = ['Owner','Organization Admin','Billing Admin','Member'];
 const WORKSPACE_ROLES = ['Workspace Admin','Manager','Member','Viewer'];
 const ORG_PERMISSIONS = {
@@ -31,9 +32,11 @@ function legacyWorkspaceRole(role) {
   if (role === 'Billing Admin') return null;
   return 'Member';
 }
-function authorization({ orgRole, workspaceRole, platformAdmin = false }) {
+function authorization({ orgRole, workspaceRole, platformAdmin = false, activeWorkspace = false }) {
+  const organizationWorkspacePermissions = activeWorkspace && ['Owner','Organization Admin'].includes(orgRole)
+    ? WORKSPACE_PERMISSIONS['Workspace Admin'] : [];
   const permissions = platformAdmin ? [...new Set([...Object.values(ORG_PERMISSIONS).flat(),...Object.values(WORKSPACE_PERMISSIONS).flat(),'platform.manage'])]
-    : [...new Set([...(ORG_PERMISSIONS[orgRole] || []),...(WORKSPACE_PERMISSIONS[workspaceRole] || [])])];
+    : [...new Set([...(ORG_PERMISSIONS[orgRole] || []),...(WORKSPACE_PERMISSIONS[workspaceRole] || []),...organizationWorkspacePermissions])];
   return { organizationRole: orgRole, workspaceRole: workspaceRole || null, platformAdmin, permissions };
 }
 function hasPermission(req, permission) { return req.authorization?.permissions.includes(permission) === true; }

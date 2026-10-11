@@ -46,9 +46,14 @@ async function effectiveKeys(orgKeys, workspaceKeys, memberKeys, isWorkspaceAdmi
   return [...workspace].filter(k => member.has(k));
 }
 async function assignableKeys(req) {
-  const isWorkspaceAdmin = req.authorization?.workspaceRole === 'Workspace Admin';
+  const isWorkspaceAdmin = hasInheritedAdminFeatures(req);
   const configured = await listWorkspaceGrants(req.orgId, req.workspaceId);
   return effectiveKeys(req.orgFeatureFlags || [], configured, req.memberFeatureFlags || [], isWorkspaceAdmin);
+}
+function hasInheritedAdminFeatures(req) {
+  return req.authorization?.platformAdmin === true
+    || req.authorization?.workspaceRole === 'Workspace Admin'
+    || ['Owner','Organization Admin'].includes(req.authorization?.organizationRole);
 }
 async function enforceFeatureRequest(req, res, next) {
   const key = mappedFeature(req.originalUrl || req.url);
@@ -58,7 +63,7 @@ async function enforceFeatureRequest(req, res, next) {
     const override = req.workspaceMemberFeatureOverride ?? null;
     // Preserve legacy behavior when neither workspace nor member has a policy.
     if (grants === null && override === null) return next();
-    const isWorkspaceAdmin = req.authorization?.workspaceRole === 'Workspace Admin' || req.authorization?.platformAdmin === true;
+    const isWorkspaceAdmin = hasInheritedAdminFeatures(req);
     const permitted = (grants === null || grants.includes(key))
       && Array.isArray(req.orgFeatureFlags) && req.orgFeatureFlags.includes(key)
       && (override !== null ? override.includes(key)
@@ -68,4 +73,4 @@ async function enforceFeatureRequest(req, res, next) {
     next();
   } catch (error) { next(error); }
 }
-module.exports = { mappedFeature, listWorkspaceGrants, effectiveKeys, assignableKeys, enforceFeatureRequest };
+module.exports = { mappedFeature, listWorkspaceGrants, effectiveKeys, assignableKeys, enforceFeatureRequest, hasInheritedAdminFeatures };
