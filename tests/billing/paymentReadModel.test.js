@@ -110,3 +110,18 @@ test('payment type filtering happens before limit and cursor pagination', async 
     assert.throws(() => parsePaymentFilter(bad), { statusCode: 400 });
   }
 });
+
+test('filtered cursor requests bind purpose before pagination bounds', async () => {
+  const cursor = encodeCursor(makeRow('payment-2', '2026-10-09 12:00:00.000002'));
+  const pool = { async query(sql, args) {
+    assert.match(sql, /p\.purpose=\?/);
+    assert.match(sql, /p\.created_at<\?/);
+    assert.deepEqual(args, [
+      'org_123', 'topup', '2026-10-09 12:00:00.000002',
+      '2026-10-09 12:00:00.000002', 'payment-2', 11,
+    ]);
+    return { rows: [makeRow('payment-1', '2026-10-09 12:00:00.000001', { purpose: 'topup' })] };
+  } };
+  const page = await listPaymentRequests('org_123', { cursor, type: 'topup', limit: '10' }, { pool });
+  assert.equal(page.rows[0].purpose, 'topup');
+});
