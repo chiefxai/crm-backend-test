@@ -63,8 +63,11 @@ function createMysqlReservationRepository({ idSource, clock } = {}) {
       [orgId, validateId(workspaceId, 'workspaceId')],
     ))[0];
     if (!row) return null;
+    const addon = rowsOf(await tx.query(`SELECT id FROM billing_workspace_addons
+      WHERE org_id=? AND workspace_id=?
+        AND (CASE WHEN auto_renew=1 THEN grace_ends_at ELSE period_ends_at END)<=UTC_TIMESTAMP(6)`,[orgId,workspaceId]))[0];
     return Object.freeze({ id: row.id, orgId: row.org_id, name: row.name, industry: row.industry,
-      status: row.status, settings: parseJson(row.settings || '{}', 'Workspace settings') });
+      status: row.status, addonAccessExpired:Boolean(addon), settings: parseJson(row.settings || '{}', 'Workspace settings') });
   }
 
   async function getBillingAccountForUpdate(tx, { orgId }) {

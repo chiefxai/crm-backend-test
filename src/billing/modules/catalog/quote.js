@@ -88,6 +88,8 @@ function normalizeInventory(inventory) {
   const organizationCount = inventory.organizationCount === undefined ? 1 : safeCount(inventory.organizationCount, 'inventory.organizationCount', { min: 1 });
   if (organizationCount !== 1) invalid('inventory.organizationCount must be 1 for an organization quote.');
   const workspaceCount = safeCount(inventory.workspaceCount, 'inventory.workspaceCount', { min: 1 });
+  const separatelyBilledWorkspaceCount = safeCount(inventory.separatelyBilledWorkspaceCount ?? 0, 'inventory.separatelyBilledWorkspaceCount', {min:0});
+  if (separatelyBilledWorkspaceCount > workspaceCount) invalid('Separately billed workspaces cannot exceed the workspace inventory.');
   const seatCount = safeCount(inventory.seatCount === undefined ? 1 : inventory.seatCount, 'inventory.seatCount', { min: 0 });
   let industryCounts = null;
   let industryCodes;
@@ -125,7 +127,7 @@ function normalizeInventory(inventory) {
   if (distinctIndustryCount !== industryCodes.length) invalid('distinctIndustryCount must match the supplied industry codes.');
   const version = inventory.version === undefined ? (inventory.sourceVersion === undefined ? null : inventory.sourceVersion) : safeCount(inventory.version, 'inventory.version');
   if (version !== null && typeof version !== 'number' && (typeof version !== 'string' || !version.trim())) invalid('inventory.version/sourceVersion must be a non-empty stable value.');
-  return { organizationCount, workspaceCount, seatCount, distinctIndustryCount, industryCodes, industryCounts, version };
+  return { organizationCount, workspaceCount, ...(separatelyBilledWorkspaceCount ? {separatelyBilledWorkspaceCount} : {}), seatCount, distinctIndustryCount, industryCodes, industryCounts, version };
 }
 
 function normalizeTerms(value) {
@@ -225,7 +227,7 @@ function createQuote(input) {
   const lines = [];
   const baseQuantity = 1;
   addLine(lines, { code: 'subscription_base', label: 'Base subscription', quantity: baseQuantity, unitAmount: terms.base, amount: terms.base });
-  const additionalWorkspaces = Math.max(0, inventory.workspaceCount - terms.includedWorkspaces);
+  const additionalWorkspaces = Math.max(0, inventory.workspaceCount - (inventory.separatelyBilledWorkspaceCount || 0) - terms.includedWorkspaces);
   const workspaceLineAmount = multiply(terms.workspaceFee, additionalWorkspaces);
   addLine(lines, { code: 'additional_workspace', label: 'Additional workspaces', quantity: additionalWorkspaces, unitAmount: terms.workspaceFee, amount: workspaceLineAmount });
   const additionalIndustries = Math.max(0, inventory.distinctIndustryCount - terms.includedDistinctIndustries);

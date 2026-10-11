@@ -38,6 +38,9 @@ function decisionCommand(req) {
 }
 
 function decisionError(res, error) {
+  if (error?.expose === true && error.statusCode >= 400 && error.statusCode < 500) {
+    return res.status(error.statusCode).json({error:error.message});
+  }
   if (isBillingDomainError(error)) {
     const conflict = [DOMAIN_ERROR_CODES.CONFLICT, DOMAIN_ERROR_CODES.IDEMPOTENCY_CONFLICT,
       DOMAIN_ERROR_CODES.VERSION_CONFLICT, DOMAIN_ERROR_CODES.PAYMENT_NOT_PENDING,

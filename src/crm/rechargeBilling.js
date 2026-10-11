@@ -84,6 +84,7 @@ async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
   const scope = workspaceScope.scopeForOrg(orgId);
   const workspaceId = scope.workspaceId;
   const workspaceBudgetSetting = await require("../db/repositories/workspaceRepository").getActive(orgId, workspaceId);
+  if (!workspaceBudgetSetting) throw Object.assign(new Error('Active workspace required before placing a call'),{statusCode:403});
   const workspaceBudget = Number(workspaceBudgetSetting?.settings?.billing?.monthlyBudgetInr);
   const hasWorkspaceBudget = Number.isFinite(workspaceBudget) && workspaceBudget >= 0;
   const org = await db.getOrg(orgId);

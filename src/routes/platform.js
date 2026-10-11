@@ -380,6 +380,9 @@ router.post("/organizations", async (req, res) => {
     if (requestedWorkspaces.length && !adminEmail) throw policyTools.invalid('An initial organization administrator is required for additional workspaces.');
     if (firstBranchName !== null && (typeof firstBranchName!=='string' || !firstBranchName.trim() || firstBranchName.length>120)) throw policyTools.invalid('Enter a first branch name of up to 120 characters.');
     const initialWorkspaces = requestedWorkspaces.map(branch=>({ name:String(branch?.name || '').trim(),industry:String(branch?.industry || workspacePolicy.primaryIndustry).trim(),branchName:String(branch?.branchName || '').trim() || null }));
+    if (initialWorkspaces.length + 1 > workspacePolicy.pricing.includedWorkspaces && workspacePolicy.pricing.extraWorkspaceMonthlyInr > 0) {
+      throw policyTools.invalid('Create the organization with its included workspaces. Additional paid workspaces require an approved add-on purchase.',402);
+    }
     if (workspacePolicy.pricing.maxWorkspaces !== null && initialWorkspaces.length + 1 > workspacePolicy.pricing.maxWorkspaces) {
       throw policyTools.invalid(`The ${selectedPlan.name} subscription allows up to ${workspacePolicy.pricing.maxWorkspaces} workspaces.`);
     }
@@ -476,6 +479,7 @@ router.post("/organizations", async (req, res) => {
       return res.status(400).json({ error: "Invalid billing charge scope." });
     }
     const initialRecharge = Math.max(0, Number(initialRechargeAmountInr) || 0);
+    if (initialRecharge > 0) throw policyTools.invalid('Create the organization with a zero opening balance, then use the verified top-up flow.');
 
     // New clients select one combined template; the server always resolves it
     // from platform settings, never from client-provided retention/backup values.

@@ -30,6 +30,7 @@ const BILLING_ORG_TABLES = new Set([
   'billing_invoice_lines', 'billing_invoice_payments', 'billing_notification_policies',
   'billing_contacts', 'billing_alert_states', 'billing_notifications',
   'billing_notification_recipients', 'billing_notification_deliveries',
+  'billing_workspace_addons', 'billing_workspace_addon_cycles',
 ]);
 const BILLING_TABLES = new Set([...BILLING_PLATFORM_TABLES, ...BILLING_ORG_TABLES]);
 
@@ -44,6 +45,8 @@ const BILLING_WORKSPACE_READ_RULES = Object.freeze({
   billing_postpaid_period_totals: Object.freeze({ via: 'scope_type=workspace AND scope_owner_id=workspace_id' }),
   billing_postpaid_journals: Object.freeze({ column: 'workspace_id' }),
   billing_invoice_lines: Object.freeze({ column: 'workspace_id' }),
+  billing_workspace_addons: Object.freeze({ column: 'workspace_id' }),
+  billing_workspace_addon_cycles: Object.freeze({ via: 'billing_workspace_addons.id=addon_id' }),
   billing_notification_policies: Object.freeze({ via: 'scope_type=workspace AND scope_owner_id=workspace_id' }),
   billing_alert_states: Object.freeze({ via: 'scope_type=workspace AND scope_owner_id=workspace_id' }),
   billing_notifications: Object.freeze({ via: 'scope_type=workspace AND scope_owner_id=workspace_id' }),

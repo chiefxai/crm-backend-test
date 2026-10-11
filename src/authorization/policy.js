@@ -4,9 +4,9 @@ const requestAuthority = new AsyncLocalStorage();
 const ORGANIZATION_ROLES = ['Owner','Organization Admin','Billing Admin','Member'];
 const WORKSPACE_ROLES = ['Workspace Admin','Manager','Member','Viewer'];
 const ORG_PERMISSIONS = {
-  Owner: ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read'],
-  'Organization Admin': ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read'],
-  'Billing Admin': ['organization.read','billing.read'],
+  Owner: ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit'],
+  'Organization Admin': ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit'],
+  'Billing Admin': ['organization.read','billing.read','billing.organization.read','billing.payment.submit'],
   Member: [],
 };
 const WORKSPACE_PERMISSIONS = {
@@ -51,6 +51,8 @@ function requestPermission(req) {
   if (/^\/api\/workspace-sharing\/records(?:\/|$)/.test(path)) return 'workspace.read';
   if (/^\/api\/workspace-sharing\/grants(?:\/|$)/.test(path)) return read ? 'workspace.read' : 'workspace.settings.manage';
   if (path === '/api/billing/workspace-budget' && !read) return 'workspace.settings.manage';
+  if (/^\/api\/billing\/workspace-addons(?:\/|$)/.test(path) && !read) return 'billing.payment.submit';
+  if (path === '/api/billing/workspace-addons' && read) return 'billing.organization.read';
   if (/^\/api\/billing(?:\/|$)/.test(path) || /^\/api\/ai-usage(?:\/|$)/.test(path)) return 'billing.read';
   if (/^\/api\/settings\/workspace\/members(?:\/|$)/.test(path)) return 'workspace.members.manage';
   if (/^\/api\/settings\/team(?:\/|$)/.test(path)) return read ? 'organization.members.read' : 'organization.members.manage';

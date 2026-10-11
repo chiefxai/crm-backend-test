@@ -46,7 +46,7 @@ function createMysqlPaymentSubmissionRepository({ pool } = {}) {
     if (tx.metadata?.orgId !== record.orgId) throw new TypeError('Payment request organization must match the transaction.');
     const quote = record.quoteId ? await getQuoteForUpdate(tx, { orgId: record.orgId, quoteId: record.quoteId }) : null;
     const invoice = record.invoiceId ? rowsOf(await tx.query(
-      `SELECT id,status,asset,scale,total_units,paid_units FROM billing_invoices WHERE org_id=? AND id=? FOR UPDATE`,
+      `SELECT id,status,asset,scale,total_units,paid_units,terms_snapshot_json FROM billing_invoices WHERE org_id=? AND id=? FOR UPDATE`,
       [record.orgId, record.invoiceId],
     ))[0] : null;
     if (record.purpose === 'invoice') {
@@ -54,6 +54,13 @@ function createMysqlPaymentSubmissionRepository({ pool } = {}) {
         throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'An open invoice for this organization was not found.');
       }
       const outstanding = BigInt(invoice.total_units) - BigInt(invoice.paid_units);
+      const terms = typeof invoice.terms_snapshot_json === 'string' ? JSON.parse(invoice.terms_snapshot_json) : invoice.terms_snapshot_json;
+      if (terms?.purpose === 'workspace_addon') {
+        if (BigInt(record.expectedAmount.units) !== outstanding) throw new BillingDomainError(DOMAIN_ERROR_CODES.PAYMENT_AMOUNT_MISMATCH,'Workspace add-on invoices must be paid in full.');
+        const pending = rowsOf(await tx.query(`SELECT id FROM billing_payment_requests WHERE org_id=? AND invoice_id=?
+          AND status IN ('pending_verification','needs_clarification','clarification_requested') LIMIT 1 FOR UPDATE`,[record.orgId,record.invoiceId]));
+        if (pending.length) throw new BillingDomainError(DOMAIN_ERROR_CODES.CONFLICT,'This workspace invoice already has a payment awaiting review.');
+      }
       if (BigInt(record.expectedAmount.units) <= 0n || BigInt(record.expectedAmount.units) > outstanding
         || record.expectedAmount.asset !== invoice.asset || record.expectedAmount.scale !== Number(invoice.scale)) {
         throw new BillingDomainError(DOMAIN_ERROR_CODES.PAYMENT_AMOUNT_MISMATCH, 'Submitted amount exceeds or does not match the current invoice balance.');
@@ -124,13 +131,15 @@ function createMysqlPaymentSubmissionRepository({ pool } = {}) {
       record.validateQuote(quote);
     } else {
       const invoice = rowsOf(await tx.query(
-        `SELECT status,asset,scale,total_units,paid_units FROM billing_invoices WHERE org_id=? AND id=? FOR UPDATE`,
+        `SELECT status,asset,scale,total_units,paid_units,terms_snapshot_json FROM billing_invoices WHERE org_id=? AND id=? FOR UPDATE`,
         [record.orgId, record.invoiceId],
       ))[0];
       if (!invoice || !['open', 'partially_paid', 'overdue'].includes(String(invoice.status).toLowerCase())) {
         throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'An open invoice for this organization was not found.');
       }
       const outstanding = BigInt(invoice.total_units) - BigInt(invoice.paid_units);
+      const terms = typeof invoice.terms_snapshot_json === 'string' ? JSON.parse(invoice.terms_snapshot_json) : invoice.terms_snapshot_json;
+      if (terms?.purpose === 'workspace_addon' && BigInt(record.expectedAmount.units) !== outstanding) throw new BillingDomainError(DOMAIN_ERROR_CODES.PAYMENT_AMOUNT_MISMATCH,'Workspace add-on invoices must be paid in full.');
       if (record.expectedAmount.asset !== invoice.asset || record.expectedAmount.scale !== Number(invoice.scale)
         || BigInt(record.expectedAmount.units) <= 0n || BigInt(record.expectedAmount.units) > outstanding) {
         throw new BillingDomainError(DOMAIN_ERROR_CODES.PAYMENT_AMOUNT_MISMATCH, 'Resubmitted amount exceeds or does not match the current invoice balance.');

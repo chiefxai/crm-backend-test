@@ -10,7 +10,9 @@ function parseSettings(value) {
 }
 function toApi(row, { includeSettings = false } = {}) {
   return row ? { id: row.id, orgId: row.org_id, name: row.name, industry: row.industry,
-    branchName: row.branch_name, status: row.status, isDefault: Boolean(row.is_default), ...(includeSettings ? { settings: parseSettings(row.settings) } : {}) } : null;
+    branchName: row.branch_name, status: row.status, isDefault: Boolean(row.is_default),
+    ...(parseSettings(row.settings).billingAgreement?.addonId ? {billingAddonId:parseSettings(row.settings).billingAgreement.addonId} : {}),
+    ...(includeSettings ? { settings: parseSettings(row.settings) } : {}) } : null;
 }
 async function ensureDefault(orgId, client = pool) {
   await client.query(`INSERT INTO workspaces (id,org_id,name,industry,status,is_default,created_at)
@@ -45,13 +47,19 @@ async function getActive(orgId, workspaceId) {
   const { rows } = await pool.query(`SELECT w.* FROM workspaces w
     INNER JOIN organizations o ON o.id=w.org_id
     WHERE w.org_id=? AND w.id=? AND w.status='Active'
-    AND (o.status IS NULL OR o.status <> 'Suspended')`, [orgId, workspaceId]);
+    AND (o.status IS NULL OR o.status <> 'Suspended')
+    AND NOT EXISTS (SELECT 1 FROM billing_workspace_addons a WHERE a.org_id=w.org_id AND a.workspace_id=w.id
+      AND (CASE WHEN a.auto_renew=1 THEN a.grace_ends_at ELSE a.period_ends_at END)<=UTC_TIMESTAMP(6))`, [orgId, workspaceId]);
   return toApi(rows[0], { includeSettings: true });
 }
 async function listForOrg(orgId) {
   await db.ready;
   await ensureDefault(orgId);
-  const { rows } = await pool.query('SELECT * FROM workspaces WHERE org_id=? ORDER BY is_default DESC,id', [orgId]);
+  const { rows } = await pool.query(`SELECT w.*,CASE WHEN a.id IS NOT NULL
+    AND (CASE WHEN a.auto_renew=1 THEN a.grace_ends_at ELSE a.period_ends_at END)<=UTC_TIMESTAMP(6)
+    THEN 'Suspended' ELSE w.status END AS status FROM workspaces w
+    LEFT JOIN billing_workspace_addons a ON a.org_id=w.org_id AND a.workspace_id=w.id
+    WHERE w.org_id=? ORDER BY w.is_default DESC,w.id`, [orgId]);
   return rows.map(row => toApi(row));
 }
 async function listForMember(orgId, memberId) {
@@ -61,6 +69,8 @@ async function listForMember(orgId, memberId) {
     INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
     WHERE w.org_id=? AND w.status='Active' AND wm.status='Active'
       AND COALESCE(NULLIF(m.status,''),'Active')='Active'
+      AND NOT EXISTS (SELECT 1 FROM billing_workspace_addons a WHERE a.org_id=w.org_id AND a.workspace_id=w.id
+        AND (CASE WHEN a.auto_renew=1 THEN a.grace_ends_at ELSE a.period_ends_at END)<=UTC_TIMESTAMP(6))
     ORDER BY w.is_default DESC,w.name,w.id`,[memberId,orgId]);
   return rows.map(row => ({ ...toApi(row), role: row.workspace_role }));
 }
@@ -83,46 +93,70 @@ async function seedIndustryObjects(client,orgId,workspaceId,industry,createdAt) 
     }
   }
 }
-async function createWorkspace(orgId, { name, industry, branchName = null, pricingAcceptanceToken }, initialAdminMemberId, { platformAdmin = false } = {}) {
-  await db.ready;
-  const client = await pool.connect();
+// Only internal payment fulfillment supplies billingAddonId. The paid invoice is
+// checked again here, inside the same transaction that provisions the workspace.
+async function createWorkspaceInTransaction(client, orgId, { name, industry, branchName = null, pricingAcceptanceToken }, initialAdminMemberId, { platformAdmin = false, billingAddonId = null } = {}) {
   const workspaceId = crypto.randomUUID();
   const now = new Date().toISOString();
   const maxWorkspaces = Math.max(2, Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG) || 100, 1000));
+  const { rows: organizations } = await client.query(
+    'SELECT id,status,industry,settings FROM organizations WHERE id=? FOR UPDATE',[orgId]);
+  if (!organizations[0] || String(organizations[0].status || 'Active').toLowerCase() === 'suspended') {
+    throw Object.assign(new Error('An active organization is required'),{ statusCode:404 });
+  }
+  const { rows: existingWorkspaces } = await client.query('SELECT id,industry FROM workspaces WHERE org_id=? ORDER BY id',[orgId]);
+  const { rows: seatRows } = await client.query("SELECT COUNT(*) AS seat_count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'",[orgId]);
+  const seatCount = Number(seatRows[0]?.seat_count || 0);
+  const policy = organizationPolicy.effectivePolicy(organizations[0],existingWorkspaces);
+  if (!industryPacks.listIndustries().some(item => item.key === industry)) throw organizationPolicy.invalid('Select a supported workspace industry.');
+  if (!name || name.length > 120 || (branchName && branchName.length > 160)) throw organizationPolicy.invalid('Enter a valid workspace and branch name.');
+  let paidAddon = false;
+  if (billingAddonId) {
+    const { rows: paid } = await client.query(`SELECT a.id FROM billing_workspace_addons a
+      JOIN billing_workspace_addon_cycles c ON c.org_id=a.org_id AND c.addon_id=a.id AND c.cycle_index=0
+      JOIN billing_invoices i ON i.org_id=c.org_id AND i.id=c.invoice_id
+      WHERE a.org_id=? AND a.id=? AND a.workspace_id IS NULL AND a.status='pending'
+        AND a.name=? AND a.industry=? AND a.member_id=? AND i.status='paid' FOR UPDATE`,
+      [orgId,billingAddonId,name,industry,initialAdminMemberId]);
+    paidAddon = Boolean(paid[0]);
+    if (!paidAddon) throw organizationPolicy.invalid('An approved workspace add-on invoice is required.',402);
+  }
+  organizationPolicy.authorizeCreation(policy,existingWorkspaces,{industry,platformAdmin,pricingAcceptanceToken: paidAddon ? organizationPolicy.branchQuote(policy,existingWorkspaces,seatCount)?.token : pricingAcceptanceToken,seatCount,paidAddon});
+  if (!billingAddonId) {
+    const { rows: pending } = await client.query("SELECT COUNT(*) AS count FROM billing_workspace_addons WHERE org_id=? AND status='pending'",[orgId]);
+    const reserved = Number(pending[0]?.count || 0);
+    if (existingWorkspaces.length + reserved >= Math.min(policy.pricing.maxWorkspaces ?? maxWorkspaces,maxWorkspaces)) {
+      throw organizationPolicy.invalid('The remaining workspace slots are reserved by pending add-on purchases.',409);
+    }
+  }
+  if (existingWorkspaces.length >= maxWorkspaces) {
+    throw Object.assign(new Error(`Workspace limit reached (${maxWorkspaces})`),{ statusCode:409 });
+  }
+  const { rows: duplicateRows } = await client.query(
+    'SELECT id FROM workspaces WHERE org_id=? AND LOWER(name)=LOWER(?) LIMIT 1',[orgId,name]);
+  if (duplicateRows[0]) throw Object.assign(new Error('A workspace with this name already exists'),{ statusCode:409 });
+  const { rows: members } = await client.query(
+    `SELECT id FROM org_members WHERE org_id=? AND id=?
+     AND COALESCE(NULLIF(status,''),'Active')='Active' FOR UPDATE`,[orgId,initialAdminMemberId]);
+  if (!members[0]) throw Object.assign(new Error('An active organization member is required to administer the workspace'),{ statusCode:403 });
+
+  const organizationPricing=organizationPolicy.quote(policy,[...existingWorkspaces,{industry}],seatCount);
+  const billingAgreement={organizationMonthlyQuoteAtCreation:organizationPricing,acceptedAt:now,createdByPlatformAdmin:platformAdmin,...(billingAddonId ? {addonId:billingAddonId,separatelyInvoiced:true} : {})};
+  await client.query(`INSERT INTO workspaces (id,org_id,name,industry,branch_name,status,is_default,created_at,settings)
+    VALUES (?,?,?,?,?,'Active',0,?,?)`,[workspaceId,orgId,name,industry,branchName,now,JSON.stringify({billingAgreement,enabledFeatures:[]})]);
+  await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,role_source,created_at)
+    VALUES (?,?,?,'Workspace Admin','Active','manual',?)`,[workspaceId,orgId,initialAdminMemberId,now]);
+  await seedIndustryObjects(client,orgId,workspaceId,industry,now);
+  return { id:workspaceId,orgId,name,industry,branchName,status:'Active',isDefault:false,organizationPricing };
+}
+async function createWorkspace(orgId, input, initialAdminMemberId, options = {}) {
+  await db.ready;
+  const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows: organizations } = await client.query(
-      'SELECT id,status,industry,settings FROM organizations WHERE id=? FOR UPDATE',[orgId]);
-    if (!organizations[0] || String(organizations[0].status || 'Active').toLowerCase() === 'suspended') {
-      throw Object.assign(new Error('An active organization is required'),{ statusCode:404 });
-    }
-    const { rows: existingWorkspaces } = await client.query('SELECT id,industry FROM workspaces WHERE org_id=? ORDER BY id',[orgId]);
-    const { rows: seatRows } = await client.query("SELECT COUNT(*) AS seat_count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'",[orgId]);
-    const seatCount = Number(seatRows[0]?.seat_count || 0);
-    const policy = organizationPolicy.effectivePolicy(organizations[0],existingWorkspaces);
-    if (!industryPacks.listIndustries().some(item => item.key === industry)) throw organizationPolicy.invalid('Select a supported workspace industry.');
-    if (!name || name.length > 120 || (branchName && branchName.length > 160)) throw organizationPolicy.invalid('Enter a valid workspace and branch name.');
-    organizationPolicy.authorizeCreation(policy,existingWorkspaces,{industry,platformAdmin,pricingAcceptanceToken,seatCount});
-    if (existingWorkspaces.length >= maxWorkspaces) {
-      throw Object.assign(new Error(`Workspace limit reached (${maxWorkspaces})`),{ statusCode:409 });
-    }
-    const { rows: duplicateRows } = await client.query(
-      'SELECT id FROM workspaces WHERE org_id=? AND LOWER(name)=LOWER(?) LIMIT 1',[orgId,name]);
-    if (duplicateRows[0]) throw Object.assign(new Error('A workspace with this name already exists'),{ statusCode:409 });
-    const { rows: members } = await client.query(
-      `SELECT id FROM org_members WHERE org_id=? AND id=?
-       AND COALESCE(NULLIF(status,''),'Active')='Active' FOR UPDATE`,[orgId,initialAdminMemberId]);
-    if (!members[0]) throw Object.assign(new Error('An active organization member is required to administer the workspace'),{ statusCode:403 });
-
-    const organizationPricing=organizationPolicy.quote(policy,[...existingWorkspaces,{industry}],seatCount);
-    const billingAgreement={organizationMonthlyQuoteAtCreation:organizationPricing,acceptedAt:now,createdByPlatformAdmin:platformAdmin};
-    await client.query(`INSERT INTO workspaces (id,org_id,name,industry,branch_name,status,is_default,created_at,settings)
-      VALUES (?,?,?,?,?,'Active',0,?,?)`,[workspaceId,orgId,name,industry,branchName,now,JSON.stringify({billingAgreement,enabledFeatures:[]})]);
-    await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,role_source,created_at)
-      VALUES (?,?,?,'Workspace Admin','Active','manual',?)`,[workspaceId,orgId,initialAdminMemberId,now]);
-    await seedIndustryObjects(client,orgId,workspaceId,industry,now);
+    const workspace = await createWorkspaceInTransaction(client,orgId,input,initialAdminMemberId,{platformAdmin:options.platformAdmin === true});
     await client.query('COMMIT');
-    return { id:workspaceId,orgId,name,industry,branchName,status:'Active',isDefault:false,organizationPricing };
+    return workspace;
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     throw error;
@@ -232,9 +266,12 @@ async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Activ
 }
 async function getAuthorizationState(orgId,workspaceId,memberId) {
   await db.ready;
-  const { rows } = await pool.query(`SELECT w.status AS workspace_status,o.status AS organization_status,
+  const { rows } = await pool.query(`SELECT CASE WHEN a.id IS NOT NULL
+    AND (CASE WHEN a.auto_renew=1 THEN a.grace_ends_at ELSE a.period_ends_at END)<=UTC_TIMESTAMP(6)
+    THEN 'Suspended' ELSE w.status END AS workspace_status,o.status AS organization_status,
     wm.role,wm.status,wm.role_source FROM workspaces w
     INNER JOIN organizations o ON o.id=w.org_id
+    LEFT JOIN billing_workspace_addons a ON a.org_id=w.org_id AND a.workspace_id=w.id
     LEFT JOIN workspace_members wm ON wm.org_id=w.org_id AND wm.workspace_id=w.id AND wm.member_id=?
     WHERE w.org_id=? AND w.id=?`,[memberId || null,orgId,workspaceId]);
   return rows[0] || null;
@@ -247,6 +284,13 @@ async function getWorkspaceSetup(orgId) {
   const policy = organizationPolicy.effectivePolicy(org,workspaces);
   const { rows: seatRows } = await pool.query("SELECT COUNT(*) AS seat_count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'",[orgId]);
   const seatCount = Number(seatRows[0]?.seat_count || 0);
-  return { policy, workspaces, currentQuote: organizationPolicy.quote(policy,workspaces,seatCount), addBranchQuote: organizationPolicy.branchQuote(policy,workspaces,seatCount) };
+  const { rows: pendingRows } = await pool.query("SELECT COUNT(*) AS count FROM billing_workspace_addons WHERE org_id=? AND status='pending'",[orgId]);
+  const pendingWorkspacePurchases = Number(pendingRows[0]?.count || 0);
+  const platformCap = Math.max(2,Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG) || 100,1000));
+  const reservedLimit = workspaces.length + pendingWorkspacePurchases >= Math.min(policy.pricing?.maxWorkspaces ?? platformCap,platformCap);
+  return { policy, workspaces, pendingWorkspacePurchases,
+    purchasesAvailable:require('../../billing/workspaceAddonBilling').purchasesEnabled(),
+    currentQuote: organizationPolicy.quote(policy,workspaces,seatCount),
+    addBranchQuote: reservedLimit ? null : organizationPolicy.branchQuote(policy,workspaces,seatCount) };
 }
-module.exports = { getWorkspaceSetup, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };
+module.exports = { getWorkspaceSetup, createWorkspaceInTransaction, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, listMembers, setMemberAssignment, getAuthorizationState };

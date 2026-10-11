@@ -6,6 +6,13 @@
 //   container today and can be replaced by EventBridge Scheduler tomorrow.
 const schedules = [
   {
+    id: "workspace-addon-renewals",
+    expression: "*/5 * * * *",
+    run: async () => {
+      await require('../billing/workspaceAddonBilling').createWorkspaceAddonBilling().runMaintenance();
+    },
+  },
+  {
     id: "crm-auto-dial",
     expression: process.env.AUTO_DIAL_SCHEDULE || "*/15 * * * * *",
     run: async () => {

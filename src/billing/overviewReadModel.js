@@ -3,7 +3,6 @@
 const { validateId } = require('./kernel/scope');
 const { toPaymentApiStatus } = require('./paymentStatus');
 const { getPool } = require('../db/pool');
-const db = require('../db/repository');
 
 function dateIso(value) {
   if (value == null) return null;
@@ -58,7 +57,7 @@ function aggregateBalances(rows) {
  * Consistent tenant-scoped snapshot of the new billing ledger. Do not fall
  * back to legacy INR wallets: those are a separate financial system.
  */
-async function readBillingOverview(orgId, { pool = getPool(), orgReader = db.getOrg, now = new Date() } = {}) {
+async function readBillingOverview(orgId, { pool = getPool(), orgReader = (...args) => require('../db/repository').getOrg(...args), now = new Date() } = {}) {
   validateId(orgId, 'orgId');
   const org = await orgReader(orgId);
   if (!org) return null;

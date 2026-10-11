@@ -7,6 +7,16 @@ const router = require('express').Router();
 const { requireAuth, requirePermission } = require('../middleware/auth');
 const { safeErrorMessage } = require('../observability/safeError');
 
+function topupAvailable() {
+  return process.env.BILLING_TOPUP_QUOTE_ENABLED === 'true'
+    && process.env.BILLING_PAYMENT_SUBMISSION_ENABLED === 'true'
+    && process.env.BILLING_PAYMENT_DECISION_ENABLED === 'true';
+}
+
+router.get('/capabilities', requireAuth, requirePermission('billing.read'), (_req, res) => {
+  res.json({ topupAvailable: topupAvailable() });
+});
+
 router.get('/legacy-overview', requireAuth, requirePermission('billing.read'), async (req, res) => {
   try {
     const { getOrganizationBillingConsole } = require('../billing/billingConsole');
@@ -27,7 +37,7 @@ router.get('/overview', requireAuth, requirePermission('billing.read'), async (r
     if (!overview) return res.status(404).json({ error: 'Organization not found' });
     if (overview.uninitialized) return res.status(409).json({
       code: 'BILLING_ACCOUNT_NOT_INITIALIZED',
-      error: 'The organization has not been migrated to the new billing ledger.',
+      error: 'Billing ledger setup is pending for this organization. Contact platform support.',
     });
     return res.json(overview);
   } catch (error) {
@@ -49,7 +59,11 @@ router.get('/payments', requireAuth, requirePermission('billing.read'), async (r
   }
 });
 
-// Organization top-up quote creation is separately feature gated.\nrouter.use(require('../billing/topupQuoteRouter').router);\n\n// Financial submission routes remain disabled unless explicitly enabled.
+// Organization top-up quote creation is separately feature gated.
+router.use(require('../billing/topupQuoteRouter').router);
+router.use(require('../billing/workspaceAddonRouter').router);
+
+// Financial submission routes remain disabled unless explicitly enabled.
 router.use(require('../billing/paymentSubmissionRouter').router);
 
 module.exports = router;

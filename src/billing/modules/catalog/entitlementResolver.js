@@ -53,7 +53,9 @@ function computeInventory(workspaces, primaryIndustryCode, seatCount = 1) {
     return {
       id: id.trim(),
       industryCode: getIndustry(workspace),
-      status: String(workspace.status || 'active').toLowerCase()
+      status: String(workspace.status || 'active').toLowerCase(),
+      ...(workspace.billingAddonId || workspace.settings?.billingAgreement?.separatelyInvoiced
+        ? {separatelyInvoiced:true} : {})
     };
   }).sort((a, b) => a.id.localeCompare(b.id) || a.industryCode.localeCompare(b.industryCode) || a.status.localeCompare(b.status));
   const counts = new Map();
@@ -62,6 +64,7 @@ function computeInventory(workspaces, primaryIndustryCode, seatCount = 1) {
   const industryCounts = Object.fromEntries(industries.map(code => [code, counts.get(code)]));
   return {
     workspaceCount: included.length,
+    ...(canonical.some(w => w.separatelyInvoiced) ? {separatelyBilledWorkspaceCount:canonical.filter(w => w.separatelyInvoiced).length} : {}),
     seatCount,
     distinctIndustryCount: industries.length,
     industryCodes: industries,

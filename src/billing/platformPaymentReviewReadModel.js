@@ -43,6 +43,7 @@ function mapRow(row) {
     proofAvailable: Boolean(row.proof_object_key),
     submittedAt: dateIso(row.submitted_at || row.created_at),
     reviewedAt: dateIso(row.reviewed_at),
+    ...(row.workspace_addon_name ? {workspaceAddon:{name:row.workspace_addon_name,invoiceId:row.invoice_id}} : {}),
   };
 }
 
@@ -67,6 +68,10 @@ async function listPlatformPaymentReviews({ status = 'pending_verification', lim
   args.push(size + 1);
   const result = await pool.query(`SELECT id,org_id,purpose,status,version,expected_amount_units,
     received_amount_units,asset,scale,payment_reference,proof_object_key,submitted_at,reviewed_at,created_at,
+    invoice_id,
+    (SELECT a.name FROM billing_workspace_addon_cycles c
+      JOIN billing_workspace_addons a ON a.org_id=c.org_id AND a.id=c.addon_id
+      WHERE c.org_id=billing_payment_requests.org_id AND c.invoice_id=billing_payment_requests.invoice_id LIMIT 1) AS workspace_addon_name,
     DATE_FORMAT(created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor
     FROM billing_payment_requests${where} ORDER BY created_at DESC,id DESC LIMIT ?`, args);
   if (!Array.isArray(result?.rows)) throw new TypeError('Invalid billing query result.');

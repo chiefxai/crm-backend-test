@@ -38,7 +38,8 @@ function createPlatformPaymentDecisionForRequest(req, {
     unitOfWork, periodRepository, allocationRepository: allocations, idSource, clock,
   });
   const postpaid = createMysqlPostpaidRepository({ idSource, clock });
-  const invoices = createMysqlInvoiceRepository({ idSource, clock, postpaidRepository: postpaid });
+  const workspaceAddonBilling = require('./workspaceAddonBilling').createWorkspaceAddonBilling({pool,idSource,clock});
+  const invoices = createMysqlInvoiceRepository({ idSource, clock, postpaidRepository: postpaid, workspaceAddonBilling });
   const outbox = createMysqlOutboxStore({ pool, clock, tokenSource: idSource });
   return createPaymentDecisionService({
     unitOfWork,

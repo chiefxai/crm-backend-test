@@ -5,6 +5,8 @@ const path = require('path');
 const foundation = require('../../../src/db/migrations/2026100712-billing-foundation');
 const credits = require('../../../src/db/migrations/2026100713-billing-credit-allocation');
 const operations = require('../../../src/db/migrations/2026100714_billing_operations');
+const proofs = require('../../../src/db/migrations/2026100716-billing-payment-submission-fields');
+const workspaceAddons = require('../../../src/db/migrations/2026100722-workspace-addon-purchases');
 const {
   WORKSPACE_TABLES,
   BILLING_TABLES,
@@ -32,7 +34,7 @@ describe('billing schema registration and ownership inventory', () => {
   });
 
   test('accounts for every new billing table without sending billing tables through generic workspace CRUD', () => {
-    const schemaTables = [...createdTables(foundation), ...createdTables(credits), ...createdTables(operations)];
+    const schemaTables = [foundation,credits,operations,proofs,workspaceAddons].flatMap(createdTables);
     expect(new Set(schemaTables).size).toBe(schemaTables.length);
     expect(new Set(schemaTables)).toEqual(BILLING_TABLES);
     expect(BILLING_PLATFORM_TABLES.size + BILLING_ORG_TABLES.size).toBe(BILLING_TABLES.size);

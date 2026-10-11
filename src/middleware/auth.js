@@ -60,14 +60,23 @@ function resolvePayload(req, token) {
   return provider.verifyToken(token);
 }
 
-async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdmin = false,membership: knownMembership }) {
+async function resolveAuthorization({ userId,email,orgId,workspaceId,platformAdmin = false,membership: knownMembership,allowInactiveWorkspace = false }) {
   if (isDevMode() && orgId === DEV_ORG_ID && userId === DEV_USER_ID) return policy.authorization({ orgRole: 'Organization Admin',workspaceRole: 'Workspace Admin' });
   if (workspaceId !== orgId && !multipleWorkspacesEnabled()) throw Object.assign(new Error('Workspace is unavailable until multi-workspace isolation is enabled'),{ statusCode: 403 });
   const membership = knownMembership === undefined ? await db.findMembershipForUser(userId,email,orgId) : knownMembership;
   if (!membership && !platformAdmin) throw Object.assign(new Error('Active organization membership required'),{ statusCode: 403 });
   let state = await workspaces.getAuthorizationState(orgId,workspaceId,membership?.memberId);
   if (!state) { await workspaces.getDefault(orgId); state = await workspaces.getAuthorizationState(orgId,workspaceId,membership?.memberId); }
-  if (!state || state.workspace_status !== 'Active' || state.organization_status === 'Suspended') throw Object.assign(new Error('Active workspace required'),{ statusCode: 403 });
+  if (!state || state.organization_status === 'Suspended') throw Object.assign(new Error('Active workspace required'),{ statusCode: 403 });
+  if (state.workspace_status !== 'Active') {
+    const orgRole = policy.organizationRole(membership?.role);
+    if (allowInactiveWorkspace && (platformAdmin || ['Owner','Organization Admin','Billing Admin'].includes(orgRole))) {
+      // Billing remains reachable for an admin to pay an overdue add-on. No
+      // operational workspace role is granted through this recovery context.
+      return policy.authorization({orgRole,workspaceRole:null,platformAdmin});
+    }
+    throw Object.assign(new Error('Active workspace required'),{statusCode:403});
+  }
   if (membership?.memberId && !state.role && workspaceId === orgId) {
     // Only legacy imports without any assignment are reconciled. Inactive
     // assignments are preserved and never reactivated by authentication.
@@ -155,7 +164,9 @@ async function requireAuth(req, res, next) {
     req.orgFeatureFlags = Array.isArray(org.featureFlags) ? org.featureFlags : [];
     req.memberFeatureFlags = Array.isArray(membership.featureFlags) ? membership.featureFlags : [];
     attachAuthorization(req,await resolveAuthorization({ userId,email: userEmail,orgId: req.orgId,workspaceId: req.workspaceId,
-      platformAdmin: isPlatformAdminIdentity(payload,userEmail),membership }));
+      platformAdmin: isPlatformAdminIdentity(payload,userEmail),membership,
+      allowInactiveWorkspace: /^\/api\/billing(?:\/|$)/.test(req.originalUrl || req.url)
+        || ['/api/auth/me','/api/settings/workspaces','/api/settings/workspace-policy'].includes((req.originalUrl || req.url).split('?')[0]) }));
     res.set("X-Organization-Id", req.orgId);
     res.set("X-Workspace-Id", req.workspaceId);
     return runWithScope({ orgId: req.orgId, workspaceId: req.workspaceId }, () => policy.enforceRequest(req,res,next));

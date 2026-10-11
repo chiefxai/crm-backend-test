@@ -51,6 +51,7 @@ async function createOrganizationSetup({
     const normalizedBillingMethod = billingMethod === "recharge_based" ? "recharge_based" : "pay_as_you_go";
     const normalizedChargeScope = chargeScope === "ai_and_call_provider" ? "ai_and_call_provider" : "ai_only";
     const initialBalance = normalizedBillingMethod === "recharge_based" ? Math.max(0, Number(initialRechargeAmountInr) || 0) : 0;
+    if (initialBalance > 0) throw Object.assign(new Error('Create the organization with a zero opening balance, then use the verified top-up flow.'), { statusCode: 400, expose: true });
     const orgSettings = {
       ...(workspacePolicy ? { workspacePolicy } : {}),
       dataRetention: {
@@ -62,6 +63,12 @@ async function createOrganizationSetup({
       ...(backup && typeof backup === "object" ? { dataBackup: backup } : {}),
     };
     await client.query(`INSERT INTO organizations (id,name,workspace_name,industry,subscription_plan,feature_flags,billing_method,charge_scope,recharge_balance_inr,recharge_reserved_inr,settings,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [orgId,name,workspaceName,industry||"lending",subscriptionPlan||"Starter",JSON.stringify(featureFlags||[]),normalizedBillingMethod,normalizedChargeScope,initialBalance,0,JSON.stringify(orgSettings),now]);
+    // The credit ledger is created with the organization so billing reads and
+    // top-up quotes never see an uninitialized account for a new tenant.
+    await client.query(`INSERT INTO organization_billing_accounts
+      (org_id,fallback_mode,postpaid_eligible,timezone,status,created_at,updated_at)
+      VALUES (?,?,0,'UTC','active',?,?)`,
+      [orgId,normalizedBillingMethod === 'recharge_based' ? 'prepaid' : 'postpaid',now,now]);
     await require("./workspaceRepository").ensureDefault(orgId, client);
     await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
     if (callProvider) {

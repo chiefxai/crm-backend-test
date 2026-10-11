@@ -125,7 +125,7 @@ function createUsageReservationService({
   async function getActiveWorkspace(tx, { orgId, workspaceId }) {
     const workspace = await reservationRepository.getWorkspaceForUpdate(tx, { orgId, workspaceId });
     if (!workspace) throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'Workspace was not found in this organization.');
-    if (String(workspace.status || '').toLowerCase() !== 'active') throw new BillingDomainError(DOMAIN_ERROR_CODES.CONFLICT, 'Usage cannot be reserved for a suspended workspace.');
+    if (String(workspace.status || '').toLowerCase() !== 'active' || workspace.addonAccessExpired) throw new BillingDomainError(DOMAIN_ERROR_CODES.CONFLICT, 'Usage cannot be reserved for a suspended or expired workspace.');
     return workspace;
   }
 

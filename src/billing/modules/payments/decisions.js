@@ -126,8 +126,10 @@ function createPaymentDecisionService({
               paymentRequestId: request.id, amount: decision.receivedAmount, now });
             const fulfillment = await repository.createFulfillment(tx, { orgId: request.orgId, paymentRequestId: request.id,
               fulfillmentKind: 'invoice_payment', targetId: request.invoiceId,
-              result: { invoiceId: request.invoiceId, paymentId: applied.paymentId, status: applied.invoice.status }, now });
-            funding = Object.freeze({ status: applied.invoice.status, invoiceId: request.invoiceId, paymentId: applied.paymentId, fulfillmentId: fulfillment.id });
+              result: { invoiceId: request.invoiceId, paymentId: applied.paymentId, status: applied.invoice.status,
+                ...(applied.addonId ? {addonId:applied.addonId,workspaceId:applied.workspaceId,periodEndsAt:applied.periodEndsAt} : {}) }, now });
+            funding = Object.freeze({ status: applied.invoice.status, invoiceId: request.invoiceId, paymentId: applied.paymentId, fulfillmentId: fulfillment.id,
+              ...(applied.addonId ? {addonId:applied.addonId,workspaceId:applied.workspaceId,periodEndsAt:applied.periodEndsAt} : {}) });
           }
 
           const event = {

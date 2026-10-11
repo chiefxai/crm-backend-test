@@ -124,7 +124,9 @@ function createUsageSettlementService({
         let delta = alreadySettled ? 0n : actual - priorAmount;
         const billingAccount = await reservationRepository.getBillingAccountForUpdate(tx, { orgId: value.orgId });
         const workspace = await reservationRepository.getWorkspaceForUpdate(tx, { orgId: value.orgId, workspaceId: value.workspaceId });
-        if (!workspace || String(workspace.status || '').toLowerCase() !== 'active') throw new BillingDomainError(DOMAIN_ERROR_CODES.CONFLICT, 'Usage settlement workspace is missing or inactive.');
+        // A call reserved during paid access still needs its final accounting
+        // after the add-on expires. This does not authorize any new usage.
+        if (!workspace || (String(workspace.status || '').toLowerCase() !== 'active' && workspace.settings?.billingSuspended !== true)) throw new BillingDomainError(DOMAIN_ERROR_CODES.CONFLICT, 'Usage settlement workspace is missing or inactive.');
         const request = reservation.fundingSnapshot?.request || {};
         const policy = await settlementPolicy(tx, { orgId: value.orgId, workspace, billingAccount, service: request.service, now });
         if (event.periodId) policy.postpaidPeriodId = event.periodId;

@@ -80,17 +80,22 @@ function branchQuote(policy, workspaces, seatCount = 1) {
   const next = quote(policy, [...workspaces, { industry: policy.primaryIndustry }], seatCount);
   if (!next) return null;
   const token = crypto.createHash('sha256').update(JSON.stringify({ policy, workspaces: workspaces.map(w => [w.id, w.industry]).sort(), next })).digest('hex');
-  return { ...next, upgradesToMultipleBranches: policy.mode === 'single', token };
+  const paymentRequired = workspaces.length >= policy.pricing.includedWorkspaces && policy.pricing.extraWorkspaceMonthlyInr > 0;
+  return { ...next, paymentRequired, monthlyAddonInr: paymentRequired ? policy.pricing.extraWorkspaceMonthlyInr : 0,
+    upgradesToMultipleBranches: policy.mode === 'single', token };
 }
 function validateIndustryChange(currentIndustry, nextIndustry) {
   if (nextIndustry !== undefined && nextIndustry !== currentIndustry) throw invalid('Workspace industry is fixed. Ask a platform administrator to provision a workspace for another industry.', 403);
 }
-function authorizeCreation(policy,workspaces,{industry,platformAdmin=false,pricingAcceptanceToken,seatCount=1}) {
+function authorizeCreation(policy,workspaces,{industry,platformAdmin=false,pricingAcceptanceToken,seatCount=1,paidAddon=false}) {
   if (!policy.pricing || (policy.pricing.maxWorkspaces !== null && workspaces.length >= policy.pricing.maxWorkspaces)) {
     throw invalid(`This subscription allows up to ${policy.pricing?.maxWorkspaces || 0} workspaces. Upgrade the subscription to add another workspace.`, 409);
   }
   if (industry !== policy.primaryIndustry && (!platformAdmin || policy.mode !== 'mixed_industry')) {
     throw invalid('Only platform administrators can add a different industry, and only for mixed-industry organizations.',403);
+  }
+  if (workspaces.length >= policy.pricing.includedWorkspaces && policy.pricing.extraWorkspaceMonthlyInr > 0 && !paidAddon) {
+    throw invalid('Purchase a workspace add-on and have its payment approved before creating an additional workspace.', 402);
   }
   if (!platformAdmin) {
     const offered=branchQuote(policy,workspaces,seatCount);

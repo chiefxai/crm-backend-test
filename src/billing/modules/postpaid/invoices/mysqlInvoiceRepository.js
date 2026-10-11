@@ -17,7 +17,7 @@ function mapInvoice(row) {
     issuedAt: row.issued_at || null, dueAt: row.due_at || null, paidAt: row.paid_at || null, version: Number(row.version), termsSnapshot: json(row.terms_snapshot_json, 'Invoice terms snapshot') });
 }
 
-function createMysqlInvoiceRepository({ idSource, clock, postpaidRepository } = {}) {
+function createMysqlInvoiceRepository({ idSource, clock, postpaidRepository, workspaceAddonBilling } = {}) {
   if (typeof idSource?.newId !== 'function' || typeof clock?.now !== 'function') throw new TypeError('Invoice repository requires ID source and clock.');
   for (const method of ['reverseSettledExposure', 'recordDebtJournal']) {
     if (typeof postpaidRepository?.[method] !== 'function') throw new TypeError(`Invoice repository requires postpaidRepository.${method}().`);
@@ -87,6 +87,10 @@ function createMysqlInvoiceRepository({ idSource, clock, postpaidRepository } = 
 
   async function applyPayment(tx, { orgId, invoiceId, paymentRequestId, amount, now }) {
     assertOrg(tx, orgId); const normalized = validateAmount(amount);
+    if (workspaceAddonBilling) {
+      const addonPayment = await workspaceAddonBilling.applyInvoicePayment(tx, {orgId,invoiceId,paymentRequestId,amount:normalized,now});
+      if (addonPayment) return Object.freeze(addonPayment);
+    }
     const invoice = await getForUpdate(tx, { orgId, invoiceId });
     if (!invoice || !['open', 'partially_paid', 'overdue'].includes(invoice.status)) throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'An unpaid invoice was not found.');
     if (normalized.asset !== invoice.amount.asset || normalized.scale !== invoice.amount.scale || BigInt(normalized.units) <= 0n) throw new BillingDomainError(DOMAIN_ERROR_CODES.PAYMENT_AMOUNT_MISMATCH, 'Invoice payment asset, scale, and amount must be valid.');

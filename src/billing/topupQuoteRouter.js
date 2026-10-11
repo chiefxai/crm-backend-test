@@ -10,7 +10,7 @@ const { createTopupQuote } = require('./modules/catalog/quote');
 const { BILLING_SUBMIT_ROLES } = require('./paymentHttpComposition');
 
 function parseTopupInr(value) {
-  if (typeof value !== 'string' || !/^(?:[1-9][0-9]{0,5})(?:\\.[0-9]{1,2})?$/.test(value)) {
+  if (typeof value !== 'string' || !/^(?:[1-9][0-9]{0,5})(?:\.[0-9]{1,2})?$/.test(value)) {
     throw new TypeError('Enter an amount from ₹1 to ₹999,999.99, with at most two decimal places.');
   }
   const [rupees, paise = ''] = value.split('.');
@@ -27,7 +27,8 @@ function quoteResponse(row) {
 
 router.post('/topup-quotes', requireAuth, requirePermission('billing.read'), async (req, res) => {
   if (process.env.BILLING_TOPUP_QUOTE_ENABLED !== 'true'
-    || process.env.BILLING_PAYMENT_SUBMISSION_ENABLED !== 'true') {
+    || process.env.BILLING_PAYMENT_SUBMISSION_ENABLED !== 'true'
+    || process.env.BILLING_PAYMENT_DECISION_ENABLED !== 'true') {
     return res.status(503).json({ error: 'Credit top-ups are not enabled.' });
   }
   if (!BILLING_SUBMIT_ROLES.has(req.authorization?.organizationRole)) {

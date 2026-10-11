@@ -32,6 +32,12 @@ const input = (overrides = {}) => ({
 });
 
 describe('billing catalog quotes', () => {
+  test('separately invoiced workspace add-ons remain in structural inventory without a second subscription fee', () => {
+    const quote = createQuote(input({inventory:{...input().inventory,separatelyBilledWorkspaceCount:1}}));
+    expect(quote.inventory.workspaceCount).toBe(3);
+    expect(quote.lines.find(line=>line.code==='additional_workspace').quantity).toBe(1);
+    expect(quote.lines.find(line=>line.code==='additional_workspace').amount).toEqual(money('20000000'));
+  });
   test('prices snapshot counts, itemizes fees, discount, tax, and separates credits', () => {
     const quote = createQuote(input());
     expect(quote.lines.map((line) => line.code)).toEqual([
