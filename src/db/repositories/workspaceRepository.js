@@ -32,7 +32,7 @@ async function getDefault(orgId) {
 async function ensureDefaultMembership(orgId, memberId, client = pool) {
   await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,created_at)
     SELECT m.org_id,m.org_id,m.id,
-    CASE WHEN m.role IN ('Owner','Organization Admin','Super Admin','Workspace Admin') THEN 'Workspace Admin'
+    CASE WHEN m.role='Workspace Admin' THEN 'Workspace Admin'
       WHEN m.role IN ('Manager','Sales Manager') THEN 'Manager' WHEN m.role IN ('Viewer','Customer') THEN 'Viewer' ELSE 'Member' END,
     CASE WHEN m.role='Billing Admin' THEN 'Inactive' ELSE COALESCE(NULLIF(m.status,''),'Active') END,COALESCE(m.created_at,?)
     FROM org_members m INNER JOIN workspaces w ON w.org_id=m.org_id AND w.id=m.org_id
@@ -264,14 +264,14 @@ async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Activ
     const current = currentRows[0] || null;
     const remainsAdmin = status === 'Active' && role === 'Workspace Admin';
     const wasAdmin = current?.status === 'Active' && (current.role_source === 'legacy'
-      ? ['Owner','Organization Admin','Super Admin','Workspace Admin'].includes(members[0].role)
+      ? members[0].role === 'Workspace Admin'
       : current.role === 'Workspace Admin');
     if (wasAdmin && !remainsAdmin) {
       const { rows: countRows } = await client.query(`SELECT COUNT(*) AS admin_count FROM workspace_members wm
         INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
         WHERE wm.org_id=? AND wm.workspace_id=? AND wm.member_id<>? AND wm.status='Active'
         AND COALESCE(NULLIF(m.status,''),'Active')='Active'
-        AND ((wm.role_source='legacy' AND m.role IN ('Owner','Organization Admin','Super Admin','Workspace Admin'))
+        AND ((wm.role_source='legacy' AND m.role='Workspace Admin')
           OR (wm.role_source<>'legacy' AND wm.role='Workspace Admin'))`,[orgId,workspaceId,memberId]);
       if (Number(countRows[0]?.admin_count || 0) < 1) {
         throw Object.assign(new Error('Assign another active Workspace Admin before removing the last one'),{ statusCode:409 });
