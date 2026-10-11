@@ -1,4 +1,9 @@
-jest.mock('../../src/db/pool', () => ({ getPool: jest.fn() }));
+jest.mock('../../src/db/pool', () => ({
+  getPool: jest.fn(() => ({ connect: jest.fn() })),
+}));
+jest.mock('../../src/billing/modules/allocations/service', () => ({
+  createAllocationService: jest.fn(),
+}));
 jest.mock('../../src/middleware/auth', () => ({
   requireAuth: (req, _res, next) => {
     const role=req.get('X-Test-Role') || 'Member';
@@ -20,6 +25,7 @@ jest.mock('../../src/billing/manualAllocationReadModel', () => {
 const express=require('express');
 const request=require('supertest');
 const { readManualAllocationOverview }=require('../../src/billing/manualAllocationReadModel');
+const { createAllocationService }=require('../../src/billing/modules/allocations/service');
 const {
   router, parseTransferInput, transfersEnabled, requireOrganizationCreditAdmin,
 } = require('../../src/billing/manualAllocationRouter');
@@ -116,4 +122,33 @@ describe('organization admin-only manual allocation routes', () => {
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(403);
   });
+  it('composes a trusted organization-to-workspace transfer with server-owned actor and scopes', async () => {
+    process.env.BILLING_MANUAL_ALLOCATION_ENABLED='true';
+    const transfer=jest.fn().mockResolvedValue({journalId:'journal-77',grantId:'grant-a'});
+    createAllocationService.mockReturnValue({ transfer });
+    const response=await request(app).post('/api/billing/manual-allocations/transfer')
+      .set('X-Test-Role','Organization Admin')
+      .set('Idempotency-Key','allocation-confirm-1')
+      .send({grantId:'grant-a',workspaceId:'workspace-1',
+        amount:{asset:'INR',units:'2500',scale:2},expectedPositionVersion:3})
+      .expect(200);
+    expect(response.body.journalId).toBe('journal-77');
+    const { command, trustedContext }=transfer.mock.calls[0][0];
+    expect(command).toMatchObject({
+      orgId:'org-1',grantId:'grant-a',fromScope:{orgId:'org-1',ownerType:'organization',ownerId:'org-1'},
+      toScope:{orgId:'org-1',ownerType:'workspace',ownerId:'workspace-1'},
+      amount:{asset:'INR',units:'2500',scale:2},expectedPositionVersion:3,
+    });
+    expect(trustedContext.actor).toEqual({type:'user',id:'user-1',organizationId:'org-1'});
+    expect(trustedContext.operationId).toBe('allocation-confirm-1');
+    const authorized=createAllocationService.mock.calls[0][0].authorizeAllocation;
+    expect(await authorized({actor:trustedContext.actor,orgId:'org-1',action:'credits.transfer',
+      fromScope:command.fromScope,toScope:command.toScope})).toBe(true);
+    expect(await authorized({actor:trustedContext.actor,orgId:'foreign-org',action:'credits.transfer',
+      fromScope:command.fromScope,toScope:command.toScope})).toBe(false);
+    expect(await authorized({actor:trustedContext.actor,orgId:'org-1',action:'credits.transfer',
+      fromScope:command.toScope,toScope:command.fromScope})).toBe(false);
+    expect(readManualAllocationOverview).not.toHaveBeenCalled();
+  });
+
 });
