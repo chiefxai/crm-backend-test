@@ -37,6 +37,11 @@ function handleError(err, res) {
   res.status(status).json({ error: safeErrorMessage(err) });
 }
 
+function organizationConflict(res, reason, message) {
+  log.warn(`Organization creation conflict: ${reason}`);
+  return res.status(409).json({ error: message });
+}
+
 function validatePlatformTelephonySelection({ numberId, callProvider, chargeScope, enabled }) {
   if (numberId == null) return null;
   if (!enabled) throw Object.assign(new Error('Platform telephony number allocation is not enabled.'), { statusCode: 409 });
@@ -474,12 +479,12 @@ router.post("/organizations", async (req, res) => {
         return res.status(400).json({ error: "Vobiz auth ID, auth token, and phone number are required." });
       }
       if (!(await db.isNumberAvailable(phoneNumber, null))) {
-        return res.status(409).json({ error: "This call-provider number is already assigned to another organization." });
+        return organizationConflict(res, 'call_provider_number_in_use', "This call-provider number is already assigned to another organization.");
       }
       const { data: existingCallChannel } = await require("../db/client")
         .from("channels").select("org_id").systemReadOnly("Check global call-provider channel ownership during organization setup").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
       if (existingCallChannel) {
-        return res.status(409).json({ error: "This call-provider number is already connected to another organization." });
+        return organizationConflict(res, 'call_provider_channel_in_use', "This call-provider number is already connected to another organization.");
       }
       validatedCallProvider = { provider, authId, authToken, phoneNumber };
       }
@@ -503,16 +508,16 @@ router.post("/organizations", async (req, res) => {
 
     const { data: nameExists } = await supabase
       .from("organizations").select("id").eq("name", name.trim()).limit(1).maybeSingle();
-    if (nameExists) return res.status(409).json({ error: `An organization named "${name}" already exists.` });
+    if (nameExists) return organizationConflict(res, 'organization_name_in_use', `An organization named "${name}" already exists.`);
 
     const { data: wsExists } = await supabase
       .from("organizations").select("id").eq("workspace_name", workspaceName.trim()).limit(1).maybeSingle();
-    if (wsExists) return res.status(409).json({ error: `Workspace slug "${workspaceName}" is already taken.` });
+    if (wsExists) return organizationConflict(res, 'workspace_slug_in_use', `Workspace slug "${workspaceName}" is already taken.`);
 
     if (adminEmail) {
       const { data: emailExists } = await supabase
         .from("org_members").select("id").eq("email", adminEmail.toLowerCase()).limit(1).maybeSingle();
-      if (emailExists) return res.status(409).json({ error: `A member with email "${adminEmail}" already belongs to an organization.` });
+      if (emailExists) return organizationConflict(res, 'admin_email_in_use', `A member with email "${adminEmail}" already belongs to an organization.`);
     }
 
     const organizationIndustry = String(industry || "lending").trim().toLowerCase();
@@ -682,12 +687,15 @@ router.post("/organizations", async (req, res) => {
       ...(initialSubscriptionPurchase ? { initialSubscriptionPurchase } : {}),
     });
   } catch (err) {
+    if ((err?.statusCode || err?.status) === 409) {
+      log.warn(`Organization creation conflict: ${err.code || 'request_conflict'}`);
+    }
     if (err?.code === "ER_DUP_ENTRY" || err?.code === "23505") {
       const constraint = String(err.constraint || err.message || "");
-      if (constraint.includes("idx_channels_type_external_id")) return res.status(409).json({ error: "This call-provider number is already connected to another organization." });
-      if (constraint.includes("workspace")) return res.status(409).json({ error: "Workspace slug is already taken." });
-      if (constraint.includes("name")) return res.status(409).json({ error: "An organization with this name already exists." });
-      if (constraint.includes("org_members") || constraint.includes("email")) return res.status(409).json({ error: "A member with this email already belongs to an organization." });
+      if (constraint.includes("idx_channels_type_external_id")) return organizationConflict(res, 'call_provider_channel_in_use', "This call-provider number is already connected to another organization.");
+      if (constraint.includes("workspace")) return organizationConflict(res, 'workspace_slug_in_use', "Workspace slug is already taken.");
+      if (constraint.includes("name")) return organizationConflict(res, 'organization_name_in_use', "An organization with this name already exists.");
+      if (constraint.includes("org_members") || constraint.includes("email")) return organizationConflict(res, 'admin_email_in_use', "A member with this email already belongs to an organization.");
     }
     handleError(err, res);
   }
