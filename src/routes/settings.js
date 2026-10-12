@@ -295,7 +295,7 @@ router.put("/organization/workspace-access/:workspaceId/:memberId", requireAuth,
   const role=String(req.body?.role || "").trim();
   if (!WORKSPACE_ROLES.includes(role)) return res.status(400).json({ error:"A valid workspace role is required" });
   try {
-    const result=await workspaceRepository.setMemberAssignment(req.orgId,req.params.workspaceId,req.params.memberId,role);
+    const result=await workspaceRepository.setMemberAssignment(req.orgId,req.params.workspaceId,req.params.memberId,role,'Active',req.authorization);
     auditLog.record(req.orgId,req,"organization.workspace_member.assign","workspace_member",req.params.memberId,{workspaceId:req.params.workspaceId,role});
     res.json(result);
   } catch(err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
@@ -304,7 +304,7 @@ router.delete("/organization/workspace-access/:workspaceId/:memberId", requireAu
   try {
     const old=await workspaceRepository.getAssignment(req.orgId,req.params.workspaceId,req.params.memberId);
     if (!old || old.status !== 'Active') return res.status(404).json({ error:"Active workspace access not found" });
-    const result=await workspaceRepository.setMemberAssignment(req.orgId,req.params.workspaceId,req.params.memberId,old.role,'Inactive');
+    const result=await workspaceRepository.setMemberAssignment(req.orgId,req.params.workspaceId,req.params.memberId,old.role,'Inactive',req.authorization);
     auditLog.record(req.orgId,req,"organization.workspace_member.revoke","workspace_member",req.params.memberId,{workspaceId:req.params.workspaceId,role:old.role});
     res.json(result);
   } catch(err) { res.status(err.statusCode || 500).json({ error:safeErrorMessage(err) }); }
@@ -416,7 +416,7 @@ router.put("/workspace/members/:memberId", requireAuth, requirePermission("works
     if (req.authorization?.workspaceRole === 'Manager' && workspaceRoleRank(role) >= workspaceRoleRank('Manager')) {
       return res.status(403).json({ error:"Managers can assign only Member or Viewer roles." });
     }
-    const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,role);
+    const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,role,'Active',req.authorization);
     auditLog.record(req.orgId,req,"workspace.member.assign","workspace_member",req.params.memberId,{ workspaceId:req.workspaceId,role });
     res.json(assignment);
   } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
@@ -428,7 +428,7 @@ router.delete("/workspace/members/:memberId", requireAuth, requirePermission("wo
     if (!existing || existing.status !== "Active") return res.status(404).json({ error: "Workspace member assignment not found" });
     if (!managerCanManageTarget(req,existing)) return res.status(403).json({ error:"Managers can manage only Member and Viewer accounts in their workspace." });
     if (isOrganizationPrivilegedRole(existing.organizationRole)) return res.status(403).json({ error:"Organization-level accounts cannot be removed from workspace settings." });
-    const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,existing.role,"Inactive");
+    const assignment = await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,req.params.memberId,existing.role,"Inactive",req.authorization);
     auditLog.record(req.orgId,req,"workspace.member.revoke","workspace_member",req.params.memberId,{ workspaceId:req.workspaceId,role:existing.role });
     res.json(assignment);
   } catch (err) { res.status(err.statusCode || 500).json({ error: safeErrorMessage(err) }); }
@@ -586,7 +586,7 @@ router.post("/team", requireAuth, requireTeamCreatorPermission, async (req, res)
 
     if (workspaceRole) {
       try {
-        await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,m.id,workspaceRole);
+        await workspaceRepository.setMemberAssignment(req.orgId,req.workspaceId,m.id,workspaceRole,'Active',req.authorization);
         if (workspaceScoped) await workspaceRepository.setMemberFeatureFlags(req.orgId,req.workspaceId,m.id,sanitizedRequestedFlags);
       } catch (assignmentError) {
         await db.remove("team",req.orgId,m.id).catch(() => {});

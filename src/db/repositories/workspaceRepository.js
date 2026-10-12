@@ -255,7 +255,7 @@ async function listMembers(orgId,workspaceId) {
 async function setMemberFeatureFlags(orgId,workspaceId,memberId,featureFlags) {
   return setMemberFeatureOverride(orgId,workspaceId,memberId,featureFlags);
 }
-async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Active') {
+async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Active',actorAuthorization=null) {
   await db.ready;
   const client = await pool.connect();
   try {
@@ -276,7 +276,12 @@ async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Activ
     const wasAdmin = current?.status === 'Active' && (current.role_source === 'legacy'
       ? members[0].role === 'Workspace Admin'
       : current.role === 'Workspace Admin');
-    if (wasAdmin && !remainsAdmin) {
+    // Organization administrators retain authority over every workspace even
+    // without an explicit Workspace Admin assignment. Only trusted server-side
+    // authorization may bypass the last-admin protection.
+    const organizationAdministrator = ['Owner','Organization Admin'].includes(actorAuthorization?.organizationRole)
+      || actorAuthorization?.platformAdmin === true;
+    if (wasAdmin && !remainsAdmin && !organizationAdministrator) {
       const { rows: countRows } = await client.query(`SELECT COUNT(*) AS admin_count FROM workspace_members wm
         INNER JOIN org_members m ON m.org_id=wm.org_id AND m.id=wm.member_id
         WHERE wm.org_id=? AND wm.workspace_id=? AND wm.member_id<>? AND wm.status='Active'
