@@ -13,6 +13,17 @@ function topupAvailable() {
     && process.env.BILLING_PAYMENT_DECISION_ENABLED === 'true';
 }
 
+const { readWorkspaceBillingOverview, requireSelectedBillingWorkspace } = require('../billing/workspaceOverviewReadModel');
+router.get('/workspaces/:workspaceId/overview', requireAuth, requirePermission('billing.read'), requireSelectedBillingWorkspace, async (req,res) => {
+  try {
+    const result=await readWorkspaceBillingOverview(req.orgId,req.workspaceId);
+    if (!result) return res.status(404).json({error:'Workspace not found'});
+    return res.json(result);
+  } catch(error) {
+    return res.status(error.statusCode || 500).json({error:safeErrorMessage(error)});
+  }
+});
+
 router.get('/capabilities', requireAuth, requirePermission('billing.read'), (_req, res) => {
   res.json({ topupAvailable: topupAvailable() });
 });
