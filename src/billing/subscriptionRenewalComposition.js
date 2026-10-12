@@ -141,10 +141,12 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
         const existing = await quoteRepository.getByIdempotencyKey(tx, { orgId, idempotencyKey: key, forUpdate: true });
         if (existing) return existing;
         await quoteRepository.create(tx, { orgId, id: quoteId, idempotencyKey: key, quote });
-        await subscriptionRepository.linkPeriod(tx, { id: idSource.newId('billing-subscription-period-link'), orgId,
+        const periodLinkId = idSource.newId('billing-subscription-period-link');
+        await subscriptionRepository.linkPeriod(tx, { id: periodLinkId, orgId,
           periodId: null, quoteId, paymentRequestId: null, purpose: 'renewal', periodState: 'awaiting_payment',
           planId: planVersion.planId, planVersion: planVersion.version, effectiveAt: current.period.endsAt,
           supersedesPeriodId: current.period.periodId, now });
+        return { quoteId, periodLinkId, created: true };
       } });
     return state(orgId);
   }
