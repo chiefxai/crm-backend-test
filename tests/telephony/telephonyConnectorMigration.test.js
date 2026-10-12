@@ -6,6 +6,7 @@ const migration = require('../../src/db/migrations/2026100728-telephony-connecto
 const billingOwnershipMigration = require('../../src/db/migrations/2026100729-telephony-billing-ownership-snapshot');
 const fallbackMigration = require('../../src/db/migrations/2026100730-telephony-call-route-fallback-idempotency');
 const callContextMigration = require('../../src/db/migrations/2026100731-telephony-call-context');
+const orphanedNumberRepairMigration = require('../../src/db/migrations/2026100734-release-orphaned-telephony-numbers');
 
 function tableSql(table) {
   return migration.steps.find(({ sql }) => new RegExp(`CREATE TABLE IF NOT EXISTS ${table}\\b`, 'i').test(sql))?.sql || '';
@@ -68,5 +69,16 @@ describe('provider-independent telephony connector migration', () => {
     expect(callContextMigration.steps[0].sql).toContain('call_context_json JSON');
     const registry = fs.readFileSync(path.join(__dirname, '../../src/db/migrations/index.js'), 'utf8');
     expect(registry).toContain('require("./2026100729-telephony-billing-ownership-snapshot"), require("./2026100730-telephony-call-route-fallback-idempotency"), require("./2026100731-telephony-call-context")');
+  });
+
+  test('releases stale platform numbers after organization deletion and is registered for deployment', () => {
+    expect(orphanedNumberRepairMigration.id).toBe('2026100734_release_orphaned_telephony_numbers');
+    expect(orphanedNumberRepairMigration.steps[0].sql).toContain('allocation.released_at IS NULL AND organization.id IS NULL');
+    expect(orphanedNumberRepairMigration.steps[1].sql).toContain('assignment.released_at IS NULL AND organization.id IS NULL');
+    expect(orphanedNumberRepairMigration.steps[2].sql).toContain("account.owner_type='platform'");
+    expect(orphanedNumberRepairMigration.steps[2].sql).toContain("number.inventory_status='available'");
+    expect(orphanedNumberRepairMigration.steps[2].sql).toContain('NOT EXISTS');
+    const registry = fs.readFileSync(path.join(__dirname, '../../src/db/migrations/index.js'), 'utf8');
+    expect(registry).toContain('require("./2026100733-normalize-trial-access-state"), require("./2026100734-release-orphaned-telephony-numbers")');
   });
 });

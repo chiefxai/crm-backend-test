@@ -2876,6 +2876,15 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
     // before tenant-scoped assignments and allocations are removed below.
     const hasTelephonyAssignments = existing.includes("telephony_number_assignments");
     const hasTelephonyAllocations = existing.includes("telephony_number_allocations");
+    const { rows: telephonyTableRows } = await client.query(
+      `SELECT TABLE_NAME AS table_name
+         FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE'
+          AND TABLE_NAME IN ('telephony_phone_numbers','telephony_connector_accounts')`
+    );
+    const telephonyTables = new Set((telephonyTableRows || []).map(row => row.table_name));
+    const hasTelephonyPhoneNumbers = telephonyTables.has("telephony_phone_numbers");
+    const hasTelephonyConnectorAccounts = telephonyTables.has("telephony_connector_accounts");
     if (hasTelephonyAllocations) {
       await client.query(
         `UPDATE telephony_phone_numbers n
@@ -2887,7 +2896,7 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
         [orgId, new Date().toISOString()]
       );
     }
-    if (hasTelephonyAssignments) {
+    if (hasTelephonyPhoneNumbers && hasTelephonyConnectorAccounts && hasTelephonyAssignments) {
       await client.query(
         `UPDATE telephony_phone_numbers n
          INNER JOIN telephony_connector_accounts a ON a.id=n.connector_account_id
@@ -2903,7 +2912,7 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
       await client.query(`DELETE FROM \`${table}\` WHERE org_id = ?`, [orgId]);
     }
 
-    if (hasTelephonyAssignments) {
+    if (hasTelephonyPhoneNumbers && hasTelephonyConnectorAccounts) {
       // Organization-owned connectors and inventory have no org_id column,
       // so remove them explicitly after their assignment rows are gone.
       await client.query(

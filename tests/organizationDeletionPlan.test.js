@@ -118,5 +118,7 @@ describe('foreign-key-safe organization deletion', () => {
     expect(deleteOrgConnectors).toBeLessThan(deleteOrganization);
     expect(fn).toContain('hasTelephonyAssignments = existing.includes("telephony_number_assignments")');
     expect(fn).toContain('hasTelephonyAllocations = existing.includes("telephony_number_allocations")');
+    expect(fn).toContain('hasTelephonyPhoneNumbers = telephonyTables.has("telephony_phone_numbers")');
+    expect(fn).toContain('if (hasTelephonyPhoneNumbers && hasTelephonyConnectorAccounts)');
   });
 });
