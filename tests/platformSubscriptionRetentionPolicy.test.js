@@ -90,12 +90,18 @@ const subscriptionTermsPolicy = {
 };
 
 test("subscription billing terms provide conservative starter defaults until configured", async () => {
-  await expect(plans.getSubscriptionTermsPolicy()).resolves.toMatchObject({
+  const result = await plans.getSubscriptionTermsPolicy();
+  expect(result).toMatchObject({
     configured: true, source: "system_default", version: 1,
-    policy: { includedDistinctIndustries: 1, maxDistinctIndustries: 1, taxes: [],
+    policy: { includedDistinctIndustries: 1, maxDistinctIndustries: null, taxes: [],
       postpaid: { eligible: false, workspaceModes: [], organizationExposureLimit: null },
       serviceAfterExpiry: { mode: "suspend", graceSeconds: 0 } },
   });
+  const { mapWorkspacePlanToTerms } = require('../src/billing/modules/catalog/workspacePlanMapper');
+  expect(mapWorkspacePlanToTerms({ id: 'enterprise', active: true, name: 'Enterprise', defaultMode: 'mixed_industry',
+    pricing: { baseMonthlyInr: 3000, includedWorkspaces: 2, maxWorkspaces: 10, extraWorkspaceMonthlyInr: 0,
+      includedSeats: 20, maxSeats: null, extraSeatMonthlyInr: 0, additionalIndustryMonthlyInr: 0,
+      monthlySubscriptionCreditsInr: 0 } }, result.policy).structure.maxDistinctIndustries).toBeNull();
 });
 
 test("subscription billing policy uses an expected version and preserves explicit zero-tax configuration", async () => {

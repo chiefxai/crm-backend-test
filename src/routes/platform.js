@@ -607,7 +607,9 @@ router.post("/organizations", async (req, res) => {
         const trial = await purchase.provisionFreeTrial({ orgId: org.id, days: freeTrialDays });
         initialSubscriptionPurchase = { status: 'free_trial', ...trial };
       } catch (trialError) {
-        log.error('Free trial subscription provisioning failed:', trialError.message);
+        log.error('Free trial subscription provisioning failed:', {
+          orgId: org.id, code: trialError.code || 'FREE_TRIAL_PROVISION_ERROR', error: trialError.message,
+        });
         initialSubscriptionPurchase = { status: 'pending', code: trialError.code || 'FREE_TRIAL_PROVISION_ERROR' };
       }
     } else if (provisionInitialSubscription) {

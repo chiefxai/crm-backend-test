@@ -2872,9 +2872,21 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
 
     // Connector accounts use owner_org_id (rather than org_id), so generic
     // tenant-table discovery cannot clean them up. Platform-owned inventory
-    // is retained when its customer is deleted; make those numbers available
-    // again before the tenant-scoped assignment history is removed below.
+    // is retained when its customer is deleted; make numbers available again
+    // before tenant-scoped assignments and allocations are removed below.
     const hasTelephonyAssignments = existing.includes("telephony_number_assignments");
+    const hasTelephonyAllocations = existing.includes("telephony_number_allocations");
+    if (hasTelephonyAllocations) {
+      await client.query(
+        `UPDATE telephony_phone_numbers n
+         INNER JOIN telephony_connector_accounts a ON a.id=n.connector_account_id
+         INNER JOIN telephony_number_allocations allocation
+           ON allocation.phone_number_id=n.id AND allocation.org_id=? AND allocation.released_at IS NULL
+         SET n.inventory_status='available', n.updated_at=?
+         WHERE a.owner_type='platform' AND n.inventory_status IN ('allocated','assigned')`,
+        [orgId, new Date().toISOString()]
+      );
+    }
     if (hasTelephonyAssignments) {
       await client.query(
         `UPDATE telephony_phone_numbers n

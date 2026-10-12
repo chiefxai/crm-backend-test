@@ -104,15 +104,19 @@ describe('foreign-key-safe organization deletion', () => {
     const fn=source.slice(source.indexOf('async function deleteOrganizationData('),
       source.indexOf('async function listCostArchive('));
     const releasePlatformNumbers=fn.indexOf("a.owner_type='platform'");
+    const releasePlatformAllocations=fn.indexOf('INNER JOIN telephony_number_allocations allocation');
     const deleteAssignments=fn.indexOf('for (const table of ordered)');
     const deleteOrgInventory=fn.indexOf('DELETE FROM telephony_phone_numbers');
     const deleteOrgConnectors=fn.indexOf('DELETE FROM telephony_connector_accounts WHERE owner_type');
     const deleteOrganization=fn.indexOf('DELETE FROM `organizations`');
     expect(releasePlatformNumbers).toBeGreaterThan(-1);
     expect(releasePlatformNumbers).toBeLessThan(deleteAssignments);
+    expect(releasePlatformAllocations).toBeGreaterThan(-1);
+    expect(releasePlatformAllocations).toBeLessThan(deleteAssignments);
     expect(deleteAssignments).toBeLessThan(deleteOrgInventory);
     expect(deleteOrgInventory).toBeLessThan(deleteOrgConnectors);
     expect(deleteOrgConnectors).toBeLessThan(deleteOrganization);
     expect(fn).toContain('hasTelephonyAssignments = existing.includes("telephony_number_assignments")');
+    expect(fn).toContain('hasTelephonyAllocations = existing.includes("telephony_number_allocations")');
   });
 });

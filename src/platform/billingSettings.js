@@ -134,7 +134,9 @@ const DEFAULT_INDUSTRY_MINIMUMS = {
 // time; tax treatment must be reviewed for the platform's jurisdiction.
 const DEFAULT_SUBSCRIPTION_TERMS_POLICY = Object.freeze({
   includedDistinctIndustries: 1,
-  maxDistinctIndustries: 1,
+  // Mixed-industry plans require at least two industries; null preserves
+  // support for those plans without imposing an arbitrary platform ceiling.
+  maxDistinctIndustries: null,
   taxes: [],
   postpaid: { eligible: false, workspaceModes: [], organizationExposureLimit: null },
   serviceAfterExpiry: { mode: "suspend", graceSeconds: 0 },
