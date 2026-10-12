@@ -239,7 +239,15 @@ function accountFromRow(row) {
 function grantFromRow(row) {
   return { id: row.id, orgId: row.org_id, grantKind: row.grant_kind, sourceType: row.source_type, sourceId: row.source_id,
     sourceEventKey: row.source_event_key, periodId: row.period_id ?? null, paymentRequestId: row.payment_request_id ?? null,
-    status: row.status, amount: { asset: row.asset, units: String(row.amount_units), scale: Number(row.scale) }, effectiveAt: row.effective_at, expiresAt: row.expires_at ?? null };
+    status: row.status, amount: { asset: row.asset, units: String(row.amount_units), scale: Number(row.scale) },
+    effectiveAt: instantFromDatabase(row.effective_at), expiresAt: row.expires_at == null ? null : instantFromDatabase(row.expires_at) };
+}
+function instantFromDatabase(value) {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$/.test(value)) {
+    return `${value.replace(' ', 'T')}Z`;
+  }
+  return value;
 }
 function positionFromRow(row) {
   if (!row) return null;

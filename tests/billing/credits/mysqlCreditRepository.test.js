@@ -3,7 +3,7 @@
 const { createTransactionContext } = require('../../../src/billing/kernel/transactionContext');
 const { createMysqlCreditRepository } = require('../../../src/billing/modules/credits/repositories/mysqlCreditRepository');
 
-function fixture({ position } = {}) {
+function fixture({ position, grantRow } = {}) {
   const calls = [];
   let sequence = 0;
   const query = jest.fn(async (sql, params) => {
@@ -13,7 +13,9 @@ function fixture({ position } = {}) {
       return { rows: [{ id: params[1], asset: 'CREDIT', scale: 0, status: 'active', account_purpose: params[1] === 'clearing' ? 'funding_clearing' : 'pool' }] };
     }
     if (sql.includes('FROM billing_credit_grants')) {
-      return { rows: [{ id: params[1], asset: 'CREDIT', scale: 0, status: 'active', effective_at: '2026-01-01T00:00:00Z', expires_at: null }] };
+      return { rows: [grantRow || { id: params[1], org_id: 'org-1', grant_kind: 'subscription', source_type: 'subscription_period',
+        source_id: 'period-1', source_event_key: 'included-credits-v1', asset: 'CREDIT', amount_units: '100', scale: 0,
+        status: 'active', effective_at: '2026-01-01T00:00:00Z', expires_at: new Date('2026-02-01T00:00:00.000Z') }] };
     }
     if (sql.includes('FROM billing_credit_positions')) return { rows: position ? [position] : [] };
     if (sql.startsWith('UPDATE')) return { rows: [], affectedRows: 1 };
@@ -28,6 +30,19 @@ function fixture({ position } = {}) {
 }
 
 describe('MySQL credit repository', () => {
+  test('normalizes MySQL Date values on grant timestamps to ISO strings', async () => {
+    const { repository, tx } = fixture({ grantRow: {
+      id: 'grant-1', org_id: 'org-1', grant_kind: 'subscription', source_type: 'subscription_period',
+      source_id: 'period-1', source_event_key: 'included-credits-v1', asset: 'CREDIT', amount_units: '100', scale: 0,
+      status: 'active', effective_at: new Date('2026-01-01T00:00:00.000Z'), expires_at: new Date('2026-02-01T00:00:00.000Z'),
+    } });
+
+    await expect(repository.getGrantForUpdate(tx, { orgId: 'org-1', grantId: 'grant-1' })).resolves.toMatchObject({
+      effectiveAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: '2026-02-01T00:00:00.000Z',
+    });
+  });
+
   test('requires a branded transaction for mutations', async () => {
     const { repository } = fixture();
     await expect(repository.applyJournal({}, {})).rejects.toThrow('transaction context');
