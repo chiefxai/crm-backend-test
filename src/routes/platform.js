@@ -47,6 +47,16 @@ function validatePlatformTelephonySelection({ numberId, callProvider, chargeScop
   return normalized;
 }
 
+function validateDeferredPlatformTelephonyAllocation({ pending, numberId, callProvider, chargeScope, enabled }) {
+  if (typeof pending !== 'boolean') throw Object.assign(new Error('Platform telephony allocation pending must be a boolean.'), { statusCode: 400 });
+  if (!pending) return false;
+  if (chargeScope !== 'ai_and_call_provider' || callProvider || numberId != null) {
+    throw Object.assign(new Error('Deferred platform telephony allocation requires AI + Call Provider scope and no customer credentials or preselected number.'), { statusCode: 400 });
+  }
+  if (!enabled) throw Object.assign(new Error('Platform telephony number allocation is not enabled.'), { statusCode: 409 });
+  return true;
+}
+
 
 
 // Platform-wide prompt management. Voice prompts are the two master templates
@@ -362,6 +372,7 @@ router.post("/organizations", async (req, res) => {
     const {
       name, workspaceName, industry, subscriptionPlan: requestedPlan, workspacePlanId, workspacePlanVersion, adminEmail, adminName, featureFlags,
       gcpProjectMode = "existing", gcpProject, callProvider, platformTelephonyNumberId = null,
+      platformTelephonyAllocationPending = false,
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
       dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null, retentionPolicyId, retentionPolicyVersion,
       initialWorkspaces: requestedWorkspaces = [], firstBranchName = null,
@@ -434,6 +445,13 @@ router.post("/organizations", async (req, res) => {
     // be created without a Vobiz number/channel.
     let provider = null;
     let validatedCallProvider = null;
+    const hasDeferredTelephonyAllocation = validateDeferredPlatformTelephonyAllocation({
+      pending: platformTelephonyAllocationPending,
+      numberId: platformTelephonyNumberId,
+      callProvider,
+      chargeScope,
+      enabled: process.env.TELEPHONY_CONNECTOR_ACCOUNTS_ENABLED === 'true',
+    });
     const validatedPlatformTelephonyNumberId = validatePlatformTelephonySelection({
       numberId: platformTelephonyNumberId,
       callProvider,
@@ -441,7 +459,7 @@ router.post("/organizations", async (req, res) => {
       enabled: process.env.TELEPHONY_CONNECTOR_ACCOUNTS_ENABLED === 'true',
     });
     if (chargeScope === "ai_and_call_provider") {
-      if (!validatedPlatformTelephonyNumberId && (!callProvider || typeof callProvider !== "object")) {
+      if (!validatedPlatformTelephonyNumberId && !hasDeferredTelephonyAllocation && (!callProvider || typeof callProvider !== "object")) {
         return res.status(400).json({ error: "Call provider configuration is required when Charge Scope is AI + Call Provider." });
       }
       if (!validatedPlatformTelephonyNumberId) {
@@ -1010,4 +1028,5 @@ router.use(require('../billing/subscriptionGraceRouter').createPlatformSubscript
 router.use(require('../billing/subscriptionReconciliationRouter').createSubscriptionReconciliationRouter());
 
 router.validatePlatformTelephonySelection = validatePlatformTelephonySelection;
+router.validateDeferredPlatformTelephonyAllocation = validateDeferredPlatformTelephonyAllocation;
 module.exports = router;

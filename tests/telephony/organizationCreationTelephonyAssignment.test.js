@@ -59,6 +59,18 @@ describe('initial platform telephony number assignment during organization creat
       .toThrow(expect.objectContaining({ statusCode: 400 }));
   });
 
+  test('allows deferred platform allocation only for the enabled AI plus phone setup', () => {
+    const validate = platformRouter.validateDeferredPlatformTelephonyAllocation;
+    expect(validate({ pending: true, numberId: null, callProvider: null, chargeScope: 'ai_and_call_provider', enabled: true })).toBe(true);
+    expect(() => validate({ pending: true, numberId: null, callProvider: null, chargeScope: 'ai_and_call_provider', enabled: false }))
+      .toThrow(expect.objectContaining({ statusCode: 409 }));
+    expect(() => validate({ pending: true, numberId: 'number-1', callProvider: null, chargeScope: 'ai_and_call_provider', enabled: true }))
+      .toThrow(expect.objectContaining({ statusCode: 400 }));
+    expect(() => validate({ pending: true, numberId: null, callProvider: null, chargeScope: 'ai_only', enabled: true }))
+      .toThrow(expect.objectContaining({ statusCode: 400 }));
+    expect(() => validate({ pending: false, numberId: null, callProvider: null, chargeScope: 'ai_only', enabled: false })).not.toThrow();
+  });
+
   test.each([
     [[], 404, 'TELEPHONY_NUMBER_NOT_FOUND'],
     [[{ id: 'number-1', provider_key: 'twilio', inventory_status: 'available', provisioning_status: 'ready', connector_status: 'disabled' }], 409, 'TELEPHONY_CONNECTOR_INACTIVE'],
