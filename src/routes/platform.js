@@ -703,6 +703,33 @@ router.post("/organizations", async (req, res) => {
   }
 });
 
+// Recover a trial for an organization whose setup completed but whose billing
+// transaction was rolled back. Only organizations without an existing
+// subscription can be provisioned through this platform-admin action.
+router.post('/organizations/:id/free-trial/retry', async (req, res) => {
+  const orgId = req.params.id;
+  try {
+    const days = req.body?.days;
+    if (!Number.isInteger(days) || days < 1 || days > 15) {
+      return res.status(400).json({ error: 'Free trial duration must be from 1 to 15 days.' });
+    }
+    if (process.env.BILLING_SUBSCRIPTION_PURCHASE_ENABLED !== 'true') {
+      return res.status(503).json({ error: 'Enable subscription purchase before recovering a free trial.' });
+    }
+    const org = await db.getOrg(orgId);
+    if (!org) return res.status(404).json({ error: 'Organization not found.' });
+    const purchase = require('../billing/subscriptionPurchaseCompositionFactory')
+      .createConfiguredSubscriptionPurchaseComposition();
+    const trial = await purchase.provisionFreeTrial({ orgId, days });
+    await auditLog.record(orgId, { userId: req.userId, userEmail: req.userEmail },
+      'platform.subscription.free_trial.recover', 'organization', orgId, { days, periodId: trial?.periodId || null });
+    res.json({ status: 'free_trial', ...trial });
+  } catch (error) {
+    log.error('Free trial recovery failed:', { orgId, code: error.code || 'FREE_TRIAL_RECOVERY_ERROR', error: error.message });
+    handleError(error, res);
+  }
+});
+
 router.get('/organizations/:id/workspace-setup', async(req,res)=>{
   try { res.json(await require('../db/repositories/workspaceRepository').getWorkspaceSetup(req.params.id)); }
   catch(error) {handleError(error,res);}

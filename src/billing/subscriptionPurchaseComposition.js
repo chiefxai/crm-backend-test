@@ -151,9 +151,12 @@ function createSubscriptionPurchaseComposition({
     const periodId = idSource.newId('billing-trial-period');
     const opId = `subscription-trial-${crypto.createHash('sha256').update(orgId).digest('hex').slice(0, 40)}`;
     const requestFingerprint = `sha256:${crypto.createHash('sha256').update(JSON.stringify({ orgId, days, planId: planVersion.planId, planVersion: planVersion.version })).digest('hex')}`;
-    await unitOfWork.runFinancial({ orgId, operationId: opId, requestFingerprint, callback: async (tx) => {
+    const provisioned = await unitOfWork.runFinancial({ orgId, operationId: opId, requestFingerprint, callback: async (tx) => {
       const existing = await subscriptionRepository.getOrganizationSubscription(tx, { orgId, forUpdate: true });
-      if (existing) return { periodId: existing.currentPeriodId, alreadyProvisioned: true };
+      if (existing) throw Object.assign(
+        new Error('An organization subscription is already provisioned; trial recovery cannot replace it.'),
+        { statusCode: 409, code: 'SUBSCRIPTION_ALREADY_PROVISIONED' },
+      );
       await subscriptionRepository.createOrganizationSubscription(tx, { orgId, lifecycleStatus: 'active', currentPlanId: planVersion.planId,
         currentPlanVersion: planVersion.version, billingAccessState: 'operational', billingSuspensionCause: null,
         restrictionDeadline: endsAt, accessPolicy: { initialUnpaidAccess: 'billing_recovery', billingTimeZone: 'UTC' }, now: now.toISOString() });
@@ -176,8 +179,9 @@ function createSubscriptionPurchaseComposition({
           accountScope: organizationScope(orgId), effectiveAt: now.toISOString(), expiresAt: endsAt } });
       await creditRepository.createGrant(tx, { orgId, grant: grantPlan.grant, now: now.toISOString() });
       await creditRepository.applyJournal(tx, { ...grantPlan.journal, positionDeltas: grantPlan.positionDeltas });
+      return { periodId, startsAt: now.toISOString(), endsAt, days, alreadyProvisioned: false };
     } });
-    return { periodId, startsAt: now.toISOString(), endsAt, days };
+    return provisioned;
   }
 
   async function readInitialQuote(orgId) {
