@@ -89,25 +89,30 @@ const subscriptionTermsPolicy = {
   serviceAfterExpiry: { mode: "suspend", graceSeconds: 0 },
 };
 
-test("subscription billing terms remain unconfigured until a platform operator saves them", async () => {
-  await expect(plans.getSubscriptionTermsPolicy()).resolves.toEqual({ configured: false, version: 0, policy: null });
+test("subscription billing terms provide conservative starter defaults until configured", async () => {
+  await expect(plans.getSubscriptionTermsPolicy()).resolves.toMatchObject({
+    configured: true, source: "system_default", version: 1,
+    policy: { includedDistinctIndustries: 1, maxDistinctIndustries: 1, taxes: [],
+      postpaid: { eligible: false, workspaceModes: [], organizationExposureLimit: null },
+      serviceAfterExpiry: { mode: "suspend", graceSeconds: 0 } },
+  });
 });
 
 test("subscription billing policy uses an expected version and preserves explicit zero-tax configuration", async () => {
   const updated = await plans.setSubscriptionTermsPolicy({ userId: "admin" }, {
-    expectedVersion: 0,
+    expectedVersion: 1,
     policy: subscriptionTermsPolicy,
   });
-  expect(updated).toMatchObject({ configured: true, version: 1, policy: subscriptionTermsPolicy, updatedBy: "admin" });
+  expect(updated).toMatchObject({ configured: true, version: 2, policy: subscriptionTermsPolicy, updatedBy: "admin" });
   expect(settings.setSetting).toHaveBeenCalledWith(plans.KEYS.subscriptionTermsPolicy, expect.objectContaining({
-    version: 1, policy: subscriptionTermsPolicy,
+    version: 2, policy: subscriptionTermsPolicy,
   }));
 });
 
 test("subscription billing policy rejects stale versions and malformed tax rules", async () => {
-  await expect(plans.setSubscriptionTermsPolicy(null, { expectedVersion: 1, policy: subscriptionTermsPolicy }))
+  await expect(plans.setSubscriptionTermsPolicy(null, { expectedVersion: 0, policy: subscriptionTermsPolicy }))
     .rejects.toMatchObject({ statusCode: 409, code: "VERSION_CONFLICT" });
-  await expect(plans.setSubscriptionTermsPolicy(null, { expectedVersion: 0, policy: { ...subscriptionTermsPolicy, taxes: [{ code: "GST", rateBps: 18000, appliesTo: ["subscription"], inclusive: true }] } }))
+  await expect(plans.setSubscriptionTermsPolicy(null, { expectedVersion: 1, policy: { ...subscriptionTermsPolicy, taxes: [{ code: "GST", rateBps: 18000, appliesTo: ["subscription"], inclusive: true }] } }))
     .rejects.toMatchObject({ statusCode: 400 });
   expect(settings.setSetting).not.toHaveBeenCalled();
 });

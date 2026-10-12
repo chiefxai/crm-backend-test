@@ -129,6 +129,17 @@ const DEFAULT_INDUSTRY_MINIMUMS = {
   default: { minimumBalanceInr: 20, reservationMinutes: 3 },
 };
 
+// Conservative starter terms keep subscription quotes available on a fresh
+// install. Platform admins can replace these from Subscription Plans at any
+// time; tax treatment must be reviewed for the platform's jurisdiction.
+const DEFAULT_SUBSCRIPTION_TERMS_POLICY = Object.freeze({
+  includedDistinctIndustries: 1,
+  maxDistinctIndustries: 1,
+  taxes: [],
+  postpaid: { eligible: false, workspaceModes: [], organizationExposureLimit: null },
+  serviceAfterExpiry: { mode: "suspend", graceSeconds: 0 },
+});
+
 async function getGlobalAiDefaults() {
   const stored = await platformSettings.getSetting(KEYS.globalAi, null);
   if (!stored || typeof stored !== "object") return { ...DEFAULT_GLOBAL_AI, source: "system_default" };
@@ -262,7 +273,8 @@ function normalizeSubscriptionTermsPolicy(input) {
 async function getSubscriptionTermsPolicy() {
   const stored = await platformSettings.getSetting(KEYS.subscriptionTermsPolicy, null);
   if (!stored || typeof stored !== "object" || !Number.isSafeInteger(stored.version) || !stored.policy) {
-    return { configured: false, version: 0, policy: null };
+    return { configured: true, source: "system_default", version: 1,
+      policy: normalizeSubscriptionTermsPolicy(DEFAULT_SUBSCRIPTION_TERMS_POLICY) };
   }
   return { configured: true, version: stored.version, policy: normalizeSubscriptionTermsPolicy(stored.policy),
     ...(stored.updatedAt ? { updatedAt: stored.updatedAt } : {}), ...(stored.updatedBy ? { updatedBy: stored.updatedBy } : {}) };
@@ -285,6 +297,7 @@ module.exports = {
   DEFAULT_GLOBAL_AI,
   DEFAULT_SYSTEM_MINIMUM,
   DEFAULT_INDUSTRY_MINIMUMS,
+  DEFAULT_SUBSCRIPTION_TERMS_POLICY,
   getGlobalAiDefaults,
   setGlobalAiDefaults,
   getIndustryMinimumBalanceMap,
