@@ -155,7 +155,7 @@ function createSubscriptionPurchaseComposition({
       const existing = await subscriptionRepository.getOrganizationSubscription(tx, { orgId, forUpdate: true });
       if (existing) return { periodId: existing.currentPeriodId, alreadyProvisioned: true };
       await subscriptionRepository.createOrganizationSubscription(tx, { orgId, lifecycleStatus: 'active', currentPlanId: planVersion.planId,
-        currentPlanVersion: planVersion.version, billingAccessState: 'active', billingSuspensionCause: null,
+        currentPlanVersion: planVersion.version, billingAccessState: 'operational', billingSuspensionCause: null,
         restrictionDeadline: endsAt, accessPolicy: { initialUnpaidAccess: 'billing_recovery', billingTimeZone: 'UTC' }, now: now.toISOString() });
       const terms = JSON.parse(JSON.stringify(planVersion.terms));
       const trialCreditAmount = { asset: terms.currency || 'INR', units: '20000', scale: 2 };
