@@ -284,7 +284,10 @@ async function setMemberAssignment(orgId,workspaceId,memberId,role,status='Activ
         AND ((wm.role_source='legacy' AND m.role='Workspace Admin')
           OR (wm.role_source<>'legacy' AND wm.role='Workspace Admin'))`,[orgId,workspaceId,memberId]);
       if (Number(countRows[0]?.admin_count || 0) < 1) {
-        throw Object.assign(new Error('Assign another active Workspace Admin before removing the last one'),{ statusCode:409 });
+        // This is a deliberate, safe conflict message shown to organization admins.
+        // Mark it exposable so the route's error sanitizer doesn't replace it with
+        // the misleading "Internal server error" response for a 409.
+        throw Object.assign(new Error('Assign another active Workspace Admin before removing the last one'),{ statusCode:409, expose:true });
       }
     }
     if (current) {
