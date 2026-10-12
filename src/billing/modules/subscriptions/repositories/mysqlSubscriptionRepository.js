@@ -192,7 +192,7 @@ function createMysqlSubscriptionRepository() {
     assertOrg(tx, orgId);
     for (const [field, value] of Object.entries({ quoteId, paymentRequestId, periodId })) validateId(value, field);
     const row = rowsOf(await tx.query(
-      `SELECT id,period_state,version FROM billing_subscription_period_links
+      `SELECT id,period_state,plan_id,plan_version,version FROM billing_subscription_period_links
         WHERE org_id=? AND quote_id=? AND purpose IN ('initial_purchase','renewal','upgrade') FOR UPDATE`,
       [orgId, quoteId],
     ))[0];
@@ -206,7 +206,7 @@ function createMysqlSubscriptionRepository() {
     assertOrg(tx, orgId);
     validateId(periodId, 'periodId');
     const row = rowsOf(await tx.query(
-      `SELECT id,period_state,version FROM billing_subscription_period_links
+      `SELECT id,period_state,plan_id,plan_version,version FROM billing_subscription_period_links
         WHERE org_id=? AND period_id=? FOR UPDATE`, [orgId, periodId],
     ))[0];
     if (!row) return null;
@@ -225,11 +225,12 @@ function createMysqlSubscriptionRepository() {
     const result = await tx.query(
       `UPDATE organization_subscriptions
           SET lifecycle_status='active',current_period_id=?,
+              current_plan_id=COALESCE(?,current_plan_id),current_plan_version=COALESCE(?,current_plan_version),
               billing_access_state=IF(?,'operational',billing_access_state),
               billing_suspension_cause=IF(? ,NULL,billing_suspension_cause),
               restriction_deadline=?,version=version+1,updated_at=?
         WHERE org_id=? AND version=?`,
-      [periodId, permittedCause ? 1 : 0, permittedCause ? 1 : 0,
+      [periodId, row.plan_id ?? null, row.plan_version == null ? null : Number(row.plan_version), permittedCause ? 1 : 0, permittedCause ? 1 : 0,
         restrictionDeadline == null ? null : instant(restrictionDeadline, 'restrictionDeadline'),
         instant(now, 'now'), orgId, Number(subscriptions.version)],
     );

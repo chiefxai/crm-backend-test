@@ -5,6 +5,9 @@ const { createMysqlUnitOfWork } = require('./adapters/mysql/unitOfWork');
 const operationStore = require('./adapters/mysql/commandOperationRepository');
 const { createMysqlSubscriptionQuoteRepository } = require('./modules/catalog/repositories/mysqlSubscriptionQuoteRepository');
 const { createMysqlSubscriptionRepository } = require('./modules/subscriptions/repositories/mysqlSubscriptionRepository');
+const { createMysqlCreditRepository } = require('./modules/credits/repositories/mysqlCreditRepository');
+const { planIssueGrant } = require('./modules/credits/domain');
+const { organizationScope } = require('./kernel/scope');
 const { createInitialPurchaseService } = require('./modules/subscriptions/initialPurchaseService');
 const { resolveSubscriptionPolicy } = require('./modules/subscriptions/policy');
 
@@ -67,6 +70,7 @@ function createSubscriptionPurchaseComposition({
   const unitOfWork = createMysqlUnitOfWork({ pool, operationStore, idSource, clock });
   const quoteRepository = createMysqlSubscriptionQuoteRepository();
   const subscriptionRepository = createMysqlSubscriptionRepository();
+  const creditRepository = createMysqlCreditRepository({ idSource, clock });
 
   async function resolveOrg(orgId) {
     const rows = rowsOf(await pool.query('SELECT id,subscription_plan,settings FROM organizations WHERE id=? LIMIT 1', [orgId]));
@@ -135,6 +139,47 @@ function createSubscriptionPurchaseComposition({
     });
   }
 
+  async function provisionFreeTrial({ orgId, days }) {
+    if (!Number.isSafeInteger(days) || days < 1 || days > 15) throw Object.assign(new Error('Free trial duration must be from 1 to 15 days.'), { statusCode: 400, code: 'INVALID_TRIAL_DURATION' });
+    const org = await resolveOrg(orgId);
+    if (!org) return null;
+    const now = new Date(clock.now());
+    if (!Number.isFinite(now.getTime())) throw new TypeError('Subscription clock returned an invalid timestamp.');
+    const planVersion = await resolvePlanVersion({ workspacePlanId: org.planId, workspacePlanVersion: org.workspacePlanVersion, at: now.toISOString() });
+    if (!planVersion || planVersion.status !== 'published') throw Object.assign(new Error('Selected workspace plan has no published billing version for the trial.'), { statusCode: 409, code: 'SUBSCRIPTION_PLAN_VERSION_UNAVAILABLE' });
+    const endsAt = new Date(now.getTime() + days * 86400000).toISOString();
+    const periodId = idSource.newId('billing-trial-period');
+    const opId = `subscription-trial-${crypto.createHash('sha256').update(orgId).digest('hex').slice(0, 40)}`;
+    const requestFingerprint = `sha256:${crypto.createHash('sha256').update(JSON.stringify({ orgId, days, planId: planVersion.planId, planVersion: planVersion.version })).digest('hex')}`;
+    await unitOfWork.runFinancial({ orgId, operationId: opId, requestFingerprint, callback: async (tx) => {
+      const existing = await subscriptionRepository.getOrganizationSubscription(tx, { orgId, forUpdate: true });
+      if (existing) return { periodId: existing.currentPeriodId, alreadyProvisioned: true };
+      await subscriptionRepository.createOrganizationSubscription(tx, { orgId, lifecycleStatus: 'active', currentPlanId: planVersion.planId,
+        currentPlanVersion: planVersion.version, billingAccessState: 'active', billingSuspensionCause: null,
+        restrictionDeadline: endsAt, accessPolicy: { initialUnpaidAccess: 'billing_recovery', billingTimeZone: 'UTC' }, now: now.toISOString() });
+      const terms = JSON.parse(JSON.stringify(planVersion.terms));
+      const trialCreditAmount = { asset: terms.currency || 'INR', units: '20000', scale: 2 };
+      terms.includedCredits = trialCreditAmount;
+      const snapshot = { schemaVersion: 1, source: 'free_trial', trialDays: days, plan: { id: planVersion.planId, version: planVersion.version, terms }, terms: { ...terms, includedCredits: terms.includedCredits || { asset: 'INR', units: '0', scale: 2 } } };
+      await tx.query(`INSERT INTO billing_periods (id,org_id,period_kind,starts_at,ends_at,anchor_at,terms_version,status,terms_snapshot_json,activated_at,closed_at,created_at,updated_at)
+        VALUES (?,?, 'subscription',?,?,?,NULL,'active',?,?,NULL,?,?)`, [periodId, orgId, now.toISOString(), endsAt, endsAt, JSON.stringify(snapshot), now.toISOString(), now.toISOString(), now.toISOString()]);
+      await tx.query(`UPDATE organization_subscriptions SET current_period_id=?,updated_at=? WHERE org_id=?`, [periodId, now.toISOString(), orgId]);
+      const creditAccount = await creditRepository.ensureAccount(tx, { orgId, accountType: 'organization', ownerId: orgId,
+        asset: trialCreditAmount.asset, scale: trialCreditAmount.scale, accountPurpose: 'pool', now: now.toISOString() });
+      const clearingAccount = await creditRepository.ensureAccount(tx, { orgId, accountType: 'organization', ownerId: orgId,
+        asset: trialCreditAmount.asset, scale: trialCreditAmount.scale, accountPurpose: 'funding_clearing', now: now.toISOString() });
+      const grantId = idSource.newId('billing-trial-credit-grant');
+      const grantPlan = planIssueGrant({ orgId, operationId: `${opId}:credits`, adminAccountId: creditAccount.id,
+        fundingClearingAccountId: clearingAccount.id, actor: { type: 'system', id: 'free-trial-provisioner' }, now: now.toISOString(),
+        reason: `Issue ₹200 free-trial credits for ${days} days`, grant: { id: grantId, kind: 'subscription', amount: trialCreditAmount,
+          sourceType: 'promotion', sourceId: periodId, sourceEventKey: 'free-trial-200-inr-v1', periodId,
+          accountScope: organizationScope(orgId), effectiveAt: now.toISOString(), expiresAt: endsAt } });
+      await creditRepository.createGrant(tx, { orgId, grant: grantPlan.grant, now: now.toISOString() });
+      await creditRepository.applyJournal(tx, { ...grantPlan.journal, positionDeltas: grantPlan.positionDeltas });
+    } });
+    return { periodId, startsAt: now.toISOString(), endsAt, days };
+  }
+
   async function readInitialQuote(orgId) {
     const rows = rowsOf(await pool.query(
       `SELECT s.lifecycle_status,s.billing_access_state,s.current_plan_id,s.current_plan_version,
@@ -167,7 +212,7 @@ function createSubscriptionPurchaseComposition({
     });
   }
 
-  return Object.freeze({ provisionInitialQuote, readInitialQuote });
+  return Object.freeze({ provisionInitialQuote, provisionFreeTrial, readInitialQuote });
 }
 
 module.exports = { createSubscriptionPurchaseComposition, quoteTtlSeconds, inventoryFrom };

@@ -21,7 +21,7 @@ function renewalQuotePayable({ status, validUntil, pendingPayment, paidAt, now =
     && ['draft', 'accepted'].includes(String(status || '').toLowerCase());
 }
 
-function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersion, idSource = { newId: (kind) => `${kind}-${crypto.randomUUID()}` },
+function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersion, listAvailablePlans = async () => [], idSource = { newId: (kind) => `${kind}-${crypto.randomUUID()}` },
   clock = { now: () => new Date().toISOString() }, quoteTtlSeconds: ttlOverride, renewalNoticeDays = 7, billingTimeZone = 'UTC' } = {}) {
   if (typeof getPlanVersion !== 'function') throw new TypeError('Subscription renewal requires a canonical plan version reader.');
   if (!Number.isSafeInteger(renewalNoticeDays) || renewalNoticeDays < 0) throw new TypeError('renewalNoticeDays must be a non-negative integer.');
@@ -79,13 +79,16 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
     });
     const scheduledRenewal = row.scheduled_renewal == null ? null
       : Object.freeze(typeof row.scheduled_renewal === 'string' ? JSON.parse(row.scheduled_renewal) : row.scheduled_renewal);
+    const periodSnapshot = row.terms_snapshot_json == null ? null : objectValue(row.terms_snapshot_json);
+    const trial = periodSnapshot?.source === 'free_trial';
     return Object.freeze({ subscription: Object.freeze({ lifecycleStatus: row.lifecycle_status, accessState: row.billing_access_state,
       version: Number(row.subscription_version), restrictionDeadline: row.restriction_deadline == null ? null : new Date(row.restriction_deadline).toISOString(),
       planId: row.current_plan_id, planVersion: row.current_plan_version == null ? null : Number(row.current_plan_version) }),
       graceRequest,
       scheduledRenewal,
-      period: row.period_id ? Object.freeze({ periodId: row.period_id, status: row.period_status, startsAt, endsAt,
-        renewalEligible: inWindow, overdue: expired }) : null, quote });
+      availablePlans: trial ? await listAvailablePlans(clock.now()) : [],
+      period: row.period_id ? Object.freeze({ periodId: row.period_id, status: row.period_status, startsAt, endsAt, isTrial: trial,
+        trialDays: trial ? Number(periodSnapshot.trialDays) : null, renewalEligible: inWindow, overdue: expired }) : null, quote });
   }
 
   async function inventory(orgId) {
@@ -101,15 +104,23 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
 
   async function readRenewal(orgId) { return state(orgId); }
 
-  async function createRenewalQuote({ orgId, requestKey } = {}) {
+  async function createRenewalQuote({ orgId, requestKey, targetPlanId, targetPlanVersion } = {}) {
     const current = await state(orgId);
     if (!current) return null;
     if (!current.period || !current.period.renewalEligible) fail('RENEWAL_NOT_OPEN', 'Renewal quotes are available during the final 7 days of the subscription period and after expiry.');
     if (current.quote?.pendingPayment) fail('RENEWAL_PAYMENT_PENDING', 'A renewal payment is already awaiting review.', 409);
-    if (current.quote && !current.quote.expired && current.quote.payable) return current;
+    if (current.quote && !current.quote.expired && current.quote.payable) {
+      if (current.period.isTrial && (current.quote.plan?.id !== targetPlanId || current.quote.plan?.version !== targetPlanVersion)) {
+        fail('TRIAL_CONVERSION_QUOTE_EXISTS', 'An active trial conversion quote already exists. Let it expire or submit its payment before choosing another plan.');
+      }
+      return current;
+    }
     if (!current.subscription.planId || !current.subscription.planVersion) fail('SUBSCRIPTION_PLAN_UNAVAILABLE', 'The current subscription has no versioned plan.', 409);
     const now = new Date(clock.now()).toISOString();
-    const planVersion = await getPlanVersion({ planId: current.subscription.planId, version: current.subscription.planVersion });
+    if (current.period.isTrial && (!targetPlanId || !Number.isSafeInteger(targetPlanVersion))) fail('TRIAL_PLAN_REQUIRED', 'Choose a published plan to start after the free trial.');
+    if (!current.period.isTrial && targetPlanId && (targetPlanId !== current.subscription.planId || targetPlanVersion !== current.subscription.planVersion)) fail('RENEWAL_PLAN_CHANGE_UNAVAILABLE', 'Plan changes must use the plan upgrade flow.');
+    const planVersion = await getPlanVersion({ planId: current.period.isTrial ? targetPlanId : current.subscription.planId,
+      version: current.period.isTrial ? targetPlanVersion : current.subscription.planVersion });
     if (!planVersion || planVersion.status !== 'published') fail('SUBSCRIPTION_PLAN_VERSION_UNAVAILABLE', 'The current plan version is unavailable for renewal.');
     const renewalInventory = await inventory(orgId);
     const key = `subscription-renewal-${hash(orgId)}-${hash(requestKey || 'renewal')}`;
@@ -118,7 +129,7 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
       inventory: renewalInventory, createdAt: now, validUntil: new Date(Date.parse(now) + quoteTtlSeconds(ttlOverride) * 1000).toISOString() });
     const opId = `subscription-renewal-${hash(`${orgId}\0${key}`)}`;
     await unitOfWork.runFinancial({ orgId, operationId: opId,
-      requestFingerprint: `sha256:${hash(JSON.stringify({ orgId, quoteId, planId: planVersion.planId, planVersion: planVersion.version, inventory: renewalInventory }))}`,
+        requestFingerprint: `sha256:${hash(JSON.stringify({ orgId, quoteId, planId: planVersion.planId, planVersion: planVersion.version, inventory: renewalInventory }))}`,
       callback: async (tx) => {
         const latest = await subscriptionRepository.getOrganizationSubscription(tx, { orgId, forUpdate: true });
         if (!latest || latest.currentPlanId !== current.subscription.planId || latest.currentPlanVersion !== current.subscription.planVersion) fail('VERSION_CONFLICT', 'Subscription plan changed. Refresh before quoting renewal.');

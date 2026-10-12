@@ -56,7 +56,12 @@ function inventoryDto(row) {
     ownerType: row.owner_type,
     ownerOrgId: row.owner_org_id || null,
     assignedOrgId: row.assigned_org_id || null,
+    allocatedOrgId: row.allocated_org_id || null,
+    allocatedOrgName: row.allocated_org_name || null,
     assignedWorkspaceId: row.assigned_workspace_id || null,
+    assignedWorkspaceName: row.assigned_workspace_name || null,
+    allocationId: row.allocation_id || null,
+    assignmentId: row.assignment_id || null,
     assignedAt: row.assigned_at || null,
   };
 }
@@ -82,8 +87,8 @@ function assignInventoryNumber({ actor, req, res, orgId, workspaceId, numberId, 
     }).catch((err) => handleError(err, res));
 }
 
-function releaseInventoryNumber({ actor, req, res, orgId, numberId, ownerOrgId, reason }) {
-  return inventory.releaseNumber({ actor, phoneNumberId: numberId, orgId, releasedBy: req.userId, reason })
+function releaseInventoryNumber({ actor, req, res, orgId, workspaceId, numberId, ownerOrgId, reason }) {
+  return inventory.releaseNumber({ actor, phoneNumberId: numberId, orgId, workspaceId, releasedBy: req.userId, reason })
     .then((assignment) => {
       recordInventoryAudit(ownerOrgId, req, "telephony.number.release", assignment.id, {
         phoneNumberId: assignment.phoneNumberId,
@@ -111,6 +116,16 @@ function createOrgRouter() {
   router.get("/connectors", async (req, res) => {
     try { return res.json({ connectors: await accounts.listAccounts(ownerForOrg(req)) }); }
     catch (err) { return handleError(err, res); }
+  });
+  router.get("/workspaces", async (req, res) => {
+    try { return res.json({ workspaces: await inventory.listWorkspaces({ orgId: req.orgId, search: req.query.search }) }); }
+    catch (err) { return handleError(err, res); }
+  });
+  router.get("/numbers", async (req, res) => {
+    try {
+      const numbers = await inventory.listInventory({ actor: orgInventoryActor(req) });
+      return res.json({ numbers: numbers.map(inventoryDto) });
+    } catch (err) { return handleError(err, res); }
   });
   router.post("/connectors", async (req, res) => {
     try {
@@ -155,6 +170,13 @@ function createOrgRouter() {
       return res.json({ number });
     } catch (err) { return handleError(err, res); }
   });
+  router.post("/numbers/:numberId/verify", async (req, res) => {
+    try {
+      const number = await inventory.markNumberReady({ actor: orgInventoryActor(req), phoneNumberId: req.params.numberId });
+      recordInventoryAudit(req.orgId, req, "telephony.number.mark_ready", number.id, { provisioningStatus: number.provisioningStatus });
+      return res.json({ number });
+    } catch (err) { return handleError(err, res); }
+  });
   router.post("/numbers/:numberId/assign", (req, res) => assignInventoryNumber({
     actor: orgInventoryActor(req), req, res,
     orgId: req.orgId,
@@ -165,6 +187,7 @@ function createOrgRouter() {
   router.post("/numbers/:numberId/release", (req, res) => releaseInventoryNumber({
     actor: orgInventoryActor(req), req, res,
     orgId: req.orgId,
+    workspaceId: req.body?.workspaceId,
     numberId: req.params.numberId,
     ownerOrgId: req.orgId,
     reason: req.body?.reason,
@@ -179,6 +202,20 @@ function createPlatformRouter() {
   router.use(enabled);
   const owner = { ownerType: "platform", ownerOrgId: null };
   router.get("/providers", (_req, res) => res.json({ providers: accounts.listSupportedProviders() }));
+  router.get("/organizations", async (req, res) => {
+    try {
+      const search = String(req.query.search || '').trim().slice(0, 100);
+      const params = [];
+      let where = 'WHERE 1=1';
+      if (search) { where += ' AND (name LIKE ? OR id LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
+      const { rows } = await require('../db/repository').pool.query(`SELECT id,name FROM organizations ${where} ORDER BY name LIMIT 100`, params);
+      return res.json({ organizations: rows });
+    } catch (err) { return handleError(err, res); }
+  });
+  router.get("/organizations/:orgId/workspaces", async (req, res) => {
+    try { return res.json({ workspaces: await inventory.listWorkspaces({ orgId: req.params.orgId, search: req.query.search }) }); }
+    catch (err) { return handleError(err, res); }
+  });
   router.get("/connectors", async (_req, res) => {
     try { return res.json({ connectors: await accounts.listAccounts(owner) }); }
     catch (err) { return handleError(err, res); }
@@ -226,6 +263,13 @@ function createPlatformRouter() {
       return res.json({ number });
     } catch (err) { return handleError(err, res); }
   });
+  router.post("/numbers/:numberId/verify", async (req, res) => {
+    try {
+      const number = await inventory.markNumberReady({ actor: platformInventoryActor(), phoneNumberId: req.params.numberId });
+      recordInventoryAudit(null, req, "telephony.number.mark_ready", number.id, { provisioningStatus: number.provisioningStatus });
+      return res.json({ number });
+    } catch (err) { return handleError(err, res); }
+  });
   router.post("/numbers/:numberId/assign", (req, res) => assignInventoryNumber({
     actor: platformInventoryActor(), req, res,
     orgId: req.body?.orgId,
@@ -233,13 +277,22 @@ function createPlatformRouter() {
     numberId: req.params.numberId,
     ownerOrgId: null,
   }));
-  router.post("/numbers/:numberId/release", (req, res) => releaseInventoryNumber({
-    actor: platformInventoryActor(), req, res,
-    orgId: req.body?.orgId,
-    numberId: req.params.numberId,
-    ownerOrgId: null,
-    reason: req.body?.reason,
-  }));
+  router.post("/numbers/:numberId/allocate", async (req, res) => {
+    try {
+      const allocation = await inventory.allocateNumber({ actor: platformInventoryActor(), phoneNumberId: req.params.numberId, orgId: req.body?.orgId, allocatedBy: req.userId });
+      recordInventoryAudit(null, req, "telephony.number.allocate", allocation.id, { phoneNumberId: allocation.phoneNumberId, orgId: allocation.orgId });
+      return res.status(201).json({ allocation });
+    } catch (err) { return handleError(err, res); }
+  });
+  const reclaimPlatformNumber = async (req, res) => {
+    try {
+      const allocation = await inventory.releaseAllocation({ actor: platformInventoryActor(), phoneNumberId: req.params.numberId, orgId: req.body?.orgId, releasedBy: req.userId, reason: req.body?.reason });
+      recordInventoryAudit(null, req, "telephony.number.reclaim", allocation.id, { phoneNumberId: allocation.phoneNumberId, orgId: allocation.orgId });
+      return res.json({ allocation });
+    } catch (err) { return handleError(err, res); }
+  };
+  router.post("/numbers/:numberId/release", reclaimPlatformNumber);
+  router.post("/numbers/:numberId/reclaim", reclaimPlatformNumber);
   return router;
 }
 

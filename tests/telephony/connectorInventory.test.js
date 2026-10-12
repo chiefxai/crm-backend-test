@@ -46,6 +46,23 @@ describe('telephony connector inventory service', () => {
     expect(calls.map(({ sql }) => sql).filter((sql) => ['BEGIN', 'COMMIT'].includes(sql))).toEqual(['BEGIN', 'COMMIT']);
   });
 
+  test('allocates a verified platform number to an organization without assigning a workspace', async () => {
+    const { db, calls } = makeDb((sql) => {
+      if (sql.includes('FROM telephony_phone_numbers n')) return { rows: [{
+        id: 'number-1', inventory_status: 'available', provisioning_status: 'ready',
+        owner_type: 'platform', owner_org_id: null, connector_status: 'active',
+      }] };
+      if (sql.includes('FROM organizations')) return { rows: [{ id: 'org-1' }] };
+      return { rows: [] };
+    });
+    const service = createTelephonyConnectorInventory({ pool: db, idFactory: () => 'allocation-1', clock: () => new Date('2026-10-11T00:00:00Z') });
+    const allocation = await service.allocateNumber({ actor: { type: 'platform' }, phoneNumberId: 'number-1', orgId: 'org-1', allocatedBy: 'admin-1' });
+    expect(allocation).toMatchObject({ id: 'allocation-1', phoneNumberId: 'number-1', orgId: 'org-1' });
+    expect(calls.some(({ sql }) => sql.includes('INSERT INTO telephony_number_allocations'))).toBe(true);
+    expect(calls.some(({ sql }) => sql.includes('INSERT INTO telephony_number_assignments'))).toBe(false);
+    expect(calls.some(({ sql }) => sql.includes("inventory_status='allocated'"))).toBe(true);
+  });
+
   test('assigns then releases under row lock and keeps assignment history', async () => {
     const { db, calls } = makeDb((sql) => {
       if (sql.includes('FROM telephony_phone_numbers n')) return { rows: [{
@@ -54,6 +71,7 @@ describe('telephony connector inventory service', () => {
         owner_type: 'platform', owner_org_id: null, connector_status: 'active',
       }] };
       if (sql.includes('FROM workspaces')) return { rows: [{ id: 'ws-1' }] };
+      if (sql.includes('FROM telephony_number_allocations')) return { rows: [{ id: 'allocation-1' }] };
       if (sql.includes('FROM telephony_number_assignments') && sql.includes('ORDER BY assigned_at')) return { rows: [{ id: 'assignment-2' }] };
       if (sql.includes('FROM telephony_number_assignments')) return { rows: [] };
       if (sql.includes('SET inventory_status')) return { rows: [], affectedRows: 1 };
@@ -61,9 +79,9 @@ describe('telephony connector inventory service', () => {
     });
     let nextId = 0;
     const service = createTelephonyConnectorInventory({ pool: db, idFactory: () => `assignment-${++nextId}`, clock: () => new Date('2026-10-11T00:00:00Z') });
-    const assignment = await service.assignNumber({ actor: { type: 'platform' }, phoneNumberId: 'number-1', orgId: 'org-1', workspaceId: 'ws-1' });
+    const assignment = await service.assignNumber({ actor: { type: 'organization', orgId: 'org-1' }, phoneNumberId: 'number-1', orgId: 'org-1', workspaceId: 'ws-1' });
     expect(assignment).toMatchObject({ id: 'assignment-1', phoneNumberId: 'number-1', orgId: 'org-1', workspaceId: 'ws-1' });
-    const release = await service.releaseNumber({ actor: { type: 'platform' }, phoneNumberId: 'number-1', orgId: 'org-1', reason: 'Customer moved number' });
+    const release = await service.releaseNumber({ actor: { type: 'organization', orgId: 'org-1' }, phoneNumberId: 'number-1', orgId: 'org-1', reason: 'Customer moved number' });
     expect(release).toMatchObject({ id: 'assignment-2', phoneNumberId: 'number-1', releasedAt: '2026-10-11T00:00:00.000Z' });
     expect(calls.filter(({ sql }) => sql.includes('FOR UPDATE')).length).toBeGreaterThanOrEqual(3);
     expect(calls.some(({ sql }) => sql.includes('UPDATE telephony_number_assignments'))).toBe(true);
@@ -88,8 +106,9 @@ describe('telephony connector inventory service', () => {
 
   test('lists only account fields in the requested owner scope', async () => {
     const { db, calls } = makeDb((sql, params) => {
-      expect(sql).toContain('a.owner_type=? AND a.owner_org_id <=> ?');
-      expect(params).toEqual(['organization', 'org-9', 'acct-9']);
+      expect(sql).toContain("a.owner_type='organization' AND a.owner_org_id=?");
+      expect(sql).toContain('telephony_number_allocations');
+      expect(params).toEqual(['org-9', 'org-9', 'acct-9']);
       return { rows: [{ id: 'number-9', phone_number_e164: '+14155550132' }] };
     });
     const service = createTelephonyConnectorInventory({ pool: db });

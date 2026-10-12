@@ -364,7 +364,8 @@ router.post("/organizations", async (req, res) => {
       gcpProjectMode = "existing", gcpProject, callProvider, platformTelephonyNumberId = null,
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
       dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null, retentionPolicyId, retentionPolicyVersion,
-      initialWorkspaces: requestedWorkspaces = [], firstBranchName = null
+      initialWorkspaces: requestedWorkspaces = [], firstBranchName = null,
+      freeTrial = false, freeTrialDays = null
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
     const policyTools = require('../workspaces/organizationPolicy');
@@ -385,6 +386,17 @@ router.post("/organizations", async (req, res) => {
       mode: selectedPlan.defaultMode, pricing: selectedPlan.pricing, industryModules: selectedPlan.industryModules || {},
     },String(industry || 'lending').trim().toLowerCase(),industryKeys);
     const subscriptionPlan = selectedPlan.name;
+    if (typeof freeTrial !== 'boolean') throw Object.assign(new Error('Free trial must be enabled or disabled.'), { statusCode: 400 });
+    if (freeTrial && (!Number.isInteger(freeTrialDays) || freeTrialDays < 1 || freeTrialDays > 15)) {
+      throw Object.assign(new Error('Free trial duration must be from 1 to 15 days.'), { statusCode: 400 });
+    }
+    if (!freeTrial && freeTrialDays != null) throw Object.assign(new Error('Free trial days require free trial to be enabled.'), { statusCode: 400 });
+    if (process.env.BILLING_SUBSCRIPTION_PURCHASE_ENABLED !== 'true') {
+      throw Object.assign(new Error('Enable subscription purchase before creating an organization with a trial or initial paid subscription.'), { statusCode: 503, code: 'SUBSCRIPTION_PURCHASE_DISABLED' });
+    }
+    if (process.env.BILLING_PAYMENT_SUBMISSION_ENABLED !== 'true' || process.env.BILLING_PAYMENT_DECISION_ENABLED !== 'true') {
+      throw Object.assign(new Error('Enable payment submission and review before creating an organization with a trial or initial paid subscription.'), { statusCode: 503, code: 'PAYMENT_REVIEW_DISABLED' });
+    }
     if (!Array.isArray(requestedWorkspaces) || requestedWorkspaces.length >= Math.max(2,Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG)||100,1000))) throw policyTools.invalid('Workspace count exceeds the configured organization limit.');
     if (workspacePolicy.mode==='single' && requestedWorkspaces.length) throw policyTools.invalid('Single workspace mode permits only the initial workspace.');
     if (requestedWorkspaces.length && !require('../workspaces/capabilities').multipleWorkspacesEnabled()) throw policyTools.invalid('Multi-workspace provisioning is not enabled.',409);
@@ -566,7 +578,16 @@ router.post("/organizations", async (req, res) => {
     // onboarding flow when the lifecycle is explicitly enabled. A failed quote
     // remains retryable through the organization billing recovery endpoint.
     let initialSubscriptionPurchase = null;
-    if (provisionInitialSubscription) {
+    if (freeTrial) {
+      try {
+        const purchase = require('../billing/subscriptionPurchaseCompositionFactory').createConfiguredSubscriptionPurchaseComposition();
+        const trial = await purchase.provisionFreeTrial({ orgId: org.id, days: freeTrialDays });
+        initialSubscriptionPurchase = { status: 'free_trial', ...trial };
+      } catch (trialError) {
+        log.error('Free trial subscription provisioning failed:', trialError.message);
+        initialSubscriptionPurchase = { status: 'pending', code: trialError.code || 'FREE_TRIAL_PROVISION_ERROR' };
+      }
+    } else if (provisionInitialSubscription) {
       try {
         const purchase = require('../billing/subscriptionPurchaseCompositionFactory')
           .createConfiguredSubscriptionPurchaseComposition();
@@ -984,6 +1005,7 @@ router.delete("/organizations/:id", async (req, res) => {
 
 // Payment decisions inherit the verified platform-operator middleware above.
 router.use(require('../billing/platformPaymentDecisionRouter').router);
+router.use(require('../billing/platformInitialPaymentRouter').router);
 router.use(require('../billing/subscriptionGraceRouter').createPlatformSubscriptionGraceRouter());
 router.use(require('../billing/subscriptionReconciliationRouter').createSubscriptionReconciliationRouter());
 

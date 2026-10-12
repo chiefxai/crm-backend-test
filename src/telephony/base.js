@@ -19,6 +19,8 @@ const CAPABILITY_DEFAULTS = Object.freeze({
   numberProvisioning: false,
   numberDiscovery: false,
   numberPurchase: false,
+  manualNumberEntry: true,
+  numberVerification: false,
   machineDetection: false,
   credentialValidation: false,
 });

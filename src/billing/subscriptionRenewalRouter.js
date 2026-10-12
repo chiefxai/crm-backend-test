@@ -32,11 +32,14 @@ function createSubscriptionRenewalRouter({ compositionFactory } = {}) {
   router.post('/subscription-renewal/quote', requireAuth, requirePermission('billing.read'), requireBillingAdmin, requireFeature, async (req, res) => {
     const requestKey = readKey(req, res);
     if (!requestKey) return undefined;
-    if (req.body && (typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length)) {
-      return res.status(400).json({ code: 'SERVER_RESOLVED_RENEWAL_REQUIRED', error: 'Renewal plan, amount, and organization are resolved from the subscription.' });
+    const body = req.body || {};
+    if (typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => !['targetPlanId', 'targetPlanVersion'].includes(key))
+      || (body.targetPlanId !== undefined && (typeof body.targetPlanId !== 'string' || !Number.isSafeInteger(body.targetPlanVersion)))) {
+      return res.status(400).json({ code: 'INVALID_RENEWAL_PLAN', error: 'Choose a plan ID and published version supplied by the billing service.' });
     }
     try {
-      const result = await composition().createRenewalQuote({ orgId: req.orgId, requestKey });
+      const result = await composition().createRenewalQuote({ orgId: req.orgId, requestKey,
+        targetPlanId: body.targetPlanId, targetPlanVersion: body.targetPlanVersion });
       if (!result) return res.status(404).json({ code: 'SUBSCRIPTION_NOT_FOUND', error: 'Organization subscription was not found.' });
       return res.status(201).json(renewalResponse(result));
     } catch (error) { return sendError(res, error); }
