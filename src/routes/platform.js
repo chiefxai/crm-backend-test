@@ -462,7 +462,7 @@ router.post("/organizations", async (req, res) => {
       if (!validatedPlatformTelephonyNumberId && !hasDeferredTelephonyAllocation && (!callProvider || typeof callProvider !== "object")) {
         return res.status(400).json({ error: "Call provider configuration is required when Charge Scope is AI + Call Provider." });
       }
-      if (!validatedPlatformTelephonyNumberId) {
+      if (!validatedPlatformTelephonyNumberId && !hasDeferredTelephonyAllocation) {
       provider = String(callProvider.provider || "vobiz").trim().toLowerCase();
       if (provider !== "vobiz") {
         return res.status(400).json({ error: "Unsupported call provider. Currently supported: vobiz." });
