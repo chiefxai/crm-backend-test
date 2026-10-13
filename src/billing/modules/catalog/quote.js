@@ -125,8 +125,13 @@ function normalizeInventory(inventory) {
   }
   const distinctIndustryCount = safeCount(inventory.distinctIndustryCount === undefined ? industryCodes.length : inventory.distinctIndustryCount, 'inventory.distinctIndustryCount', { min: 1 });
   if (distinctIndustryCount !== industryCodes.length) invalid('distinctIndustryCount must match the supplied industry codes.');
-  const version = inventory.version === undefined ? (inventory.sourceVersion === undefined ? null : inventory.sourceVersion) : safeCount(inventory.version, 'inventory.version');
-  if (version !== null && typeof version !== 'number' && (typeof version !== 'string' || !version.trim())) invalid('inventory.version/sourceVersion must be a non-empty stable value.');
+  // Inventory snapshots use a stable SHA-256 string version. Preserve support
+  // for numeric versions used by legacy catalog callers without coercing hashes.
+  const version = inventory.version === undefined ? (inventory.sourceVersion === undefined ? null : inventory.sourceVersion) : inventory.version;
+  if (version !== null && !(typeof version === 'number' && Number.isSafeInteger(version) && version >= 0)
+      && !(typeof version === 'string' && version.trim())) {
+    invalid('inventory.version/sourceVersion must be a non-negative safe integer or a non-empty stable string.');
+  }
   return { organizationCount, workspaceCount, ...(separatelyBilledWorkspaceCount ? {separatelyBilledWorkspaceCount} : {}), seatCount, distinctIndustryCount, industryCodes, industryCounts, version };
 }
 
