@@ -2,9 +2,9 @@
 
 const crypto = require('node:crypto');
 
-const runFinancial = jest.fn();
+const mockRunFinancial = jest.fn();
 jest.mock('../../src/billing/adapters/mysql/unitOfWork', () => ({
-  createMysqlUnitOfWork: () => ({ runFinancial }),
+  createMysqlUnitOfWork: () => ({ mockRunFinancial }),
 }));
 jest.mock('../../src/billing/modules/catalog/repositories/mysqlSubscriptionQuoteRepository', () => ({
   createMysqlSubscriptionQuoteRepository: () => ({}),
@@ -45,7 +45,7 @@ test('renewal quote supplies a full SHA-256 financial command fingerprint', asyn
     }),
   };
   const stopped = new Error('stop before database write');
-  runFinancial.mockRejectedValueOnce(stopped);
+  mockRunFinancial.mockRejectedValueOnce(stopped);
   const composition = createSubscriptionRenewalComposition({
     pool,
     getPlanVersion: jest.fn(async () => plan),
@@ -54,8 +54,8 @@ test('renewal quote supplies a full SHA-256 financial command fingerprint', asyn
   await expect(composition.createRenewalQuote({
     orgId: 'org-1', requestKey: 'renewal-test-key',
   })).rejects.toBe(stopped);
-  expect(runFinancial).toHaveBeenCalledTimes(1);
-  const [{ requestFingerprint }] = runFinancial.mock.calls[0];
+  expect(mockRunFinancial).toHaveBeenCalledTimes(1);
+  const [{ requestFingerprint }] = mockRunFinancial.mock.calls[0];
   expect(requestFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
   expect(requestFingerprint).toHaveLength(71);
 });
