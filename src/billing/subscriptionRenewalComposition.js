@@ -16,6 +16,8 @@ function rowsOf(result) {
 function objectValue(value) { return typeof value === 'string' ? JSON.parse(value) : value; }
 function fail(code, message, statusCode = 409) { throw Object.assign(new Error(message), { code, statusCode }); }
 function hash(value) { return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 32); }
+// Financial command fingerprints must be full SHA-256 digests; shortened hashes are only for IDs.
+function fingerprint(value) { return `sha256:${crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
 function renewalQuotePayable({ status, validUntil, pendingPayment, paidAt, now = Date.now() } = {}) {
   return !paidAt && !pendingPayment && validUntil != null && Date.parse(validUntil) > now
     && ['draft', 'accepted'].includes(String(status || '').toLowerCase());
@@ -129,7 +131,7 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
       inventory: renewalInventory, createdAt: now, validUntil: new Date(Date.parse(now) + quoteTtlSeconds(ttlOverride) * 1000).toISOString() });
     const opId = `subscription-renewal-${hash(`${orgId}\0${key}`)}`;
     await unitOfWork.runFinancial({ orgId, operationId: opId,
-        requestFingerprint: `sha256:${hash(JSON.stringify({ orgId, quoteId, planId: planVersion.planId, planVersion: planVersion.version, inventory: renewalInventory }))}`,
+        requestFingerprint: fingerprint({ orgId, quoteId, planId: planVersion.planId, planVersion: planVersion.version, inventory: renewalInventory }),
       callback: async (tx) => {
         const latest = await subscriptionRepository.getOrganizationSubscription(tx, { orgId, forUpdate: true });
         if (!latest || latest.currentPlanId !== current.subscription.planId || latest.currentPlanVersion !== current.subscription.planVersion) fail('VERSION_CONFLICT', 'Subscription plan changed. Refresh before quoting renewal.');
