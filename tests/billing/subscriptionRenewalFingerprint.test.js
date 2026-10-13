@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 
 const mockRunFinancial = jest.fn();
 jest.mock('../../src/billing/adapters/mysql/unitOfWork', () => ({
-  createMysqlUnitOfWork: () => ({ mockRunFinancial }),
+  createMysqlUnitOfWork: () => ({ runFinancial: mockRunFinancial }),
 }));
 jest.mock('../../src/billing/modules/catalog/repositories/mysqlSubscriptionQuoteRepository', () => ({
   createMysqlSubscriptionQuoteRepository: () => ({}),
