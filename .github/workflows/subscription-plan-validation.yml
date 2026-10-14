@@ -3,7 +3,8 @@ name: Subscription Plan Validation
 on:
   push:
     branches:
-      - 'bugfix/subscription-plan-transition-20261014'
+      - 'bugfix/**'
+      - 'feature/**'
   pull_request:
     branches:
       - main
@@ -27,4 +28,4 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Run plan change and billing tests
-        run: npx jest --runInBand --forceExit tests/billing/planChangeImpact.test.js tests/billing/subscriptionRenewalComposition.test.js tests/billing/planCreditStatus.test.js
+        run: npx jest --runInBand --forceExit tests/billing/planChangeImpact.test.js tests/billing/subscriptionRenewalComposition.test.js tests/billing/planCreditStatus.test.js tests/billing/workspaceAddonBilling.test.js
