@@ -89,7 +89,13 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
     // Expose them separately so the tenant sees both trial and paid credits.
     const paidCreditsDuringTrial = trial && scheduledRenewal?.periodId
       ? rowsOf(await pool.query(`
-          SELECT g.id,g.amount_units,g.asset,g.scale,g.effective_at,g.expires_at
+          SELECT g.id,g.amount_units,g.asset,g.scale,g.effective_at,g.expires_at,
+            COALESCE((SELECT SUM(p.balance_units-p.reserved_units)
+              FROM billing_credit_positions p
+              INNER JOIN billing_credit_accounts a ON a.org_id=p.org_id AND a.id=p.account_id
+              WHERE p.org_id=g.org_id AND p.grant_id=g.id
+                AND a.account_type='organization' AND a.owner_id=g.org_id
+                AND a.account_purpose='pool' AND a.status='active'),0) AS pool_available_units
           FROM billing_credit_grants g
           WHERE g.org_id=? AND g.period_id=? AND g.grant_kind='subscription'
             AND g.source_type='subscription_period' AND g.status='active'
@@ -116,6 +122,9 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
       paidCreditsDuringTrial: paidCreditsDuringTrial
         ? Object.freeze({ grantId: paidCreditsDuringTrial.id,
             amount: { asset: paidCreditsDuringTrial.asset, units: String(paidCreditsDuringTrial.amount_units),
+              scale: Number(paidCreditsDuringTrial.scale) },
+            availableInOrganizationPool: { asset: paidCreditsDuringTrial.asset,
+              units: String(paidCreditsDuringTrial.pool_available_units ?? 0),
               scale: Number(paidCreditsDuringTrial.scale) },
             expiresAt: new Date(paidCreditsDuringTrial.expires_at).toISOString() })
         : null,
