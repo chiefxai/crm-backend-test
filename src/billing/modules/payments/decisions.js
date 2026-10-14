@@ -79,11 +79,11 @@ function createPaymentDecisionService({
     const amount = validateAmount(period.termsSnapshot?.terms?.includedCredits);
     if (BigInt(amount.units) <= 0n) return null;
     const orgId = request.orgId;
-    const grantId = stableLifecycleId('subscription-grant', `${orgId}\\0${period.id}`);
+    const grantId = stableLifecycleId('subscription-grant', `${orgId}\0${period.id}`);
     const base = {orgId,accountType:'organization',ownerId:orgId,asset:amount.asset,scale:amount.scale,now};
     const account = await creditRepository.ensureAccount(tx, {...base,accountPurpose:'pool'});
     const clearing = await creditRepository.ensureAccount(tx, {...base,accountPurpose:'funding_clearing'});
-    const operationId = stableLifecycleId('early-trial-paid-grant', `${orgId}\\0${period.id}`);
+    const operationId = stableLifecycleId('early-trial-paid-grant', `${orgId}\0${period.id}`);
     const plan = planIssueGrant({
       orgId,operationId,adminAccountId:account.id,fundingClearingAccountId:clearing.id,
       actor:{type:'system',id:'approved-trial-conversion'},now,
