@@ -234,7 +234,47 @@ function createMysqlSubscriptionRepository() {
         restrictionDeadline == null ? null : instant(restrictionDeadline, 'restrictionDeadline'),
         instant(now, 'now'), orgId, Number(subscriptions.version)],
     );
-    return { linkId: row.id, periodId, subscriptionUpdated: affectedRows(result) === 1, accessRestored: permittedCause };
+    if (affectedRows(result) !== 1) {
+      throw new Error('Subscription activation changed concurrently. Retry safely.');
+    }
+    if (row.plan_id && row.plan_version) {
+      // Canonical activation is the ONLY point at which the visible org plan
+      // and module entitlements change. A quote or pending payment cannot grant
+      // access. Keep this in the same billing transaction as activation.
+      const versionRows = rowsOf(await tx.query(
+        `SELECT p.display_name,v.terms_json FROM billing_plan_versions v
+          JOIN billing_plans p ON p.id=v.plan_id
+          WHERE v.plan_id=? AND v.version=? LIMIT 1`,
+        [row.plan_id, row.plan_version],
+      ));
+      if (!versionRows[0]) throw new Error('Activated subscription plan version is missing.');
+      const terms = parseObject(versionRows[0].terms_json, 'activated plan terms');
+      const price = value => Number(value.units) / 10 ** Number(value.scale);
+      const pricing = {
+        baseMonthlyInr: price(terms.subscriptionPrice),
+        monthlySubscriptionCreditsInr: price(terms.includedCredits),
+        includedWorkspaces: terms.structure.includedWorkspaces,
+        maxWorkspaces: terms.structure.maxWorkspaces,
+        extraWorkspaceMonthlyInr: price(terms.workspaceFees.additionalWorkspace),
+        additionalIndustryMonthlyInr: price(terms.workspaceFees.additionalDistinctIndustry),
+        includedSeats: terms.seats.included,
+        maxSeats: terms.seats.max,
+        extraSeatMonthlyInr: price(terms.seats.additionalSeat),
+      };
+      const orgRows = rowsOf(await tx.query('SELECT settings FROM organizations WHERE id=? FOR UPDATE', [orgId]));
+      if (!orgRows[0]) throw new Error('Organization for activated subscription is missing.');
+      const settings = typeof orgRows[0].settings === 'string' ? JSON.parse(orgRows[0].settings) : (orgRows[0].settings || {});
+      settings.workspacePolicy = {
+        ...(settings.workspacePolicy || {}), planId: row.plan_id,
+        // The billing version and workspace-catalog version are different
+        // counters; preserve the actual published financial version here.
+        planVersion: Number(row.plan_version),
+        mode: terms.structure.mode, pricing, industryModules: terms.industryModules || {},
+      };
+      await tx.query('UPDATE organizations SET subscription_plan=?,settings=? WHERE id=?',
+        [versionRows[0].display_name, JSON.stringify(settings), orgId]);
+    }
+    return { linkId: row.id, periodId, subscriptionUpdated: true, accessRestored: permittedCause };
   }
 
   async function getGraceRequest(tx, { orgId, graceRequestId, forUpdate = false }) {
