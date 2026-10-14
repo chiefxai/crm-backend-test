@@ -63,12 +63,16 @@ describe('free trial subscription provisioning', () => {
       idSource: { newId: (kind) => `${kind}-test-id` },
     });
 
-    await expect(composition.provisionFreeTrial({ orgId, days: 7 })).resolves.toMatchObject({
+    await expect(composition.provisionFreeTrial({ orgId, days: 7, creditsInr: 750 })).resolves.toMatchObject({
       periodId: 'billing-trial-period-test-id',
       startsAt: '2026-10-12T00:00:00.000Z',
       endsAt: '2026-10-19T00:00:00.000Z',
       days: 7,
+      creditsInr: 750,
       alreadyProvisioned: false,
     });
+    const trialInsert = mockTx.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO billing_periods'));
+    expect(JSON.stringify(trialInsert[1])).toContain('75000');
+    await expect(composition.provisionFreeTrial({ orgId, days: 7, creditsInr: -1 })).rejects.toMatchObject({code:'INVALID_TRIAL_CREDITS'});
   });
 });
