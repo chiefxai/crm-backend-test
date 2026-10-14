@@ -78,6 +78,30 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
           accountPurpose: 'funding_clearing', now,
         });
         const grantId = stableId('subscription-grant', `${orgId}\0${periodId}`);
+        // An approved free-trial conversion may already have credited the
+        // scheduled paid period before it started. Its original grant must
+        // survive trial expiry; never issue the included credits a second time.
+        const existingGrant = typeof creditRepository.getGrantForUpdate === 'function'
+          ? await creditRepository.getGrantForUpdate(tx, { orgId, grantId })
+          : null;
+        if (existingGrant) {
+          const sameAmount = existingGrant.amount.asset === creditAmount.asset
+            && existingGrant.amount.scale === creditAmount.scale
+            && BigInt(existingGrant.amount.units) === BigInt(creditAmount.units);
+          if (!sameAmount || existingGrant.grantKind !== 'subscription'
+            || existingGrant.sourceType !== 'subscription_period'
+            || existingGrant.sourceId !== periodId || existingGrant.periodId !== periodId
+            || existingGrant.paymentRequestId !== funding.paymentRequestId
+            || existingGrant.status !== 'active'
+            || Date.parse(existingGrant.effectiveAt) > Date.parse(period.startAt)
+            || Date.parse(existingGrant.expiresAt) !== Date.parse(period.endAt)) {
+            throw new BillingDomainError(DOMAIN_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+              'Previously funded paid credits do not match this subscription period.');
+          }
+          grantResult = Object.freeze({ grantId, amount: creditAmount,
+            effectiveAt: existingGrant.effectiveAt, expiresAt: existingGrant.expiresAt,
+            journalId: null, preissued: true });
+        } else {
         const grantPlan = planIssueGrant({
           orgId, operationId: `${operationId}:grant`, adminAccountId: adminAccount.id,
           fundingClearingAccountId: clearingAccount.id, actor: { type: 'system', id: 'billing-lifecycle' }, now,
@@ -92,6 +116,7 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
         await creditRepository.createGrant(tx, { orgId, grant: grantPlan.grant, now });
         const journal = await creditRepository.applyJournal(tx, { ...grantPlan.journal, positionDeltas: grantPlan.positionDeltas });
         grantResult = Object.freeze({ grantId, amount: creditAmount, effectiveAt: period.startAt, expiresAt: period.endAt, journalId: journal.journalId });
+        }
       }
 
       const occurredAt = new Date(now).toISOString();
