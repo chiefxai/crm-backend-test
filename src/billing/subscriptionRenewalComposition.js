@@ -124,8 +124,10 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
     if (!current.period || !current.period.renewalEligible) fail('RENEWAL_NOT_OPEN', 'Renewal quotes are available during the final 7 days of the subscription period and after expiry.');
     if (current.quote?.pendingPayment) fail('RENEWAL_PAYMENT_PENDING', 'A renewal payment is already awaiting review.', 409);
     if (current.quote && !current.quote.expired && current.quote.payable) {
-      if (current.period.isTrial && (current.quote.plan?.id !== targetPlanId || current.quote.plan?.version !== targetPlanVersion)) {
-        fail('TRIAL_CONVERSION_QUOTE_EXISTS', 'An active trial conversion quote already exists. Let it expire or submit its payment before choosing another plan.');
+      const requestedId = targetPlanId || current.subscription.planId;
+      const requestedVersion = targetPlanId ? targetPlanVersion : current.subscription.planVersion;
+      if (current.quote.plan?.id !== requestedId || current.quote.plan?.version !== requestedVersion) {
+        fail('RENEWAL_QUOTE_EXISTS', 'A different renewal price is already active. Let it expire or complete its payment before choosing another plan.');
       }
       return current;
     }
