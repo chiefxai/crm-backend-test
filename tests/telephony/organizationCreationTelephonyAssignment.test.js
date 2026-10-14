@@ -49,6 +49,25 @@ describe('initial platform telephony number assignment during organization creat
     expect(mockCalls.some(({ sql }) => sql.includes('INSERT INTO channels'))).toBe(false);
   });
 
+  test('creates a channel and a visible virtual number for every BYO provider number', async () => {
+    const { telephonyAssignment } = await createOrganizationSetup({
+      ...baseInput,
+      platformTelephonyNumberId:null,
+      callProvider:{
+        provider:'vobiz', authId:'test-id', authToken:'test-token',
+        phoneNumber:'+14155550123',phoneNumbers:['+14155550123','+14155550124'],
+      },
+    });
+    expect(telephonyAssignment).toBeNull();
+    const channels=mockCalls.filter(({sql})=>sql.includes('INSERT INTO channels'));
+    const virtualNumbers=mockCalls.filter(({sql})=>sql.includes('INSERT INTO virtual_numbers'));
+    expect(channels).toHaveLength(2);
+    expect(channels.map(call=>call.params[3])).toEqual(['+14155550123','+14155550124']);
+    expect(virtualNumbers).toHaveLength(2);
+    expect(virtualNumbers.map(call=>call.params[2])).toEqual(['+14155550123','+14155550124']);
+    expect(mockCalls.map(({sql})=>sql).filter(sql=>sql==='COMMIT')).toHaveLength(1);
+  });
+
   test('rejects platform allocation when the feature is off or both provider choices are supplied', () => {
     const validate = platformRouter.validatePlatformTelephonySelection;
     expect(() => validate({ numberId: 'number-1', callProvider: null, chargeScope: 'ai_and_call_provider', enabled: false }))
