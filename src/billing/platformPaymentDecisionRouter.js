@@ -73,6 +73,15 @@ router.post('/billing/organizations/:orgId/payments/:paymentRequestId/decision',
       });
       const service = createPlatformPaymentDecisionForRequest(req);
       const result = await service.decide({ command, trustedContext });
+      if (command.decision === 'approve' || command.decision === 'reject') {
+        const eventKey = command.decision === 'approve' ? 'payment.approved' : 'payment.rejected';
+        const title = command.decision === 'approve' ? 'Payment approved' : 'Payment rejected';
+        const notify = require('../notifications/service').publishQuietly;
+        void notify({ audience:'platform', orgId:command.orgId, eventKey, dedupeKey:'payment-decision:' + result.paymentRequestId + ':' + command.decision,
+          title, message:'A payment decision has been recorded for an organization.', actionPath:'/admin/reviews?type=payments&orgId=' + encodeURIComponent(command.orgId) });
+        void notify({ audience:'organization', orgId:command.orgId, eventKey, dedupeKey:'payment-decision:' + result.paymentRequestId + ':' + command.decision,
+          title, message:'Your organization payment was ' + (command.decision === 'approve' ? 'approved.' : 'rejected.'), actionPath:'/administration/billing' });
+      }
       return res.json(result);
     } catch (error) {
       return decisionError(res, error);
