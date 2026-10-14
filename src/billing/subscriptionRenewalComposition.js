@@ -84,6 +84,19 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
       : Object.freeze(typeof row.scheduled_renewal === 'string' ? JSON.parse(row.scheduled_renewal) : row.scheduled_renewal);
     const periodSnapshot = row.terms_snapshot_json == null ? null : objectValue(row.terms_snapshot_json);
     const trial = periodSnapshot?.source === 'free_trial';
+    // Read-only: early-funded paid credits are an actual ledger grant, not
+    // an assumption based on "payment submitted" or a marked-paid quote.
+    // Expose them separately so the tenant sees both trial and paid credits.
+    const paidCreditsDuringTrial = trial && scheduledRenewal?.periodId
+      ? rowsOf(await pool.query(`
+          SELECT g.id,g.amount_units,g.asset,g.scale,g.effective_at,g.expires_at
+          FROM billing_credit_grants g
+          WHERE g.org_id=? AND g.period_id=? AND g.grant_kind='subscription'
+            AND g.source_type='subscription_period' AND g.status='active'
+            AND g.effective_at<=? AND g.expires_at>?
+          LIMIT 1`,
+        [orgId, scheduledRenewal.periodId, clock.now(), clock.now()]))[0]
+      : null;
     const candidatePlans = inWindow ? await listAvailablePlans(clock.now()) : [];
     const options = await Promise.all(candidatePlans.map(async (candidate) => {
       const [previous, target] = await Promise.all([
@@ -100,6 +113,12 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
       planId: row.current_plan_id, planVersion: row.current_plan_version == null ? null : Number(row.current_plan_version) }),
       graceRequest,
       scheduledRenewal,
+      paidCreditsDuringTrial: paidCreditsDuringTrial
+        ? Object.freeze({ grantId: paidCreditsDuringTrial.id,
+            amount: { asset: paidCreditsDuringTrial.asset, units: String(paidCreditsDuringTrial.amount_units),
+              scale: Number(paidCreditsDuringTrial.scale) },
+            expiresAt: new Date(paidCreditsDuringTrial.expires_at).toISOString() })
+        : null,
       availablePlans: options,
       period: row.period_id ? Object.freeze({ periodId: row.period_id, status: row.period_status, startsAt, endsAt, isTrial: trial,
         trialDays: trial ? Number(periodSnapshot.trialDays) : null, renewalEligible: inWindow, overdue: expired }) : null, quote });
