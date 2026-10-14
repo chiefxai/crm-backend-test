@@ -9,6 +9,7 @@ const { rowsOf } = require('./modules/payments/repositories/mysqlPaymentSubmissi
 const policyModule = require('../workspaces/organizationPolicy');
 const { assertTransactionContext } = require('./kernel/transactionContext');
 const { BillingDomainError, DOMAIN_ERROR_CODES } = require('./contracts/errors');
+const { createMysqlCreditRepository } = require('./modules/credits/repositories/mysqlCreditRepository');
 
 const DAY = 86400000;
 const GRACE_DAYS = 7;
@@ -19,6 +20,9 @@ const shiftDays = (value, days) => new Date(Date.parse(value) + days * DAY).toIS
 const fail = (message, statusCode = 409) => { throw policyModule.invalid(message, statusCode); };
 function purchasesEnabled(env = process.env) {
   return env.BILLING_PAYMENT_SUBMISSION_ENABLED === 'true' && env.BILLING_PAYMENT_DECISION_ENABLED === 'true';
+}
+function topupRedemptionEnabled(env = process.env) {
+  return env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED === 'true';
 }
 function paymentAmount(units) { return { asset: 'INR', units: String(units), scale: 2 }; }
 function validateWorkspaceInput(input) {
@@ -38,6 +42,7 @@ function createWorkspaceAddonBilling({
 } = {}) {
   const uow = createMysqlUnitOfWork({ pool, clock, idSource, operationStore });
   const notifications = require('./modules/notifications/repositories/mysqlNotificationRepository').createMysqlNotificationRepository({idSource,clock});
+  const credits = createMysqlCreditRepository({idSource,clock});
   const query = async (tx, sql, params) => rowsOf(await tx.query(sql, params));
 
   async function lockOrganization(tx, orgId) {
@@ -80,11 +85,7 @@ function createWorkspaceAddonBilling({
     return invoiceId;
   }
 
-  async function createPurchase({ orgId, memberId, input, context }) {
-    const workspace = validateWorkspaceInput(input);
-    return uow.runFinancial({ orgId,operationId:context.operationId,
-      requestFingerprint:fingerprint({orgId,memberId,workspace,actorId:context.actor.id,pricingAcceptanceToken:input.pricingAcceptanceToken || null}),
-      callback: async tx => {
+  async function preparePurchaseInTransaction(tx, {orgId, memberId, input, workspace}) {
         const org = await lockOrganization(tx,orgId);
         const workspaces = await query(tx,'SELECT id,industry FROM workspaces WHERE org_id=? ORDER BY id',[orgId]);
         const policy = policyModule.effectivePolicy(org,workspaces);
@@ -108,13 +109,95 @@ function createWorkspaceAddonBilling({
         [addon.id,orgId,memberId,workspace.name,workspace.industry,workspace.branchName,addon.monthly_units,addon.terms_snapshot_json,shiftDays(now,1),now,now]);
         const invoiceId = await issueInvoice(tx,addon,{index:0,now});
         return {id:addon.id,name:workspace.name,status:'pending',invoiceId,paymentAmount:paymentAmount(addon.monthly_units),monthlyAmount:paymentAmount(addon.monthly_units)};
-      } });
+  }
+
+  async function createPurchase({ orgId, memberId, input, context }) {
+    const workspace = validateWorkspaceInput(input);
+    return uow.runFinancial({orgId,operationId:context.operationId,
+      requestFingerprint:fingerprint({orgId,memberId,workspace,actorId:context.actor.id,
+        pricingAcceptanceToken:input.pricingAcceptanceToken || null,paymentSource:'approved_receipt'}),
+      callback:tx=>preparePurchaseInTransaction(tx,{orgId,memberId,input,workspace})});
+  }
+
+  const topupBalanceQuery = `SELECT p.grant_id,p.account_id,p.balance_units,p.reserved_units
+    FROM billing_credit_positions p
+    JOIN billing_credit_grants g ON g.org_id=p.org_id AND g.id=p.grant_id
+    JOIN billing_credit_accounts a ON a.org_id=p.org_id AND a.id=p.account_id
+    WHERE p.org_id=? AND a.account_type='organization' AND a.owner_id=?
+      AND a.account_purpose='pool' AND a.status='active'
+      AND g.grant_kind='topup' AND g.status='active' AND g.expires_at IS NULL
+      AND g.effective_at<=? AND p.asset='INR' AND p.scale=2
+      AND p.balance_units>p.reserved_units ORDER BY g.effective_at,p.grant_id`;
+
+  async function availableTopupBalance(orgId) {
+    const rows = rowsOf(await pool.query(topupBalanceQuery,[orgId,orgId,clock.now()]));
+    return paymentAmount(rows.reduce((sum,row)=>sum+BigInt(row.balance_units)-BigInt(row.reserved_units),0n));
+  }
+
+  // Redeem ONLY already approved, unallocated top-up grants. A workspace-level
+  // credit allocation and a subscription grant cannot fund a subscription fee.
+  // The billing account lock and ledger journals prevent concurrent double spend.
+  async function redeemOrganizationTopup(tx,{orgId,invoiceId,requiredUnits,context,now}) {
+    const positions=await query(tx,topupBalanceQuery+' FOR UPDATE',[orgId,orgId,now]);
+    let remaining=BigInt(requiredUnits);
+    const clearing=await credits.ensureAccount(tx,{
+      orgId,accountType:'organization',ownerId:orgId,asset:'INR',scale:2,
+      accountPurpose:'workspace_fee_clearing',now});
+    const redemptions=[];
+    for (const position of positions) {
+      if (remaining<=0n) break;
+      const available=BigInt(position.balance_units)-BigInt(position.reserved_units);
+      if (available<=0n) continue;
+      const units=available<remaining?available:remaining;
+      redemptions.push({grantId:position.grant_id,accountId:position.account_id,units});
+      remaining-=units;
+    }
+    if (remaining>0n) fail('Not enough unallocated top-up credits. Add more credits or submit the workspace invoice for approval.',402);
+    const entries=[];
+    const positionDeltas=[];
+    for (const item of redemptions) {
+      entries.push({accountId:item.accountId,grantId:item.grantId,
+        amountUnits:(-item.units).toString(),asset:'INR',scale:2,entryType:'workspace_fee_redemption'});
+      entries.push({accountId:clearing.id,grantId:item.grantId,
+        amountUnits:item.units.toString(),asset:'INR',scale:2,entryType:'workspace_fee_clearing'});
+      positionDeltas.push({accountId:item.accountId,grantId:item.grantId,balanceDeltaUnits:(-item.units).toString(),
+        reservedDeltaUnits:'0',asset:'INR',scale:2});
+    }
+    const journal=await credits.applyJournal(tx,{
+      orgId,operationId:`${context.operationId}:topup-redemption`,
+      operationType:'workspace_fee_redemption',sourceType:'workspace_addon_invoice',
+      sourceId:invoiceId,actorType:'user',actorId:context.actor.id,
+      reason:'Redeem paid top-up credits for one workspace add-on month',
+      entries,positionDeltas,now});
+    return {journalId:journal.journalId,charged:paymentAmount(requiredUnits)};
+  }
+
+  async function purchaseWithTopup({orgId,memberId,input,context}) {
+    if(!topupRedemptionEnabled()) fail('Workspace purchases with top-up credits are not enabled.',503);
+    const workspace=validateWorkspaceInput(input);
+    return uow.runFinancial({orgId,operationId:context.operationId,
+      requestFingerprint:fingerprint({orgId,memberId,workspace,actorId:context.actor.id,
+        pricingAcceptanceToken:input.pricingAcceptanceToken || null,paymentSource:'topup_credits'}),
+      callback:async tx=>{
+        const prepared=await preparePurchaseInTransaction(tx,{orgId,memberId,input,workspace});
+        const now=clock.now();
+        const redemption=await redeemOrganizationTopup(tx,{orgId,invoiceId:prepared.invoiceId,
+          requiredUnits:prepared.paymentAmount.units,context,now});
+        const settled=await applyInvoicePayment(tx,{orgId,invoiceId:prepared.invoiceId,
+          paymentRequestId:null,amount:prepared.paymentAmount,now,
+          topupRedemptionJournalId:redemption.journalId});
+        return { ...prepared,status:'active',paymentSource:'topup_credits',
+          chargedTopupCredits:redemption.charged,
+          workspaceId:settled.workspaceId,periodEndsAt:settled.periodEndsAt};
+      }});
   }
 
   // Called inside the payment decision transaction. This only settles invoices
   // linked to a persisted workspace purchase; ordinary usage invoices return null.
-  async function applyInvoicePayment(tx, {orgId,invoiceId,paymentRequestId,amount,now}) {
+  async function applyInvoicePayment(tx, {orgId,invoiceId,paymentRequestId,amount,now,topupRedemptionJournalId=null}) {
     assertTransactionContext(tx);
+    if (!paymentRequestId && !topupRedemptionJournalId) fail('An approved payment or verified credit redemption is required.');
+    if (paymentRequestId && topupRedemptionJournalId) fail('An invoice cannot use two payment methods.');
     if (tx.metadata?.orgId !== orgId) throw new TypeError('Workspace purchase organization must match the transaction.');
     const cycle = (await query(tx,'SELECT * FROM billing_workspace_addon_cycles WHERE org_id=? AND invoice_id=? FOR UPDATE',[orgId,invoiceId]))[0];
     if (!cycle) return null;
@@ -129,7 +212,7 @@ function createWorkspaceAddonBilling({
     const paymentId = idSource.newId('billing-invoice-payment');
     await tx.query(`INSERT INTO billing_invoice_payments
       (id,org_id,invoice_id,payment_request_id,idempotency_key,amount_units,asset,scale,status,applied_at,created_at)
-      VALUES (?,?,?,?,?,?,'INR',2,'applied',?,?)`,[paymentId,orgId,invoiceId,paymentRequestId,`workspace-addon:${paymentRequestId}`,amount.units,now,now]);
+      VALUES (?,?,?,?,?,?,'INR',2,'applied',?,?)`,[paymentId,orgId,invoiceId,paymentRequestId,`workspace-addon:${paymentRequestId || 'credits:'+invoiceId}`,amount.units,now,now]);
     await tx.query("UPDATE billing_invoices SET status='paid',paid_units=total_units,paid_at=?,updated_at=?,version=version+1 WHERE org_id=? AND id=?",[now,now,orgId,invoiceId]);
     let workspaceId = addon.workspace_id;
     if (!workspaceId) {
@@ -254,7 +337,7 @@ function createWorkspaceAddonBilling({
     return {scanned:candidates.length,results};
   }
 
-  return {createPurchase,applyInvoicePayment,list,changeRenewal,cancelPending,runMaintenance};
+  return {createPurchase,purchaseWithTopup,availableTopupBalance,applyInvoicePayment,list,changeRenewal,cancelPending,runMaintenance};
 }
 
-module.exports = {createWorkspaceAddonBilling,purchasesEnabled,validateWorkspaceInput,monthBoundary,GRACE_DAYS};
+module.exports = {createWorkspaceAddonBilling,purchasesEnabled,topupRedemptionEnabled,validateWorkspaceInput,monthBoundary,GRACE_DAYS};
