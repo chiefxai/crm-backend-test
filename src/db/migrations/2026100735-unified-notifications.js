@@ -36,6 +36,13 @@ module.exports = {
       updated_at DATETIME(6) NOT NULL,
       PRIMARY KEY (user_id,audience,event_key,channel)
     )` },
+    { sql: `CREATE TABLE IF NOT EXISTS app_notification_users (
+      user_id VARCHAR(191) NOT NULL,
+      audience VARCHAR(20) NOT NULL,
+      email VARCHAR(320) NOT NULL,
+      last_seen_at DATETIME(6) NOT NULL,
+      PRIMARY KEY (user_id,audience)
+    )` },
     { sql: `CREATE TABLE IF NOT EXISTS app_notification_email_deliveries (
       id VARCHAR(36) NOT NULL PRIMARY KEY,
       notification_id VARCHAR(36) NOT NULL,
