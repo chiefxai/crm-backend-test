@@ -32,7 +32,7 @@ function broadcastNotificationHint({ orgId, workspaceId = null }) {
   for (const client of logClients) {
     if (client.orgId !== orgId) continue;
     if (workspaceId && client.workspaceId !== workspaceId) continue;
-    try { client.res.write('event: notification\\ndata: {}\\n\\n'); } catch (_) { /* client disconnected */ }
+    try { client.res.write('event: notification\ndata: {}\n\n'); } catch (_) { /* client disconnected */ }
   }
 }
 
