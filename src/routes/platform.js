@@ -474,19 +474,33 @@ router.post("/organizations", async (req, res) => {
       }
       const authId = String(callProvider.authId || "").trim();
       const authToken = String(callProvider.authToken || "").trim();
-      const phoneNumber = String(callProvider.phoneNumber || "").trim();
-      if (!authId || !authToken || !phoneNumber) {
-        return res.status(400).json({ error: "Vobiz auth ID, auth token, and phone number are required." });
+      const hasList = callProvider.phoneNumbers !== undefined;
+      if (hasList && (!Array.isArray(callProvider.phoneNumbers) || !callProvider.phoneNumbers.length || callProvider.phoneNumbers.length > 25)) {
+        return res.status(400).json({ error: "Enter between 1 and 25 call-provider phone numbers." });
       }
-      if (!(await db.isNumberAvailable(phoneNumber, null))) {
-        return organizationConflict(res, 'call_provider_number_in_use', "This call-provider number is already assigned to another organization.");
+      const phoneNumbers = hasList
+        ? callProvider.phoneNumbers.map(value => typeof value === 'string' ? value.trim() : '')
+        : [String(callProvider.phoneNumber || "").trim()];
+      if (!authId || !authToken || phoneNumbers.some(value => !/^\\+[1-9]\\d{7,14}$/.test(value))) {
+        return res.status(400).json({ error: "Vobiz credentials and valid E.164 phone numbers are required." });
       }
-      const { data: existingCallChannel } = await require("../db/client")
-        .from("channels").select("org_id").systemReadOnly("Check global call-provider channel ownership during organization setup").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
-      if (existingCallChannel) {
-        return organizationConflict(res, 'call_provider_channel_in_use', "This call-provider number is already connected to another organization.");
+      if (new Set(phoneNumbers).size !== phoneNumbers.length) {
+        return res.status(400).json({ error: "A phone number can only be added once to this organization." });
       }
-      validatedCallProvider = { provider, authId, authToken, phoneNumber };
+      if (hasList && callProvider.phoneNumber != null && String(callProvider.phoneNumber).trim() !== phoneNumbers[0]) {
+        return res.status(400).json({ error: "Primary phone number must match the first mapped number." });
+      }
+      for (const phoneNumber of phoneNumbers) {
+        if (!(await db.isNumberAvailable(phoneNumber, null))) {
+          return organizationConflict(res, 'call_provider_number_in_use', `Call-provider number ${phoneNumber} is already assigned to another organization.`);
+        }
+        const { data: existingCallChannel } = await require("../db/client")
+          .from("channels").select("org_id").systemReadOnly("Check global call-provider channel ownership during organization setup").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
+        if (existingCallChannel) {
+          return organizationConflict(res, 'call_provider_channel_in_use', `Call-provider number ${phoneNumber} is already connected to another organization.`);
+        }
+      }
+      validatedCallProvider = { provider, authId, authToken, phoneNumber: phoneNumbers[0], phoneNumbers };
       }
     }
 
@@ -671,6 +685,7 @@ router.post("/organizations", async (req, res) => {
         name, workspaceName, adminEmail, gcpProjectMode: "existing", gcpProjectId: validatedGcp.project.projectId,
         callProvider: validatedCallProvider?.provider || null,
         callProviderPhoneNumber: validatedCallProvider?.phoneNumber || null,
+        callProviderPhoneNumberCount: validatedCallProvider?.phoneNumbers?.length || (validatedCallProvider ? 1 : 0),
         platformTelephonyNumberId: validatedPlatformTelephonyNumberId,
         telephonyAssignmentId: telephonyAssignment?.id || null,
         billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge, workspacePolicy, initialWorkspaceCount: initialWorkspaces.length + 1, retentionPolicyId: selectedRetention?.policyId || null
