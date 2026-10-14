@@ -951,6 +951,11 @@ async function finalizeCallRecord({
     }
   }
 
+  if (savedLog) {
+    void require("../notifications/service").publishQuietly({ audience: "organization", orgId, eventKey: "call.completed", dedupeKey: "call:" + callId,
+      title: "Call completed", message: "Call with " + (savedLog.leadName || callerNumber || "unknown number") + " completed.", actionPath: "/call-logs" });
+  }
+
   // Everything after persistence is best-effort. Failure here must not make
   // RabbitMQ replay a call whose DB row already exists.
   try {
@@ -1062,6 +1067,10 @@ async function finalizeCallRecord({
           nextDialAt: null,
         });
 
+        if (taskFinished) {
+          void require("../notifications/service").publishQuietly({ audience: "organization", orgId, eventKey: "campaign.completed", dedupeKey: "dialer-task:" + retryContext.taskId,
+            title: "Campaign completed", message: "Campaign \"" + task.name + "\" finished dialing all leads.", actionPath: "/campaign" });
+        }
         if (taskFinished && global.broadcastLog) {
           global.broadcastLog(`🤖 Auto-dial task "${task.name}" completed — every lead has been dialed.`, {
             type: "auto_dial_progress",
