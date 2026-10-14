@@ -12,8 +12,10 @@ async function flush({ pool = getPool(), limit = 20 } = {}) {
   try {
     const { rows } = await pool.query(
       "SELECT d.id,d.recipient_email,d.attempts,n.title,n.message,n.action_path FROM app_notification_email_deliveries d " +
-      "JOIN app_notifications n ON n.id=d.notification_id WHERE (d.status='pending' AND d.next_attempt_at<=UTC_TIMESTAMP(6)) " +
-      "OR (d.status='sending' AND d.updated_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 5 MINUTE)) " +
+      "JOIN app_notifications n ON n.id=d.notification_id JOIN app_notification_preferences p " +
+      "ON p.user_id=d.user_id AND p.audience=n.audience AND p.event_key=n.event_key AND p.channel='email' AND p.enabled=1 " +
+      "WHERE ((d.status='pending' AND d.next_attempt_at<=UTC_TIMESTAMP(6)) " +
+      "OR (d.status='sending' AND d.updated_at<DATE_SUB(UTC_TIMESTAMP(6),INTERVAL 5 MINUTE))) " +
       "ORDER BY d.next_attempt_at ASC LIMIT ?", [Math.max(1,Math.min(100,limit))]);
     for (const row of rows) {
       const claim = await pool.query(
