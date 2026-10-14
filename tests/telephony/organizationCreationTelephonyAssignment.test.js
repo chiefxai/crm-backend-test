@@ -16,6 +16,7 @@ const mockConnection = {
   release() {},
 };
 
+jest.mock('../../src/security/channelCredentials', () => ({ encryptJson: jest.fn(() => 'encrypted-test-credentials') }));
 jest.mock('../../src/db/client', () => ({ ready: Promise.resolve() }));
 jest.mock('../../src/db/pool', () => ({ pool: { connect: jest.fn(async () => mockConnection) } }));
 jest.mock('../../src/db/repositories/workspaceRepository', () => ({ ensureDefault: jest.fn(async () => {}) }));
