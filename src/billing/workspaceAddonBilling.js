@@ -240,7 +240,12 @@ function createWorkspaceAddonBilling({
     const rows = rowsOf(await pool.query(`SELECT a.id,a.name,a.status,a.workspace_id,a.monthly_units,a.auto_renew,a.period_ends_at,a.grace_ends_at,
       c.invoice_id,c.starts_at,c.ends_at,i.status AS invoice_status,i.total_units,i.paid_units,i.due_at,
       (SELECT p.id FROM billing_payment_requests p WHERE p.org_id=a.org_id AND p.invoice_id=c.invoice_id AND p.status IN ('pending_verification','needs_clarification','clarification_requested') ORDER BY p.created_at DESC LIMIT 1) AS payment_request_id,
-      (SELECT p.status FROM billing_payment_requests p WHERE p.org_id=a.org_id AND p.invoice_id=c.invoice_id ORDER BY p.created_at DESC LIMIT 1) AS payment_status
+      (SELECT p.status FROM billing_payment_requests p WHERE p.org_id=a.org_id AND p.invoice_id=c.invoice_id ORDER BY p.created_at DESC LIMIT 1) AS payment_status,
+      (SELECT CASE WHEN ip.payment_request_id IS NULL AND ip.idempotency_key LIKE 'workspace-addon:credits:%'
+          THEN 'topup_credits' ELSE 'approved_payment' END
+        FROM billing_invoice_payments ip
+        WHERE ip.org_id=c.org_id AND ip.invoice_id=c.invoice_id AND ip.status='applied'
+        ORDER BY ip.created_at DESC LIMIT 1) AS payment_source
       FROM billing_workspace_addons a
       LEFT JOIN billing_workspace_addon_cycles c ON c.org_id=a.org_id AND c.addon_id=a.id
         AND c.cycle_index=(SELECT MAX(c2.cycle_index) FROM billing_workspace_addon_cycles c2 WHERE c2.org_id=a.org_id AND c2.addon_id=a.id)
@@ -250,7 +255,7 @@ function createWorkspaceAddonBilling({
       status:row.workspace_id && Date.parse(clock.now()) >= Date.parse(iso(row.auto_renew ? row.grace_ends_at : row.period_ends_at)) ? 'suspended' : row.status,
       workspaceId:row.workspace_id,
       monthlyAmount:paymentAmount(row.monthly_units),autoRenew:Boolean(row.auto_renew),periodEndsAt:iso(row.period_ends_at),graceEndsAt:iso(row.grace_ends_at),
-      invoice:row.invoice_id ? {id:row.invoice_id,status:row.invoice_status,paymentAmount:paymentAmount(BigInt(row.total_units)-BigInt(row.paid_units)),dueAt:iso(row.due_at),paymentRequestId:row.payment_request_id,paymentStatus:row.payment_status} : null}));
+      invoice:row.invoice_id ? {id:row.invoice_id,status:row.invoice_status,paymentAmount:paymentAmount(BigInt(row.total_units)-BigInt(row.paid_units)),dueAt:iso(row.due_at),paymentRequestId:row.payment_request_id,paymentStatus:row.payment_status,paymentSource:row.payment_source || null} : null}));
   }
 
   async function changeRenewal({orgId,addonId,autoRenew,context}) {
