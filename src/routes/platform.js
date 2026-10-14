@@ -703,6 +703,41 @@ router.post("/organizations", async (req, res) => {
   }
 });
 
+// Edit non-financial organization metadata. Subscription changes MUST use
+// approved, versioned billing transitions; never overwrite the legacy plan
+// field without changing the subscription and its entitlement snapshot.
+router.patch('/organizations/:id', async (req, res) => {
+  try {
+    const input = req.body || {};
+    const allowed = ['name', 'workspaceName', 'aiMinutesLimit'];
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some(key => !allowed.includes(key))) {
+      return res.status(400).json({ error: 'Only organization name, workspace name and AI minutes limit can be edited here. Use subscription renewal for plan changes.' });
+    }
+    const org = await db.getOrg(req.params.id);
+    if (!org) return res.status(404).json({ error: 'Organization not found.' });
+    const patch = {};
+    if ('name' in input) {
+      if (typeof input.name !== 'string' || !input.name.trim()) return res.status(400).json({ error: 'Organization name is required.' });
+      patch.name = input.name.trim();
+    }
+    if ('workspaceName' in input) {
+      if (typeof input.workspaceName !== 'string' || !input.workspaceName.trim()) return res.status(400).json({ error: 'Workspace name is required.' });
+      patch.workspaceName = input.workspaceName.trim();
+    }
+    if ('aiMinutesLimit' in input) {
+      if (input.aiMinutesLimit !== null && (!Number.isSafeInteger(input.aiMinutesLimit) || input.aiMinutesLimit < 0)) {
+        return res.status(400).json({ error: 'AI minutes limit must be a nonnegative whole number or null.' });
+      }
+      patch.aiMinutesLimit = input.aiMinutesLimit;
+    }
+    const updated = await db.updateOrg(org.id, patch);
+    await auditLog.record(org.id, { userId: req.userId, userEmail: req.userEmail },
+      'platform.org.profile.update', 'organization', org.id, { changedFields: Object.keys(patch) });
+    res.json(updated);
+  } catch (error) { handleError(error, res); }
+});
+
 // Recover a trial for an organization whose setup completed but whose billing
 // transaction was rolled back. Only organizations without an existing
 // subscription can be provisioned through this platform-admin action.
