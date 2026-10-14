@@ -77,6 +77,10 @@ function createRepository(pool = getPool()) {
     for (const item of changes) {
       await pool.query('INSERT INTO app_notification_preferences (user_id,audience,event_key,channel,enabled,updated_at) VALUES (?,?,?,?,?,UTC_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),updated_at=VALUES(updated_at)',
         [userId,audience,item.eventKey,item.channel,item.enabled ? 1 : 0]);
+      // Opting out must also cancel any previously queued (but unsent) mail.
+      if (item.channel === 'email' && !item.enabled) {
+        await pool.query("UPDATE app_notification_email_deliveries d JOIN app_notifications n ON n.id=d.notification_id SET d.status='cancelled',d.updated_at=UTC_TIMESTAMP(6) WHERE d.user_id=? AND n.event_key=? AND n.audience=? AND d.status='pending'", [userId,item.eventKey,audience]);
+      }
     }
     return preferences({ audience,userId });
   }
