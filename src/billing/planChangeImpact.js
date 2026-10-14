@@ -34,6 +34,10 @@ function assessPlanTransition(current, target, inventory) {
   const nextModules = target.industryModules || {};
   // An empty module map means legacy unrestricted terms; do not fabricate
   // a list of removed modules from an unknown old entitlement.
+  const missingHistoricalEntitlements = !Object.keys(currentModules).length && Object.keys(nextModules).length;
+  if (missingHistoricalEntitlements) {
+    conflicts.push('Existing module entitlements cannot be verified against the target plan. Contact billing support before changing.');
+  }
   const removedModules = Object.keys(currentModules).length && Object.keys(nextModules).length
     ? industries.flatMap(industry => (currentModules[industry] || [])
         .filter(key => !(nextModules[industry] || []).includes(key))
