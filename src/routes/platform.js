@@ -481,7 +481,7 @@ router.post("/organizations", async (req, res) => {
       const phoneNumbers = hasList
         ? callProvider.phoneNumbers.map(value => typeof value === 'string' ? value.trim() : '')
         : [String(callProvider.phoneNumber || "").trim()];
-      if (!authId || !authToken || phoneNumbers.some(value => !/^\\+[1-9]\\d{7,14}$/.test(value))) {
+      if (!authId || !authToken || phoneNumbers.some(value => !/^\+[1-9]\d{7,14}$/.test(value))) {
         return res.status(400).json({ error: "Vobiz credentials and valid E.164 phone numbers are required." });
       }
       if (new Set(phoneNumbers).size !== phoneNumbers.length) {
