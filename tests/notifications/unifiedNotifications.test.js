@@ -1,4 +1,5 @@
 'use strict';
+jest.mock('../../src/db/pool', () => ({ getPool: jest.fn() }));
 const { catalogFor, eventFor } = require('../../src/notifications/catalog');
 const { createRepository } = require('../../src/notifications/repository');
 const { createService } = require('../../src/notifications/service');
