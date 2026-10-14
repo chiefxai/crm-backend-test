@@ -75,7 +75,7 @@ function fixture({ purchaseAt = '2026-10-20T12:00:00.000Z', account = {} } = {})
     clock: { now: () => '2026-10-20T12:00:00.000Z' },
   });
   const baseCommand = { orgId: 'org-a', operationId: 'op-1', requestFingerprint: `sha256:${'a'.repeat(64)}` };
-  return { service, periodRepository, baseCommand };
+  return { service, periodRepository, baseCommand, tx };
 }
 
 describe('subscription lifecycle', () => {
@@ -101,13 +101,13 @@ describe('subscription lifecycle', () => {
   });
 
   test('identifies only active free-trial conversion for early paid credit funding',async()=>{
-    const {service,periodRepository,baseCommand}=fixture();
+    const {service,periodRepository,tx}=fixture();
     periodRepository.periods.set('free-trial',{
       id:'free-trial',orgId:'org-a',periodKind:'subscription',status:'active',
       startAt:'2026-10-15T00:00:00.000Z',endAt:'2026-10-25T00:00:00.000Z',
       anchorAt:'2026-10-25T00:00:00.000Z',termsSnapshot:{source:'free_trial',trialDays:10},
     });
-    const result=await service.schedulePaidRenewal({...baseCommand,paymentRequestId:'payment-a'});
+    const result=await service.schedulePaidRenewalInTransaction({tx,orgId:'org-a',paymentRequestId:'payment-a'});
     expect(result.trialConversion).toBe(true);
     expect(result.startAt).toBe('2026-10-25T00:00:00.000Z');
     expect(result.termsSnapshot.terms.includedCredits).toEqual(TERMS.includedCredits);
