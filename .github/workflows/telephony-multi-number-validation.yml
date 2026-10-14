@@ -1,0 +1,31 @@
+name: Telephony Multi-Number Validation
+
+on:
+  push:
+    branches:
+      - 'feature/multi-phone-workspace-onboarding-*'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/routes/platform.js'
+      - 'src/routes/telephonyConnectors.js'
+      - 'src/telephony/connectorInventory.js'
+      - 'src/db/repositories/organizationRepository.js'
+      - 'tests/telephony/**'
+      - '.github/workflows/telephony-multi-number-validation.yml'
+
+jobs:
+  telephony-number-mapping-tests:
+    name: Multi-number mapping regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Run connector and onboarding tests
+        run: npx jest --runInBand --forceExit tests/telephony/connectorInventory.test.js tests/telephony/organizationCreationTelephonyAssignment.test.js tests/telephony/connectorInventoryRoutes.test.js
