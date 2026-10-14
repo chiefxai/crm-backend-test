@@ -29,7 +29,8 @@ const log = getLogger("routes.platform");
 
 const router = express.Router();
 router.use(requireAuthIdentityOnly, requirePlatformAdmin);
-router.use("/telephony", require("./telephonyConnectors").createPlatformRouter());\nrouter.use("/notifications", require("../notifications/routes").createPlatformRouter());
+router.use("/telephony", require("./telephonyConnectors").createPlatformRouter());
+router.use("/notifications", require("../notifications/routes").createPlatformRouter());
 
 function handleError(err, res) {
   const status = err.statusCode || 500;
