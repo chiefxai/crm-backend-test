@@ -381,7 +381,7 @@ router.post("/organizations", async (req, res) => {
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
       dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null, retentionPolicyId, retentionPolicyVersion,
       initialWorkspaces: requestedWorkspaces = [], firstBranchName = null,
-      freeTrial = false, freeTrialDays = null
+      freeTrial = false, freeTrialDays = null, freeTrialCreditsInr = null
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
     const policyTools = require('../workspaces/organizationPolicy');
@@ -406,6 +406,8 @@ router.post("/organizations", async (req, res) => {
     if (freeTrial && (!Number.isInteger(freeTrialDays) || freeTrialDays < 1 || freeTrialDays > 15)) {
       throw Object.assign(new Error('Free trial duration must be from 1 to 15 days.'), { statusCode: 400 });
     }
+    if (freeTrial && (!Number.isSafeInteger(freeTrialCreditsInr) || freeTrialCreditsInr < 0 || freeTrialCreditsInr > 10000000)) throw Object.assign(new Error('Trial credits must be a whole INR amount between ₹0 and ₹1,00,00,000.'), { statusCode: 400 });
+    if (!freeTrial && freeTrialCreditsInr != null) throw Object.assign(new Error('Trial credits require free trial to be enabled.'), { statusCode: 400 });
     if (!freeTrial && freeTrialDays != null) throw Object.assign(new Error('Free trial days require free trial to be enabled.'), { statusCode: 400 });
     if (process.env.BILLING_SUBSCRIPTION_PURCHASE_ENABLED !== 'true') {
       throw Object.assign(new Error('Enable subscription purchase before creating an organization with a trial or initial paid subscription.'), { statusCode: 503, code: 'SUBSCRIPTION_PURCHASE_DISABLED' });
@@ -618,7 +620,7 @@ router.post("/organizations", async (req, res) => {
     if (freeTrial) {
       try {
         const purchase = require('../billing/subscriptionPurchaseCompositionFactory').createConfiguredSubscriptionPurchaseComposition();
-        const trial = await purchase.provisionFreeTrial({ orgId: org.id, days: freeTrialDays });
+        const trial = await purchase.provisionFreeTrial({ orgId: org.id, days: freeTrialDays, creditsInr: freeTrialCreditsInr });
         initialSubscriptionPurchase = { status: 'free_trial', ...trial };
       } catch (trialError) {
         log.error('Free trial subscription provisioning failed:', {
