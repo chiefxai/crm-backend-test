@@ -33,13 +33,15 @@ function createSubscriptionRenewalRouter({ compositionFactory } = {}) {
     const requestKey = readKey(req, res);
     if (!requestKey) return undefined;
     const body = req.body || {};
-    if (typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => !['targetPlanId', 'targetPlanVersion'].includes(key))
-      || (body.targetPlanId !== undefined && (typeof body.targetPlanId !== 'string' || !Number.isSafeInteger(body.targetPlanVersion)))) {
+    if (typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => !['targetPlanId', 'targetPlanVersion', 'acknowledgeFeatureLoss'].includes(key))
+      || (body.targetPlanId !== undefined && (typeof body.targetPlanId !== 'string' || !Number.isSafeInteger(body.targetPlanVersion)))
+      || (body.acknowledgeFeatureLoss !== undefined && typeof body.acknowledgeFeatureLoss !== 'boolean')) {
       return res.status(400).json({ code: 'INVALID_RENEWAL_PLAN', error: 'Choose a plan ID and published version supplied by the billing service.' });
     }
     try {
       const result = await composition().createRenewalQuote({ orgId: req.orgId, requestKey,
-        targetPlanId: body.targetPlanId, targetPlanVersion: body.targetPlanVersion });
+        targetPlanId: body.targetPlanId, targetPlanVersion: body.targetPlanVersion,
+        acknowledgeFeatureLoss: body.acknowledgeFeatureLoss === true });
       if (!result) return res.status(404).json({ code: 'SUBSCRIPTION_NOT_FOUND', error: 'Organization subscription was not found.' });
       return res.status(201).json(renewalResponse(result));
     } catch (error) { return sendError(res, error); }
