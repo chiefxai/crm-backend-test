@@ -8,6 +8,7 @@ const { createMysqlSubscriptionRepository } = require('./modules/subscriptions/r
 const { inventoryFrom, quoteTtlSeconds } = require('./subscriptionPurchaseComposition');
 const { composeSubscriptionQuote } = require('./modules/catalog/subscriptionQuoteComposition');
 const { shiftCalendarDays } = require('./modules/subscriptions/periodMath');
+const { assessPlanTransition } = require('./planChangeImpact');
 
 function rowsOf(result) {
   const value = Array.isArray(result) && result.length === 2 && Array.isArray(result[0]) ? result[0] : result;
@@ -83,12 +84,23 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
       : Object.freeze(typeof row.scheduled_renewal === 'string' ? JSON.parse(row.scheduled_renewal) : row.scheduled_renewal);
     const periodSnapshot = row.terms_snapshot_json == null ? null : objectValue(row.terms_snapshot_json);
     const trial = periodSnapshot?.source === 'free_trial';
+    const candidatePlans = inWindow ? await listAvailablePlans(clock.now()) : [];
+    const options = await Promise.all(candidatePlans.map(async (candidate) => {
+      const [previous, target] = await Promise.all([
+        getPlanVersion({ planId: row.current_plan_id, version: Number(row.current_plan_version) }),
+        getPlanVersion({ planId: candidate.planId, version: candidate.planVersion }),
+      ]);
+      const impact = previous?.terms && target?.terms
+        ? assessPlanTransition(previous.terms, target.terms, await inventory(orgId))
+        : { removedModules: [], conflicts: ['Plan entitlements could not be compared.'], isDowngrade: false };
+      return { ...candidate, impact };
+    }));
     return Object.freeze({ subscription: Object.freeze({ lifecycleStatus: row.lifecycle_status, accessState: row.billing_access_state,
       version: Number(row.subscription_version), restrictionDeadline: row.restriction_deadline == null ? null : new Date(row.restriction_deadline).toISOString(),
       planId: row.current_plan_id, planVersion: row.current_plan_version == null ? null : Number(row.current_plan_version) }),
       graceRequest,
       scheduledRenewal,
-      availablePlans: trial ? await listAvailablePlans(clock.now()) : [],
+      availablePlans: options,
       period: row.period_id ? Object.freeze({ periodId: row.period_id, status: row.period_status, startsAt, endsAt, isTrial: trial,
         trialDays: trial ? Number(periodSnapshot.trialDays) : null, renewalEligible: inWindow, overdue: expired }) : null, quote });
   }
@@ -106,7 +118,7 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
 
   async function readRenewal(orgId) { return state(orgId); }
 
-  async function createRenewalQuote({ orgId, requestKey, targetPlanId, targetPlanVersion } = {}) {
+  async function createRenewalQuote({ orgId, requestKey, targetPlanId, targetPlanVersion, acknowledgeFeatureLoss = false } = {}) {
     const current = await state(orgId);
     if (!current) return null;
     if (!current.period || !current.period.renewalEligible) fail('RENEWAL_NOT_OPEN', 'Renewal quotes are available during the final 7 days of the subscription period and after expiry.');
@@ -120,11 +132,21 @@ function createSubscriptionRenewalComposition({ pool: suppliedPool, getPlanVersi
     if (!current.subscription.planId || !current.subscription.planVersion) fail('SUBSCRIPTION_PLAN_UNAVAILABLE', 'The current subscription has no versioned plan.', 409);
     const now = new Date(clock.now()).toISOString();
     if (current.period.isTrial && (!targetPlanId || !Number.isSafeInteger(targetPlanVersion))) fail('TRIAL_PLAN_REQUIRED', 'Choose a published plan to start after the free trial.');
-    if (!current.period.isTrial && targetPlanId && (targetPlanId !== current.subscription.planId || targetPlanVersion !== current.subscription.planVersion)) fail('RENEWAL_PLAN_CHANGE_UNAVAILABLE', 'Plan changes must use the plan upgrade flow.');
-    const planVersion = await getPlanVersion({ planId: current.period.isTrial ? targetPlanId : current.subscription.planId,
-      version: current.period.isTrial ? targetPlanVersion : current.subscription.planVersion });
+    if (targetPlanId && !Number.isSafeInteger(targetPlanVersion)) fail('INVALID_PLAN_VERSION', 'Choose a published plan and version.');
+    const nextPlanId = targetPlanId || current.subscription.planId;
+    const nextVersion = targetPlanId ? targetPlanVersion : current.subscription.planVersion;
+    const planVersion = await getPlanVersion({ planId: nextPlanId, version: nextVersion });
     if (!planVersion || planVersion.status !== 'published') fail('SUBSCRIPTION_PLAN_VERSION_UNAVAILABLE', 'The current plan version is unavailable for renewal.');
     const renewalInventory = await inventory(orgId);
+    if (nextPlanId !== current.subscription.planId || nextVersion !== current.subscription.planVersion) {
+      const previous = await getPlanVersion({ planId: current.subscription.planId, version: current.subscription.planVersion });
+      if (!previous?.terms) fail('CURRENT_PLAN_TERMS_MISSING', 'The active plan terms could not be checked. Contact billing support.');
+      const impact = assessPlanTransition(previous.terms, planVersion.terms, renewalInventory);
+      if (impact.conflicts.length) fail('PLAN_INVENTORY_CONFLICT', impact.conflicts.join(' '));
+      if (impact.removedModules.length && acknowledgeFeatureLoss !== true) {
+        fail('PLAN_FEATURE_LOSS_ACK_REQUIRED', 'The selected plan removes feature access. Review affected modules, back up important records, and explicitly confirm before continuing.');
+      }
+    }
     const key = `subscription-renewal-${hash(orgId)}-${hash(requestKey || 'renewal')}`;
     const quoteId = `billing-subscription-renewal-quote-${hash(`${orgId}\0${key}`)}`;
     const quote = composeSubscriptionQuote({ planVersion, purpose: 'renewal', orgId, quoteId, version: 1,
