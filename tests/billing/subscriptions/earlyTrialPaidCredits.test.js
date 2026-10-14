@@ -133,7 +133,7 @@ describe('credits for a paid subscription purchased during a free trial',()=>{
       creditRepository,outbox:{enqueue:jest.fn()},clock:{now:()=>trialEnds},
     });
     await expect(service.activatePeriod({orgId,periodId,now:trialEnds})).rejects.toMatchObject({
-      code:'IDEMPOTENCY_CONFLICT',
+      code:'BILLING_IDEMPOTENCY_CONFLICT',
     });
     expect(creditRepository.createGrant).not.toHaveBeenCalled();
   });
