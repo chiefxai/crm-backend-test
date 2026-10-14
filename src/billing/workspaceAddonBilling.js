@@ -39,10 +39,11 @@ function createWorkspaceAddonBilling({
   clock = { now: () => new Date().toISOString() },
   idSource = { newId: prefix => `${prefix}-${crypto.randomUUID()}` },
   provisionWorkspace = (...args) => require('../db/repositories/workspaceRepository').createWorkspaceInTransaction(...args),
+  creditRepository = null,
 } = {}) {
   const uow = createMysqlUnitOfWork({ pool, clock, idSource, operationStore });
   const notifications = require('./modules/notifications/repositories/mysqlNotificationRepository').createMysqlNotificationRepository({idSource,clock});
-  const credits = createMysqlCreditRepository({idSource,clock});
+  const credits = creditRepository || createMysqlCreditRepository({idSource,clock});
   const query = async (tx, sql, params) => rowsOf(await tx.query(sql, params));
 
   async function lockOrganization(tx, orgId) {
