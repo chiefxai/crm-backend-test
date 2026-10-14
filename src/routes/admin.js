@@ -91,7 +91,7 @@ router.get("/logs-stream", requireSseTicket, (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.write(`data: ${JSON.stringify({ timestamp: new Date().toISOString(), message: "Live event stream connected" })}\n\n`);
+  res.write(": stream ready\\n\\n");
   const client = { res, orgId: req.orgId, workspaceId: req.workspaceId };
   addLogClient(client);
   // Recheck membership on a bounded timer; a revoked assignment must not
