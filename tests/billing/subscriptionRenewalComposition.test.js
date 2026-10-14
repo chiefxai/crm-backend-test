@@ -54,7 +54,7 @@ describe('early-paid credits read model',()=>{
           startsAt:'2026-10-15T00:00:00.000Z',endsAt:'2026-11-15T00:00:00.000Z'}),
       }]};
       if(sql.includes('FROM billing_credit_grants'))return {rows:[{
-        id:'paid-grant',amount_units:'50000',asset:'INR',scale:2,
+        id:'paid-grant',amount_units:'50000',pool_available_units:'35000',asset:'INR',scale:2,
         effective_at:'2026-10-12T00:00:00.000Z',expires_at:'2026-11-15T00:00:00.000Z',
       }]};
       return {rows:[]};
@@ -67,6 +67,7 @@ describe('early-paid credits read model',()=>{
     expect(result.period.isTrial).toBe(true);
     expect(result.paidCreditsDuringTrial).toMatchObject({
       grantId:'paid-grant',amount:{asset:'INR',units:'50000',scale:2},
+      availableInOrganizationPool:{asset:'INR',units:'35000',scale:2},
       expiresAt:'2026-11-15T00:00:00.000Z',
     });
     expect(pool.query.mock.calls.some(([sql])=>sql.includes("g.status='active'"))).toBe(true);
