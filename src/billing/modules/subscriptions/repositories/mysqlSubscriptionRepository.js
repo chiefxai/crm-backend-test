@@ -242,7 +242,7 @@ function createMysqlSubscriptionRepository() {
       // and module entitlements change. A quote or pending payment cannot grant
       // access. Keep this in the same billing transaction as activation.
       const versionRows = rowsOf(await tx.query(
-        `SELECT p.display_name,v.terms_json FROM billing_plan_versions v
+        `SELECT p.code,p.display_name,v.terms_json FROM billing_plan_versions v
           JOIN billing_plans p ON p.id=v.plan_id
           WHERE v.plan_id=? AND v.version=? LIMIT 1`,
         [row.plan_id, row.plan_version],
@@ -265,10 +265,11 @@ function createMysqlSubscriptionRepository() {
       if (!orgRows[0]) throw new Error('Organization for activated subscription is missing.');
       const settings = typeof orgRows[0].settings === 'string' ? JSON.parse(orgRows[0].settings) : (orgRows[0].settings || {});
       settings.workspacePolicy = {
-        ...(settings.workspacePolicy || {}), planId: row.plan_id,
-        // The billing version and workspace-catalog version are different
-        // counters; preserve the actual published financial version here.
-        planVersion: Number(row.plan_version),
+        ...(settings.workspacePolicy || {}), planId: versionRows[0].code,
+        // Workspace policy uses the platform plan code/catalog version, not
+        // the immutable billing plan's UUID/version. Preserve its own version
+        // and track the canonical purchased version separately.
+        billingPlanId: row.plan_id, billingPlanVersion: Number(row.plan_version),
         mode: terms.structure.mode, pricing, industryModules: terms.industryModules || {},
       };
       await tx.query('UPDATE organizations SET subscription_plan=?,settings=? WHERE id=?',
