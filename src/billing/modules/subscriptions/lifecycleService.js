@@ -131,7 +131,16 @@ function createSubscriptionLifecycleService({ unitOfWork, periodRepository, allo
     assertNoOverlap(period, existing);
     const inserted = await periodRepository.insertScheduledPeriod(tx, period);
     await periodRepository.linkApprovedSubscriptionPayment(tx, { orgId, paymentRequestId, periodId: inserted.id, now });
-    return Object.freeze({ ...inserted, renewalPreview: Object.freeze({ ...preview, lateRenewal: Boolean(preview.lateRenewal) }) });
+    // The purchased period still activates after the trial; only its credit
+    // grant may become spendable at payment approval. Keep this transient
+    // signal scoped to the trusted payment-decision transaction, not request
+    // input or mutable plan settings.
+    const trialConversion = previousSubscription?.status === 'active'
+      && previousSubscription.termsSnapshot?.source === 'free_trial'
+      && Date.parse(paidAt) < Date.parse(previousSubscription.endAt)
+      && Date.parse(inserted.startAt) >= Date.parse(previousSubscription.endAt);
+    return Object.freeze({ ...inserted, trialConversion: Boolean(trialConversion),
+      renewalPreview: Object.freeze({ ...preview, lateRenewal: Boolean(preview.lateRenewal) }) });
   }
 
   async function schedulePaidRenewal({ orgId, operationId, requestFingerprint, paymentRequestId, currentPeriodId, expectedVersions }) {
