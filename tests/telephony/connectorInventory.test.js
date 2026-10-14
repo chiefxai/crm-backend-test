@@ -63,6 +63,51 @@ describe('telephony connector inventory service', () => {
     expect(calls.some(({ sql }) => sql.includes("inventory_status='allocated'"))).toBe(true);
   });
 
+  test('atomically allocates several platform numbers to one organization', async () => {
+    const { db, calls } = makeDb((sql, params) => {
+      if (sql.includes('FROM organizations')) return { rows: [{ id: 'org-1' }] };
+      if (sql.includes('FROM telephony_phone_numbers n')) return { rows: [{
+        id: params[0], inventory_status: 'available', provisioning_status: 'ready',
+        owner_type: 'platform', owner_org_id: null, connector_status: 'active',
+      }] };
+      if (sql.includes("UPDATE telephony_phone_numbers")) return { affectedRows: 1, rows: [] };
+      return { rows: [] };
+    });
+    let sequence = 0;
+    const service = createTelephonyConnectorInventory({ pool: db,
+      idFactory: () => `allocation-${++sequence}`,
+      clock: () => new Date('2026-10-11T00:00:00Z'),
+    });
+    const result = await service.allocateNumbers({ actor: { type: 'platform' },
+      phoneNumberIds: ['number-2', 'number-1'], orgId: 'org-1', allocatedBy: 'platform-admin' });
+    expect(result.allocations).toHaveLength(2);
+    expect(result.allocations.map(item => item.phoneNumberId)).toEqual(['number-1', 'number-2']);
+    expect(calls.filter(({ sql }) => sql.includes('INSERT INTO telephony_number_allocations'))).toHaveLength(2);
+    expect(calls.some(({ sql }) => sql.includes('INSERT INTO telephony_number_assignments'))).toBe(false);
+    expect(calls.map(({ sql }) => sql).filter(sql => ['BEGIN','COMMIT','ROLLBACK'].includes(sql))).toEqual(['BEGIN','COMMIT']);
+  });
+
+  test('rejects duplicate numbers before writing and rolls back if one number is unavailable', async () => {
+    const { db, calls } = makeDb((sql, params) => {
+      if (sql.includes('FROM organizations')) return { rows: [{ id: 'org-1' }] };
+      if (sql.includes('FROM telephony_phone_numbers n')) return { rows: [{
+        id: params[0], inventory_status: params[0] === 'number-2' ? 'assigned' : 'available',
+        provisioning_status: 'ready', owner_type: 'platform', owner_org_id: null,
+        connector_status: 'active',
+      }] };
+      if (sql.includes('UPDATE telephony_phone_numbers')) return { affectedRows: 1 };
+      return { rows: [] };
+    });
+    const service = createTelephonyConnectorInventory({ pool: db });
+    await expect(service.allocateNumbers({ actor:{type:'platform'},orgId:'org-1',
+      phoneNumberIds:['number-1','number-1'] })).rejects.toMatchObject({statusCode:400});
+    expect(calls).toHaveLength(0);
+    await expect(service.allocateNumbers({ actor:{type:'platform'},orgId:'org-1',
+      phoneNumberIds:['number-1','number-2'] })).rejects.toMatchObject({statusCode:409,code:'PHONE_NUMBER_UNAVAILABLE'});
+    expect(calls.map(({ sql }) => sql)).toContain('ROLLBACK');
+    expect(calls.map(({ sql }) => sql)).not.toContain('COMMIT');
+  });
+
   test('assigns then releases under row lock and keeps assignment history', async () => {
     const { db, calls } = makeDb((sql) => {
       if (sql.includes('FROM telephony_phone_numbers n')) return { rows: [{

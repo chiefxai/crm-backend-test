@@ -97,19 +97,22 @@ async function createOrganizationSetup({
     }
     await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
     if (callProvider) {
-      // The route checks number availability, but a concurrent setup can
-      // claim it before this transaction inserts. Let the unique constraint
-      // reject that race; updating on duplicate would replace another
-      // organization's provider credentials.
-      await client.query(`INSERT INTO channels (id,org_id,workspace_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$2,$3,$4,$5,$6,'connected',$7)`, [crypto.randomUUID(),orgId,callProvider.provider,callProvider.phoneNumber,JSON.stringify({phoneNumber:callProvider.phoneNumber}),encryptJson({authId:callProvider.authId,authToken:callProvider.authToken}),now]);
-      // Connecting the call-provider channel above only makes the number
-      // usable for placing calls — it does not show up in the org's own
-      // Virtual Numbers list (a separate `virtual_numbers` table) until
-      // someone re-submits the "Add Virtual Number" form. Insert that row
-      // here too so the number the super admin just assigned is visible
-      // immediately, matching what that form itself would create.
+      // Preserve the legacy primary phoneNumber contract while provisioning
+      // every mapped number in the same organization transaction. The route
+      // checked availability; unique DB keys still protect against races.
+      const numbers = callProvider.phoneNumbers || [callProvider.phoneNumber];
+      const credentials = encryptJson({authId:callProvider.authId,authToken:callProvider.authToken});
       const providerLabel = callProvider.provider === "vobiz" ? "Vobiz.ai" : callProvider.provider;
-      await client.query(`INSERT INTO virtual_numbers (id,org_id,workspace_id,number,provider,status,friendly_name,routing_url,incoming_call_count,outgoing_call_count,created_at) VALUES ($1,$2,$2,$3,$4,'Active',$5,$6,0,0,$7)`, [crypto.randomUUID(),orgId,callProvider.phoneNumber,providerLabel,`${providerLabel} Line`,"https://api.chiefxai.com/voice/webhook-dynamic",now]);
+      for (const phoneNumber of numbers) {
+        await client.query(`INSERT INTO channels (id,org_id,workspace_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$2,$3,$4,$5,$6,'connected',$7)`, [
+          crypto.randomUUID(),orgId,callProvider.provider,phoneNumber,JSON.stringify({phoneNumber}),credentials,now,
+        ]);
+        // The default workspace shows each configured number in Virtual Numbers.
+        await client.query(`INSERT INTO virtual_numbers (id,org_id,workspace_id,number,provider,status,friendly_name,routing_url,incoming_call_count,outgoing_call_count,created_at) VALUES ($1,$2,$2,$3,$4,'Active',$5,$6,0,0,$7)`, [
+          crypto.randomUUID(),orgId,phoneNumber,providerLabel,`${providerLabel} Line`,
+          "https://api.chiefxai.com/voice/webhook-dynamic",now,
+        ]);
+      }
     }
     if (adminEmail) await client.query(`INSERT INTO org_members (id,org_id,user_id,email,name,role,feature_flags,created_at) VALUES ($1,$2,NULL,$3,$4,'Organization Admin',$5,$6)`, [memberId,orgId,adminEmail.toLowerCase(),adminName||adminEmail,JSON.stringify(featureFlags||[]),now]);
     if (memberId) await client.query(`INSERT INTO workspace_members (workspace_id,org_id,member_id,role,status,created_at) VALUES (?,?,?,'Workspace Admin','Active',?)`, [orgId,orgId,memberId,now]);

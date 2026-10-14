@@ -145,6 +145,50 @@ function createTelephonyConnectorInventory({ pool, idFactory = () => crypto.rand
     });
   }
 
+  // Allocate multiple ready platform numbers to ONE organization atomically.
+  // Each number remains reserved to that organization, not automatically
+  // assigned to a workspace; org admins retain workspace routing authority.
+  async function allocateNumbers({ actor, phoneNumberIds, orgId, allocatedBy = null } = {}) {
+    if (actor?.type !== 'platform') throw inventoryError('Only platform admins can allocate platform numbers', 403, 'PLATFORM_REQUIRED');
+    const targetOrgId = requireText(orgId, 'orgId');
+    if (!Array.isArray(phoneNumberIds) || phoneNumberIds.length < 1 || phoneNumberIds.length > 25) {
+      throw inventoryError('Select between 1 and 25 numbers', 400, 'INVALID_NUMBER_SELECTION');
+    }
+    const ids = phoneNumberIds.map(item => typeof item === 'string' ? item.trim() : '');
+    if (ids.some(item => !item || item.length > 191) || new Set(ids).size !== ids.length) {
+      throw inventoryError('Select distinct valid phone numbers', 400, 'DUPLICATE_NUMBER_SELECTION');
+    }
+    return withTransaction(async connection => {
+      const { rows: orgRows } = await connection.query('SELECT id FROM organizations WHERE id=? LIMIT 1', [targetOrgId]);
+      if (!orgRows[0]) throw inventoryError('Organization was not found', 404, 'ORGANIZATION_NOT_FOUND');
+      const allocations = [];
+      // Lock in canonical order so overlapping simultaneous requests avoid deadlocks.
+      for (const id of [...ids].sort()) {
+        const { rows } = await connection.query(`
+          SELECT n.id,n.inventory_status,n.provisioning_status,
+                 a.owner_type,a.owner_org_id,a.status AS connector_status
+          FROM telephony_phone_numbers n
+          INNER JOIN telephony_connector_accounts a ON a.id=n.connector_account_id
+          WHERE n.id=? FOR UPDATE`, [id]);
+        const number = rows[0];
+        if (!number) throw inventoryError('Phone number was not found', 404, 'PHONE_NUMBER_NOT_FOUND');
+        assertActorOwnsConnector(actor, number);
+        if (number.owner_type !== 'platform') throw inventoryError('Only platform-owned numbers can be allocated', 400, 'NUMBER_NOT_PLATFORM_OWNED');
+        if (number.connector_status !== 'active') throw inventoryError('Connector account is not active', 409, 'CONNECTOR_INACTIVE');
+        if (number.provisioning_status !== 'ready') throw inventoryError('Phone number must be verified before allocation', 409, 'PHONE_NUMBER_NOT_READY');
+        if (number.inventory_status !== 'available') throw inventoryError('Phone number is not available', 409, 'PHONE_NUMBER_UNAVAILABLE');
+        const now = clock().toISOString();
+        const allocationId = idFactory();
+        await connection.query('INSERT INTO telephony_number_allocations (id,phone_number_id,org_id,allocated_by,allocated_at) VALUES (?,?,?,?,?)',
+          [allocationId,id,targetOrgId,allocatedBy,now]);
+        const changed = await connection.query("UPDATE telephony_phone_numbers SET inventory_status='allocated',updated_at=? WHERE id=? AND inventory_status='available'", [now,id]);
+        if (changed.affectedRows !== undefined && changed.affectedRows !== 1) throw inventoryError('Phone number was claimed by another organization', 409, 'PHONE_NUMBER_UNAVAILABLE');
+        allocations.push({id:allocationId,phoneNumberId:id,orgId:targetOrgId,allocatedAt:now});
+      }
+      return { orgId:targetOrgId,allocations };
+    });
+  }
+
   async function releaseAllocation({ actor, phoneNumberId, orgId, releasedBy = null, reason = null } = {}) {
     if (actor?.type !== 'platform') throw inventoryError('Only platform admins can reclaim platform numbers', 403, 'PLATFORM_REQUIRED');
     const targetOrgId = requireText(orgId, 'orgId');
@@ -309,7 +353,7 @@ function createTelephonyConnectorInventory({ pool, idFactory = () => crypto.rand
     });
   }
 
-  return { listInventory, listWorkspaces, listAssignedNumbers, markNumberReady, registerExistingNumber, allocateNumber, releaseAllocation, assignNumber, releaseNumber };
+  return { listInventory, listWorkspaces, listAssignedNumbers, markNumberReady, registerExistingNumber, allocateNumber, allocateNumbers, releaseAllocation, assignNumber, releaseNumber };
 }
 
 const defaultService = createTelephonyConnectorInventory();
@@ -321,6 +365,7 @@ module.exports = {
   markNumberReady: (...args) => defaultService.markNumberReady(...args),
   registerExistingNumber: (...args) => defaultService.registerExistingNumber(...args),
   allocateNumber: (...args) => defaultService.allocateNumber(...args),
+  allocateNumbers: (...args) => defaultService.allocateNumbers(...args),
   releaseAllocation: (...args) => defaultService.releaseAllocation(...args),
   assignNumber: (...args) => defaultService.assignNumber(...args),
   releaseNumber: (...args) => defaultService.releaseNumber(...args),
