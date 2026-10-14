@@ -100,6 +100,19 @@ describe('subscription lifecycle', () => {
     expect(period.renewalPreview.lateRenewal).toBe(false);
   });
 
+  test('identifies only active free-trial conversion for early paid credit funding',async()=>{
+    const {service,periodRepository,baseCommand}=fixture();
+    periodRepository.periods.set('free-trial',{
+      id:'free-trial',orgId:'org-a',periodKind:'subscription',status:'active',
+      startAt:'2026-10-15T00:00:00.000Z',endAt:'2026-10-25T00:00:00.000Z',
+      anchorAt:'2026-10-25T00:00:00.000Z',termsSnapshot:{source:'free_trial',trialDays:10},
+    });
+    const result=await service.schedulePaidRenewal({...baseCommand,paymentRequestId:'payment-a'});
+    expect(result.trialConversion).toBe(true);
+    expect(result.startAt).toBe('2026-10-25T00:00:00.000Z');
+    expect(result.termsSnapshot.terms.includedCredits).toEqual(TERMS.includedCredits);
+  });
+
   test('reports a late renewal preview without resetting an active cycle', async () => {
     const { service, periodRepository, baseCommand } = fixture({ purchaseAt: '2026-11-05T00:00:00.000Z' });
     periodRepository.periods.set('previous', {
