@@ -277,6 +277,20 @@ function createPlatformRouter() {
     numberId: req.params.numberId,
     ownerOrgId: null,
   }));
+  router.post("/numbers/bulk-allocate", async (req, res) => {
+    try {
+      const result = await inventory.allocateNumbers({
+        actor: platformInventoryActor(), phoneNumberIds: req.body?.phoneNumberIds,
+        orgId: req.body?.orgId, allocatedBy: req.userId,
+      });
+      for (const allocation of result.allocations) {
+        recordInventoryAudit(null, req, "telephony.number.allocate", allocation.id, {
+          phoneNumberId: allocation.phoneNumberId, orgId: allocation.orgId,
+        });
+      }
+      return res.status(201).json(result);
+    } catch (err) { return handleError(err, res); }
+  });
   router.post("/numbers/:numberId/allocate", async (req, res) => {
     try {
       const allocation = await inventory.allocateNumber({ actor: platformInventoryActor(), phoneNumberId: req.params.numberId, orgId: req.body?.orgId, allocatedBy: req.userId });
