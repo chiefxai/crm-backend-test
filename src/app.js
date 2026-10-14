@@ -107,4 +107,6 @@ require("./docs/swagger").mountSwagger(app);
 app.use("/", require("./routes/index"));
 app.use("/", require("./routes/scheduler"));
 
+// Retry opt-in SMTP notifications after crashes or temporary failures.
+if (process.env.NODE_ENV !== 'test') require('./notifications/channels/smtp').startWorker();
 module.exports = app;
