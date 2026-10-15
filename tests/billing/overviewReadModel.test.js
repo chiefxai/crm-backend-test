@@ -40,6 +40,7 @@ test('returns a typed, tenant-scoped billing overview', async () => {
     [{ grant_kind: 'subscription', asset: 'CREDIT', scale: 0, expires_at: null,
       balance_units: '30', reserved_units: '5' }],
     [{ terms_snapshot_json: '{"plan":"standard"}' }],
+    [],
   ]);
   const result = await readBillingOverview('org_123', {
     pool, orgReader: async () => ({ billingMethod: 'recharge_based' }), now: new Date('2026-10-09T00:00:00Z'),
@@ -112,7 +113,7 @@ test('snapshot queries are awaited one at a time on the same connection', async 
     orgReader: async () => ({ billingMethod: 'recharge_based' }),
   });
   assert.equal(overlapped, false);
-  assert.equal(calls.filter(sql => /^SELECT/.test(sql)).length, 6);
+  assert.equal(calls.filter(sql => /^SELECT/.test(sql)).length, 7);
   assert.equal(calls.at(-1), 'COMMIT');
 });
 
@@ -134,4 +135,19 @@ test('unknown new billing account mode fails closed rather than inventing pay-as
     /Unrecognized billing account fallback mode/,
   );
   assert.ok(history.some(item => item.sql === 'ROLLBACK'));
+});
+
+test('billing overview exposes allocation mode from effective terms and workspace capacity', async () => {
+  const { pool } = fixture([
+    [{ org_id: 'org_123', fallback_mode: 'prepaid' }], [], [], [], [],
+    [{ terms_snapshot_json: JSON.stringify({ effectiveTerms: { structure: { mode: 'single', maxWorkspaces: 1 } } }) }],
+    [{ id: 'workspace-1', status: 'Active' }],
+  ]);
+  const overview = await readBillingOverview('org_123', {
+    pool, orgReader: async () => ({ billingMethod: 'recharge_based' }),
+  });
+  assert.deepEqual(overview.allocation, {
+    mode: 'automatic', manualAllocationAllowed: false, workspaceLimit: 1,
+    workspaceCount: 1, workspaceId: 'workspace-1', status: 'ready',
+  });
 });

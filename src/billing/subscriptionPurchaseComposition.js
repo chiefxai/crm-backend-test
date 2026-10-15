@@ -10,6 +10,7 @@ const { planIssueGrant } = require('./modules/credits/domain');
 const { organizationScope } = require('./kernel/scope');
 const { createInitialPurchaseService } = require('./modules/subscriptions/initialPurchaseService');
 const { resolveSubscriptionPolicy } = require('./modules/subscriptions/policy');
+const { createAutomaticCreditAllocationService, automaticAllocationsEnabled } = require('./automaticCreditAllocationService');
 
 function rowsOf(result) {
   const value = Array.isArray(result) && result.length === 2 && Array.isArray(result[0]) ? result[0] : result;
@@ -71,6 +72,8 @@ function createSubscriptionPurchaseComposition({
   const quoteRepository = createMysqlSubscriptionQuoteRepository();
   const subscriptionRepository = createMysqlSubscriptionRepository();
   const creditRepository = createMysqlCreditRepository({ idSource, clock });
+  const automaticAllocationService = createAutomaticCreditAllocationService({ creditRepository, clock });
+  const automaticAllocationEnabled = orgId => automaticAllocationsEnabled(orgId);
 
   async function resolveOrg(orgId) {
     const rows = rowsOf(await pool.query('SELECT id,subscription_plan,settings FROM organizations WHERE id=? LIMIT 1', [orgId]));
@@ -180,7 +183,13 @@ function createSubscriptionPurchaseComposition({
           accountScope: organizationScope(orgId), effectiveAt: now.toISOString(), expiresAt: endsAt } });
       await creditRepository.createGrant(tx, { orgId, grant: grantPlan.grant, now: now.toISOString() });
       await creditRepository.applyJournal(tx, { ...grantPlan.journal, positionDeltas: grantPlan.positionDeltas });
-      return { periodId, startsAt: now.toISOString(), endsAt, days, creditsInr, alreadyProvisioned: false };
+      let automaticAllocation = Object.freeze({ status: 'disabled' });
+      if (automaticAllocationEnabled(orgId)) {
+        automaticAllocation = await automaticAllocationService.allocateCreditsAutomatically({
+          tx, orgId, grantId, termsSnapshot: snapshot, sourceEvent: 'free-trial-provisioning', now: now.toISOString(),
+        });
+      }
+      return { periodId, startsAt: now.toISOString(), endsAt, days, creditsInr, alreadyProvisioned: false, automaticAllocation };
     } });
     return provisioned;
   }

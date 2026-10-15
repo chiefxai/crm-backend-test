@@ -13,7 +13,8 @@ const { createAllocationService } = require('./modules/allocations/service');
 const { organizationScope, workspaceScope, validateId } = require('./kernel/scope');
 const { isBillingDomainError, DOMAIN_ERROR_CODES } = require('./contracts/errors');
 const { CONTRACT_VERSION } = require('./contracts/validation');
-const { readManualAllocationOverview, previewManualAllocation } = require('./manualAllocationReadModel');
+const { readManualAllocationOverview, previewManualAllocation, requireManualAllocation } = require('./manualAllocationReadModel');
+const { resolveAllocationMode } = require('./allocationModeResolver');
 const { getLogger } = require('../observability/logger');
 
 const logger = getLogger('billing.manualAllocation');
@@ -67,13 +68,14 @@ function respondError(res, error) {
   if (isBillingDomainError(error)) {
     const conflict = [DOMAIN_ERROR_CODES.VERSION_CONFLICT, DOMAIN_ERROR_CODES.IDEMPOTENCY_CONFLICT,
       DOMAIN_ERROR_CODES.CONFLICT, DOMAIN_ERROR_CODES.INSUFFICIENT_CREDITS,
-      DOMAIN_ERROR_CODES.GRANT_EXPIRED, DOMAIN_ERROR_CODES.GRANT_NOT_AVAILABLE].includes(error.code);
+      DOMAIN_ERROR_CODES.GRANT_EXPIRED, DOMAIN_ERROR_CODES.GRANT_NOT_AVAILABLE,
+      DOMAIN_ERROR_CODES.AUTOMATIC_ALLOCATION_NOT_READY].includes(error.code);
     const status = error.code === DOMAIN_ERROR_CODES.FORBIDDEN ? 403
       : error.code === DOMAIN_ERROR_CODES.NOT_FOUND ? 404 : conflict ? 409
       : error.code === DOMAIN_ERROR_CODES.RETRYABLE_STORAGE ? 503 : 400;
     return res.status(status).json({ code: error.code, error: error.message });
   }
-  if (error?.statusCode) return res.status(error.statusCode).json({ error: error.message });
+  if (error?.statusCode) return res.status(error.statusCode).json({ ...(error.code ? { code: error.code } : {}), error: error.message });
   if (error instanceof TypeError) return res.status(400).json({ error: error.message });
   logger.error('Unexpected manual allocation failure', { error });
   return res.status(500).json({ error: 'Credit allocation could not be completed.' });
@@ -89,6 +91,19 @@ function createManualTransferService(req, { pool = getPool() } = {}) {
     creditRepository: createMysqlCreditRepository({ idSource, clock }),
     allocationRepository: createMysqlAllocationRepository({ idSource, clock }),
     idSource, clock,
+    validateManualTransfer: async ({ tx, orgId: scopedOrgId, toScope, now }) => {
+      const termsRows = (await tx.query(`SELECT terms_snapshot_json FROM organization_billing_terms
+        WHERE org_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
+        ORDER BY effective_from DESC,version DESC LIMIT 1`, [scopedOrgId, now, now])).rows;
+      const workspaceRows = (await tx.query('SELECT id,status FROM workspaces WHERE org_id=? ORDER BY id', [scopedOrgId])).rows;
+      const value = termsRows[0]?.terms_snapshot_json;
+      const termsSnapshot = value == null ? null : typeof value === 'string' ? JSON.parse(value) : value;
+      const capability = resolveAllocationMode({ termsSnapshot, workspaces: workspaceRows });
+      requireManualAllocation({ allocation: capability });
+      if (!workspaceRows.some(workspace => workspace.id === toScope.ownerId && String(workspace.status).toLowerCase() === 'active')) {
+        throw Object.assign(new Error('Credits cannot be allocated to an inactive workspace.'), { statusCode: 409 });
+      }
+    },
     authorizeAllocation: async ({ actor, orgId, action, fromScope, toScope }) =>
       isAdmin && actor?.type === 'user' && actor.id === req.userId
       && actor.organizationId === req.orgId && orgId === req.orgId
@@ -101,6 +116,7 @@ router.get('/manual-allocations', requireAuth, requirePermission('billing.organi
   requireOrganizationCreditAdmin, async (req, res) => {
     try {
       const snapshot = await readManualAllocationOverview(req.orgId);
+      requireManualAllocation(snapshot);
       return res.json({ ...snapshot, transfersEnabled: transfersEnabled() });
     } catch (error) { return respondError(res, error); }
   });
@@ -110,6 +126,7 @@ router.post('/manual-allocations/preview', requireAuth, requirePermission('billi
     try {
       const input = parsePreviewInput(req.body);
       const snapshot = await readManualAllocationOverview(req.orgId);
+      requireManualAllocation(snapshot);
       const preview = previewManualAllocation(snapshot, input);
       return res.json({ ...preview, transfersEnabled: transfersEnabled() });
     } catch (error) { return respondError(res, error); }

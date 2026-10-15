@@ -3,6 +3,7 @@
 const { getPool } = require('../db/pool');
 const { validateId } = require('./kernel/scope');
 const { dateIso } = require('./overviewReadModel');
+const { resolveAllocationMode } = require('./allocationModeResolver');
 
 function amount(asset, units, scale) {
   return { asset, units: String(units), scale: Number(scale) };
@@ -51,11 +52,18 @@ async function readManualAllocationOverview(orgId, { pool = getPool(), now = new
     if (!account) {
       await connection.query('COMMIT');
       started = false;
-      return { uninitialized: true, workspaces: [], balances: [], grants: [], history: [] };
+      return { uninitialized: true, workspaces: [], balances: [], grants: [], history: [],
+        allocation: resolveAllocationMode({}) };
     }
     const workspaces = (await connection.query(
       'SELECT id,name,status FROM workspaces WHERE org_id=? ORDER BY is_default DESC,name,id', [orgId],
     )).rows;
+    const termsRows = (await connection.query(`SELECT terms_snapshot_json FROM organization_billing_terms
+      WHERE org_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
+      ORDER BY version DESC LIMIT 1`, [orgId, at, at])).rows;
+    const termsValue = termsRows[0]?.terms_snapshot_json;
+    const termsSnapshot = termsValue == null ? null : typeof termsValue === 'string' ? JSON.parse(termsValue) : termsValue;
+    const allocation = resolveAllocationMode({ termsSnapshot, workspaces });
     const rows = (await connection.query(`SELECT p.grant_id,p.balance_units,p.reserved_units,p.version,
         p.asset,p.scale,a.account_type,a.owner_id,g.grant_kind,g.expires_at,g.effective_at
       FROM billing_credit_positions p
@@ -87,9 +95,9 @@ async function readManualAllocationOverview(orgId, { pool = getPool(), now = new
       uninitialized: false,
       writable: String(account.status).toLowerCase() === 'active' && !account.hold_reason,
       workspaces: workspaces.map(w => ({ id: w.id, name: w.name, status: w.status })),
+      allocation,
       balances: groupBalances(rows),
-      grants: rows.filter(row => row.account_type === 'organization' && row.owner_id === orgId
-        && availableUnits(row) > 0n).map(row => ({
+      grants: rows.filter(row => row.account_type === 'organization' && row.owner_id === orgId).map(row => ({
         id: row.grant_id, kind: row.grant_kind, expiresAt: dateIso(row.expires_at),
         available: amount(row.asset, availableUnits(row).toString(), row.scale),
         held: amount(row.asset, row.reserved_units, row.scale),
@@ -109,6 +117,18 @@ async function readManualAllocationOverview(orgId, { pool = getPool(), now = new
     if (started) await connection.query('ROLLBACK').catch(() => {});
     throw error;
   } finally { connection.release(); }
+}
+
+function requireManualAllocation(snapshot) {
+  if (snapshot?.allocation?.allocationMode !== 'manual' || snapshot.allocation.status !== 'ready'
+      || snapshot.allocation.manualAllocationAllowed !== true) {
+    const automatic = snapshot?.allocation?.allocationMode === 'automatic';
+    throw Object.assign(new Error(automatic
+      ? 'Manual allocation is not applicable to this single-workspace subscription.'
+      : 'Manual allocation is unavailable until effective subscription terms are validated.'), {
+      statusCode: 409, code: 'MANUAL_ALLOCATION_NOT_APPLICABLE',
+    });
+  }
 }
 
 /** Pure exact-unit preview. A confirm still rechecks the ledger under lock. */
@@ -141,4 +161,4 @@ function previewManualAllocation(snapshot, { grantId, workspaceId, amountUnits, 
   };
 }
 
-module.exports = { readManualAllocationOverview, previewManualAllocation, groupBalances, availableUnits };
+module.exports = { readManualAllocationOverview, previewManualAllocation, groupBalances, availableUnits, requireManualAllocation };

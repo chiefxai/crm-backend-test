@@ -11,7 +11,8 @@ const { resolveSubscriptionPolicy } = require('./policy');
 function stableId(prefix, value) { return `${prefix}-${crypto.createHash('sha256').update(value).digest('hex').slice(0, 40)}`; }
 function fingerprint(value) { return `sha256:${crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex')}`; }
 
-function createPeriodActivationService({ unitOfWork, periodRepository, creditRepository, subscriptionRepository, outbox, clock, subscriptionPolicy } = {}) {
+function createPeriodActivationService({ unitOfWork, periodRepository, creditRepository, subscriptionRepository, outbox, clock, subscriptionPolicy,
+  automaticAllocationService, automaticAllocationEnabled = false } = {}) {
   if (typeof unitOfWork?.runFinancial !== 'function') throw new TypeError('Period activation requires UnitOfWork.runFinancial().');
   for (const method of ['getPeriod', 'getPeriodFunding', 'listPeriods', 'transitionPeriod']) {
     if (typeof periodRepository?.[method] !== 'function') throw new TypeError(`Period repository requires ${method}().`);
@@ -67,6 +68,7 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
 
       const creditAmount = validateAmount(period.termsSnapshot?.terms?.includedCredits);
       let grantResult = null;
+      let automaticAllocation = Object.freeze({ status: 'disabled' });
       if (BigInt(creditAmount.units) > 0n) {
         const adminScope = organizationScope(orgId);
         const adminAccount = await creditRepository.ensureAccount(tx, {
@@ -116,7 +118,19 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
         await creditRepository.createGrant(tx, { orgId, grant: grantPlan.grant, now });
         const journal = await creditRepository.applyJournal(tx, { ...grantPlan.journal, positionDeltas: grantPlan.positionDeltas });
         grantResult = Object.freeze({ grantId, amount: creditAmount, effectiveAt: period.startAt, expiresAt: period.endAt, journalId: journal.journalId });
+        const shouldAutomaticallyAllocate = typeof automaticAllocationEnabled === 'function'
+          ? automaticAllocationEnabled(orgId) === true : automaticAllocationEnabled === true;
+        if (shouldAutomaticallyAllocate) {
+          if (typeof automaticAllocationService?.allocateCreditsAutomatically !== 'function') {
+            throw new BillingDomainError(DOMAIN_ERROR_CODES.RETRYABLE_STORAGE,
+              'Automatic allocation is enabled but the allocation service is not configured.', { retryable: true });
+          }
+          automaticAllocation = await automaticAllocationService.allocateCreditsAutomatically({
+            tx, orgId, grantId, termsSnapshot: period.termsSnapshot,
+            sourceEvent: 'subscription-period-activation', now,
+          });
         }
+      }
       }
 
       const occurredAt = new Date(now).toISOString();
@@ -126,9 +140,12 @@ function createPeriodActivationService({ unitOfWork, periodRepository, creditRep
         eventType: 'SubscriptionPeriodActivated.v1', schemaVersion: 1, operationId, orgId,
         aggregateType: 'BillingPeriod', aggregateId: periodId, aggregateVersion: 1,
         occurredAt, correlationId,
-        payload: { periodId, paymentRequestId: funding.paymentRequestId, grant: grantResult, allocationPolicy: period.termsSnapshot?.allocationPolicy || null },
+        payload: { periodId, paymentRequestId: funding.paymentRequestId, grant: grantResult,
+          automaticAllocation, allocationPolicy: period.termsSnapshot?.allocationPolicy || null },
       }];
-      if (grantResult && period.termsSnapshot?.allocationPolicy?.ruleVersionId && Number.isSafeInteger(period.termsSnapshot.allocationPolicy.version) && period.termsSnapshot.allocationPolicy.version > 0) {
+      const usesManualAllocationRules = automaticAllocation.status === 'disabled' || automaticAllocation.status === 'not_applicable';
+      if (grantResult && usesManualAllocationRules && period.termsSnapshot?.allocationPolicy?.ruleVersionId
+          && Number.isSafeInteger(period.termsSnapshot.allocationPolicy.version) && period.termsSnapshot.allocationPolicy.version > 0) {
         events.push({
           eventId: stableId('billing-event', `${orgId}\0allocation-requested\0${periodId}`),
           eventType: 'CreditGrantAllocationRequested.v1', schemaVersion: 1, operationId, orgId,

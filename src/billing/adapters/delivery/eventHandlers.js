@@ -43,10 +43,16 @@ function createBillingEmailEventHandlers({ notificationRepository, deliveryRepos
   async function handlePaymentConfirmed(tx, event) {
     const data = event.payload || {}; const amount = data.receivedAmount || data.expectedAmount || null; const now = clock.now();
     const purpose = data.purpose || 'payment';
+    const automaticAllocation = data.funding?.automaticAllocation;
+    const topupMessage = automaticAllocation?.status === 'allocated'
+      ? 'Your top-up payment was approved and credits were added to your workspace.'
+      : automaticAllocation?.status === 'partially_allocated'
+        ? 'Your top-up payment was approved. Available credits were transferred to your workspace; held credits remain in the organization pool.'
+        : 'Your top-up payment was approved and credits were added to the organization pool.';
     return notificationRepository.createNotification(tx, { orgId: event.orgId, now, templateKey: 'billing.payment_confirmed.v1', notification: {
       notificationKey: `payment-approved:${data.paymentRequestId || event.aggregateId}`, eventKey: 'payment.approved', scopeType: 'organization', scopeOwnerId: event.orgId,
       title: 'Payment approved', message: purpose === 'subscription' ? 'Your subscription payment was approved.'
-        : purpose === 'topup' ? 'Your top-up payment was approved and credits were added to the admin pool.' : 'Your invoice payment was approved.',
+        : purpose === 'topup' ? topupMessage : 'Your invoice payment was approved.',
       actionPath: '/settings/billing', occurredAt: event.occurredAt,
       payload: { orgName: event.orgName || event.orgId, purpose, amount, currency: amount?.currency || 'INR', funding: data.funding || {},
         status: data.status || data.creditState || null, paymentRequestId: data.paymentRequestId || event.aggregateId,

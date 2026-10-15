@@ -14,6 +14,7 @@ const { createSubscriptionPeriodJobs } = require('./modules/subscriptions/period
 const { createMysqlSubscriptionRepository } = require('./modules/subscriptions/repositories/mysqlSubscriptionRepository');
 const { createSubscriptionAccessJobs } = require('./modules/subscriptions/accessJobs');
 const { resolveSubscriptionPolicy } = require('./modules/subscriptions/policy');
+const { createAutomaticCreditAllocationService, automaticAllocationsEnabled } = require('./automaticCreditAllocationService');
 
 /**
  * Compose existing billing lifecycle services for an explicit bounded tick.
@@ -27,10 +28,14 @@ function createBillingLifecycleJobs({
   const unitOfWork = createMysqlUnitOfWork({ pool, operationStore, clock, idSource });
   const outbox = createMysqlOutboxStore({ pool, clock, tokenSource: idSource });
   const policy = resolveSubscriptionPolicy();
+  const creditRepository = createMysqlCreditRepository({ idSource, clock });
+  const automaticAllocationService = createAutomaticCreditAllocationService({ creditRepository, clock });
   const activationService = createPeriodActivationService({
     unitOfWork,
     periodRepository: createMysqlPeriodRepository(),
-    creditRepository: createMysqlCreditRepository({ idSource, clock }),
+    creditRepository,
+    automaticAllocationService,
+    automaticAllocationEnabled: orgId => automaticAllocationsEnabled(orgId),
     subscriptionRepository: createMysqlSubscriptionRepository(),
     outbox,
     clock,

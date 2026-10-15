@@ -36,6 +36,7 @@ app.use('/api/billing',router);
 
 const snapshot = {
   uninitialized:false,writable:true,
+  allocation:{allocationMode:'manual',maxWorkspaces:5,workspaceCount:1,workspaceId:null,manualAllocationAllowed:true,status:'ready'},
   grants:[{id:'grant-a',kind:'topup',expiresAt:null,positionVersion:3,
     available:{asset:'INR',units:'11000',scale:2},held:{asset:'INR',units:'1000',scale:2}}],
   balances:[],history:[],
@@ -60,6 +61,20 @@ describe('organization admin-only manual allocation routes', () => {
     expect(res.body.transfersEnabled).toBe(false);
     expect(res.body.grants).toHaveLength(1);
     expect(readManualAllocationOverview).toHaveBeenCalledWith('org-1');
+  });
+
+  it('rejects the manual allocation page and preview for single-workspace subscriptions', async () => {
+    readManualAllocationOverview.mockResolvedValue({ ...snapshot, allocation: {
+      allocationMode:'automatic',maxWorkspaces:1,workspaceCount:1,workspaceId:'workspace-1',
+      manualAllocationAllowed:false,status:'ready',
+    } });
+    const response=await request(app).get('/api/billing/manual-allocations')
+      .set('X-Test-Role','Organization Admin').expect(409);
+    expect(response.body.code).toBe('MANUAL_ALLOCATION_NOT_APPLICABLE');
+    await request(app).post('/api/billing/manual-allocations/preview')
+      .set('X-Test-Role','Organization Admin')
+      .send({grantId:'grant-a',workspaceId:'workspace-1',amountUnits:'100',expectedPositionVersion:3})
+      .expect(409);
   });
 
   it.each(['Member','Billing Admin','Workspace Admin','Manager'])(
