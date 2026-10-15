@@ -16,9 +16,9 @@ function stableOperationId(orgId, grantId) {
 }
 function automaticAllocationsEnabled(orgId, env = process.env) {
   if (env.BILLING_AUTOMATIC_ALLOCATION_ENABLED !== 'true' || typeof orgId !== 'string' || !orgId) return false;
-  const allowedOrganizations = new Set(String(env.BILLING_AUTOMATIC_ALLOCATION_ORG_IDS || '')
-    .split(',').map(value => value.trim()).filter(Boolean));
-  return allowedOrganizations.has(orgId);
+  const allowedOrganizations = String(env.BILLING_AUTOMATIC_ALLOCATION_ORG_IDS || '')
+    .split(',').map(value => value.trim()).filter(Boolean);
+  return allowedOrganizations.includes('*') || allowedOrganizations.includes(orgId);
 }
 
 function previewAutomaticAllocationReconciliation(snapshot) {
