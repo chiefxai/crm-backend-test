@@ -90,9 +90,9 @@ function createWorkspaceAddonBilling({
         const org = await lockOrganization(tx,orgId);
         const workspaces = await query(tx,'SELECT id,industry FROM workspaces WHERE org_id=? ORDER BY id',[orgId]);
         const policy = policyModule.effectivePolicy(org,workspaces);
-        if (workspace.industry !== policy.primaryIndustry) fail('Add-on workspaces must use the organization primary industry.',403);
+        if (workspace.industry !== policy.primaryIndustry && policy.mode !== 'mixed_industry') fail('This subscription only allows workspaces in the organization primary industry.',403);
         const seatRow = (await query(tx,"SELECT COUNT(*) AS count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'",[orgId]))[0];
-        const offered = policyModule.branchQuote(policy,workspaces,Number(seatRow?.count || 0));
+        const offered = policyModule.branchQuote(policy,workspaces,Number(seatRow?.count || 0),workspace.industry);
         if (!offered?.paymentRequired) fail('This workspace does not require an add-on purchase. Refresh the workspace form.');
         if (input.pricingAcceptanceToken !== offered.token) fail('Workspace pricing changed. Refresh and confirm the current price.');
         const pending = await query(tx,"SELECT id,name FROM billing_workspace_addons WHERE org_id=? AND status='pending' FOR UPDATE",[orgId]);
@@ -103,7 +103,7 @@ function createWorkspaceAddonBilling({
         if (!(await query(tx,"SELECT id FROM org_members WHERE org_id=? AND id=? AND COALESCE(NULLIF(status,''),'Active')='Active' FOR UPDATE",[orgId,memberId]))[0]) fail('An active organization member is required.',403);
         const now = clock.now();
         const addon = {id:idSource.newId('billing-workspace-addon'),org_id:orgId,member_id:memberId,
-          ...workspace,monthly_units:String(Math.round(policy.pricing.extraWorkspaceMonthlyInr * 100)),terms_snapshot_json:JSON.stringify(policy)};
+          ...workspace,monthly_units:String(Math.round(offered.monthlyAddonInr * 100)),terms_snapshot_json:JSON.stringify(policy)};
         await tx.query(`INSERT INTO billing_workspace_addons
           (id,org_id,member_id,name,industry,branch_name,status,monthly_units,terms_snapshot_json,next_action_at,created_at,updated_at)
           VALUES (?,?,?,?,?,?,'pending',?,?,?,?,?)`,
