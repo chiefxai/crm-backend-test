@@ -143,4 +143,31 @@ async function provisionUser(email, password, name = "", role = "") {
   return userId;
 }
 
-module.exports = { verifyToken, decodeToken, provisionUser };
+async function resendInitialInvitation(email) {
+  const token = await _adminToken();
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const usersRes = await fetch(`${URL}/admin/realms/${REALM}/users?username=${encodeURIComponent(normalizedEmail)}&exact=true`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!usersRes.ok) throw new Error(`Keycloak user lookup failed (${usersRes.status})`);
+  const users = await usersRes.json();
+  const user = users.find((candidate) => String(candidate.email || candidate.username || "").toLowerCase() === normalizedEmail);
+  if (!user) throw Object.assign(new Error("The organization admin account was not found."), { statusCode: 404 });
+  if (!user.enabled || !(user.requiredActions || []).includes("UPDATE_PASSWORD")) {
+    throw Object.assign(new Error("The initial invitation can only be resent before the organization admin signs in for the first time."), { statusCode: 409 });
+  }
+
+  const tempPassword = require("./cognito").generateCompliantTemporaryPassword();
+  const passwordRes = await fetch(`${URL}/admin/realms/${REALM}/users/${user.id}/reset-password`, {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "password", value: tempPassword, temporary: true }),
+  });
+  if (!passwordRes.ok) {
+    const body = await passwordRes.text().catch(() => "");
+    throw new Error(`Keycloak temporary password reset failed (${passwordRes.status}): ${body}`);
+  }
+  return { tempPassword };
+}
+
+module.exports = { verifyToken, decodeToken, provisionUser, resendInitialInvitation };

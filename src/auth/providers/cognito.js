@@ -254,6 +254,30 @@ async function provisionUser(email, password, name = '', role = COGNITO_ROLES.TE
   return userId;
 }
 
+async function resendInitialInvitation(email) {
+  if (!REGION || !USER_POOL_ID) throw new Error('Cognito authentication is not configured');
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) throw new Error('Email is required to resend an invitation');
+  const user = await getUser(normalizedEmail);
+  if (!user) throw Object.assign(new Error('The organization admin account was not found.'), { statusCode: 404 });
+  if (!user.Enabled || user.UserStatus !== 'FORCE_CHANGE_PASSWORD') {
+    throw Object.assign(new Error('The initial invitation can only be resent before the organization admin signs in for the first time.'), { statusCode: 409 });
+  }
+
+  const tempPassword = generateCompliantTemporaryPassword();
+  try {
+    await getIdpClient().send(new AdminSetUserPasswordCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: user.Username,
+      Password: tempPassword,
+      Permanent: false,
+    }));
+  } catch (err) {
+    throw new Error(`Cognito temporary password reset failed: ${err.message}`);
+  }
+  return { tempPassword };
+}
+
 async function deleteUser(username) {
   if (!REGION || !USER_POOL_ID) throw new Error('Cognito authentication is not configured');
   try {
@@ -273,6 +297,7 @@ module.exports = {
   resolveIdentity,
   decodeToken,
   provisionUser,
+  resendInitialInvitation,
   syncUserRole,
   deleteUser,
   ensureRoleGroups,

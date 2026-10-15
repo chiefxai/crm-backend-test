@@ -190,6 +190,42 @@ router.get("/organizations/:id", async (req, res) => {
   }
 });
 
+router.post("/organizations/:id/resend-initial-invitation", async (req, res) => {
+  try {
+    if (typeof authProvider.resendInitialInvitation !== "function") {
+      return res.status(409).json({ error: "Resending initial password invitations is not supported by the configured authentication provider." });
+    }
+    const detail = await platformAdmin.getOrganizationDetail(req.params.id);
+    const initialAdmin = detail.members
+      .filter((member) => String(member.role || "").toLowerCase() === "organizationadmin")
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())[0];
+    if (!initialAdmin?.email) {
+      return res.status(409).json({ error: "This organization has no initial admin invitation to resend." });
+    }
+
+    const { tempPassword } = await authProvider.resendInitialInvitation(initialAdmin.email);
+    const template = emailTemplates.welcomeEmail({
+      orgName: detail.name,
+      adminEmail: initialAdmin.email,
+      tempPassword,
+      role: "OrganizationAdmin",
+    });
+    try {
+      await mailer.sendMail({ to: initialAdmin.email, ...template });
+    } catch (emailError) {
+      emailError.statusCode = 502;
+      log.error("Initial organization invitation email failed:", { orgId: detail.id, email: initialAdmin.email, error: emailError.message });
+      throw emailError;
+    }
+
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail },
+      "resend_initial_organization_invitation", "organization", detail.id, { email: initialAdmin.email });
+    res.json({ message: `Initial invitation resent to ${initialAdmin.email}.`, email: initialAdmin.email });
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
 router.get("/users", async (req, res) => {
   try {
     res.json(await platformAdmin.listUsers());
