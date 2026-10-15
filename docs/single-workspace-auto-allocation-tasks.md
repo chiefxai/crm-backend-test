@@ -9,14 +9,13 @@ whose effective `terms.structure.maxWorkspaces` is exactly `1` uses automatic
 allocation. A multi-workspace or unlimited plan keeps administrator-controlled
 allocation, even when the organization currently has one workspace.
 
-This task list authorizes code and test work only. Automatic allocation must remain
-inactive for customer organizations until there are real ledger accounts and grants
-to validate, the staging financial checks pass, and the release owner explicitly
-enables the feature. Automatic financial transfers require both
-`BILLING_AUTOMATIC_ALLOCATION_ENABLED=true` and an explicit organization ID in
-`BILLING_AUTOMATIC_ALLOCATION_ORG_IDS`; keep both unset for this implementation.
-Do not change or enable `BILLING_MANUAL_ALLOCATION_ENABLED`.
-Do not deploy, migrate production, or run reconciliation against production data.
+Automatic allocation stays disabled by default. It requires both
+`BILLING_AUTOMATIC_ALLOCATION_ENABLED=true` and an organization allowlist in
+`BILLING_AUTOMATIC_ALLOCATION_ORG_IDS`. For the current customer-free development
+stage, `*` may be used as the allowlist value after the staging account/grant checks
+are complete. Use explicit IDs for any environment that has customers. Do not change
+or enable `BILLING_MANUAL_ALLOCATION_ENABLED`. Do not deploy, migrate production, or
+run reconciliation against production data.
 
 ## Ordered implementation tasks
 
@@ -155,9 +154,10 @@ in this implementation task.
 - Real-MySQL concurrency, reconciliation totals, and staging transfer checks need
   actual test accounts and approved grants. No production account or grant was
   inspected or changed for this task.
-- Keep `BILLING_AUTOMATIC_ALLOCATION_ENABLED` and
-  `BILLING_AUTOMATIC_ALLOCATION_ORG_IDS` unset. The reconciliation command is
-  read-only unless both controls explicitly authorize that organization:
+- Automatic allocation stays inactive until both variables are set in the intended
+  staging runtime. For this customer-free development stage, use `*` only after the
+  financial checks are complete. The reconciliation command is read-only unless
+  both controls explicitly authorize the organization:
 
   ```sh
   node scripts/reconcile-single-workspace-credits.js --org-id <organization-id>
