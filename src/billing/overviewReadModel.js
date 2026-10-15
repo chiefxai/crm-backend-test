@@ -111,7 +111,9 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = (...ar
     const upcoming = periodRows.rows.find(row => row.status === 'scheduled' && dateIso(row.ends_at) > at);
     const termsValue = termsRows.rows[0]?.terms_snapshot_json;
     const subscriptionTerms = termsValue == null ? null : typeof termsValue === 'string' ? JSON.parse(termsValue) : termsValue;
-    const resolvedAllocation = resolveAllocationMode({ termsSnapshot: subscriptionTerms, workspaces: workspaceRows.rows });
+    const resolvedAllocation = resolveAllocationMode({
+      termsSnapshot: subscriptionTerms, workspacePolicy: org.workspacePolicy, workspaces: workspaceRows.rows,
+    });
     const allocation = Object.freeze({
       mode: resolvedAllocation.allocationMode,
       manualAllocationAllowed: resolvedAllocation.manualAllocationAllowed,
