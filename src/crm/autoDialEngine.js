@@ -509,6 +509,19 @@ async function handlePlaceDialJobScoped(data) {
         log.error(`❌ [autoDialEngine] Failed to pause blocked task ${taskId} (org ${orgId}):`, patchErr.message);
       }
 
+      // A compliance rejection is a terminal campaign-level failure, not
+      // an ordinary unanswered lead. Insufficient credits are handled by
+      // the dedicated low-balance alert and are not mislabeled as failure.
+      if (complianceBlocked) {
+        void require("../notifications/service").publishQuietly({
+          audience: "organization", orgId, workspaceId: workspaceId || undefined,
+          eventKey: "campaign.failed",
+          dedupeKey: "campaign-compliance:" + taskId + ":" + (data.autoDialRunId || "initial"),
+          title: "Campaign failed",
+          message: 'Campaign "' + taskName + '" stopped because its calling request was blocked by compliance rules.',
+          actionPath: "/campaign",
+        });
+      }
       if (global.broadcastLog) {
         global.broadcastLog(`🤖 Auto-dial task "${taskName}" paused — ${err.message}`, {
           type: "auto_dial_progress",
