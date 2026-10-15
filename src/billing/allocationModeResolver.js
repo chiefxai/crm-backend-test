@@ -5,9 +5,16 @@
  * terms. Workspace inventory affects readiness and destination selection only;
  * it never changes automatic/manual mode.
  */
-function resolveAllocationMode({ termsSnapshot, workspaces = [] } = {}) {
+function resolveAllocationMode({ termsSnapshot, workspacePolicy, workspaces = [] } = {}) {
   const terms = termsSnapshot?.effectiveTerms || termsSnapshot?.terms || termsSnapshot;
-  const structure = terms?.structure;
+  // Existing organizations can have a validated workspace plan saved before
+  // subscription terms were migrated into the billing ledger. Use that plan
+  // only when no effective terms snapshot exists; malformed active terms still
+  // fail closed.
+  const legacyStructure = termsSnapshot == null && workspacePolicy
+    ? { mode: workspacePolicy.mode, maxWorkspaces: workspacePolicy.pricing?.maxWorkspaces }
+    : null;
+  const structure = terms?.structure || legacyStructure;
   const maxWorkspaces = structure?.maxWorkspaces;
   const validCapacity = maxWorkspaces === null
     || (Number.isSafeInteger(maxWorkspaces) && maxWorkspaces >= 1);
