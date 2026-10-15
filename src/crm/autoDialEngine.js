@@ -514,7 +514,7 @@ async function handlePlaceDialJobScoped(data) {
       // the dedicated low-balance alert and are not mislabeled as failure.
       if (complianceBlocked) {
         void require("../notifications/service").publishQuietly({
-          audience: "organization", orgId, workspaceId: workspaceId || undefined,
+          audience: "organization", orgId, workspaceId: data.workspaceId || undefined,
           eventKey: "campaign.failed",
           dedupeKey: "campaign-compliance:" + taskId + ":" + (data.autoDialRunId || "initial"),
           title: "Campaign failed",
