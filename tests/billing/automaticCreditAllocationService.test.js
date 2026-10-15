@@ -6,7 +6,7 @@ const activeWorkspace = { id: 'workspace-a', status: 'Active' };
 const automaticTerms = { effectiveTerms: { structure: { mode: 'single', maxWorkspaces: 1 } } };
 const multiTerms = { effectiveTerms: { structure: { mode: 'same_industry', maxWorkspaces: 5 } } };
 
-function fixture({ terms = automaticTerms, workspaces = [activeWorkspace], position = { balanceUnits: '1200', reservedUnits: '200', version: 4 } } = {}) {
+function fixture({ terms = automaticTerms, workspaces = [activeWorkspace], position = { amount: { asset: 'CREDIT', units: '1200', scale: 0 }, reservedUnits: '200', version: 4 } } = {}) {
   const calls = [];
   const tx = { metadata: { orgId: 'org-a' }, query: async sql => {
     calls.push(sql);
@@ -21,7 +21,7 @@ function fixture({ terms = automaticTerms, workspaces = [activeWorkspace], posit
     getGrantForUpdate: jest.fn(async () => grant),
     ensureAccount: jest.fn(async (_tx, args) => ({ id: args.accountType === 'organization' ? 'pool-a' : 'workspace-pool-a' })),
     getPositionForUpdate: jest.fn(async (_tx, args) => ({ ...position, orgId: 'org-a', grantId: 'grant-a', accountId: args.accountId,
-      balanceUnits: String(position.balanceUnits), reservedUnits: String(position.reservedUnits),
+      amount: { ...position.amount, units: String(position.amount.units) }, reservedUnits: String(position.reservedUnits),
       scope: { orgId: 'org-a', ownerType: 'organization', ownerId: 'org-a' } })),
     applyJournal: jest.fn(async (_tx, journal) => { calls.push(journal); return { journalId: 'journal-a' }; }),
   };
@@ -59,7 +59,7 @@ describe('automatic credit allocation service', () => {
   });
 
   test('does not transfer held units or mint on an empty position', async () => {
-    const { service, creditRepository, tx } = fixture({ position: { balanceUnits: '100', reservedUnits: '100', version: 1 } });
+    const { service, creditRepository, tx } = fixture({ position: { amount: { asset: 'CREDIT', units: '100', scale: 0 }, reservedUnits: '100', version: 1 } });
     await expect(service.allocateCreditsAutomatically({ tx, orgId: 'org-a', grantId: 'grant-a' }))
       .resolves.toMatchObject({ status: 'nothing_to_transfer' });
     expect(creditRepository.applyJournal).not.toHaveBeenCalled();
