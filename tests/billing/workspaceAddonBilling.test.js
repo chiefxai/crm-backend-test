@@ -85,6 +85,71 @@ test('paying after grace restarts a fresh month without accumulating suspended-m
   expect(provision).not.toHaveBeenCalled();
   expect(client.query.mock.calls.find(([sql])=>sql.includes("UPDATE workspaces SET status='Active'"))[0]).toContain("$.billingSuspended");
 });
+test('top-up redemption consumes ONLY unallocated organization top-up credits and creates a workspace in one financial command',async()=>{
+  const original=client.query.getMockImplementation();
+  client.query.mockImplementation(async(sql,params=[])=>{
+    if(sql.includes('FROM billing_credit_positions p') && sql.includes('g.grant_kind'))return {rows:[
+      {grant_id:'paid-topup-1',account_id:'org-credit-pool',balance_units:'7000',reserved_units:'1000'},
+    ]};
+    return original(sql,params);
+  });
+  const journal=jest.fn(async()=>({journalId:'redemption-journal-1'}));
+  const ensure=jest.fn(async()=>({id:'workspace-fee-clearing'}));
+  const tested=createWorkspaceAddonBilling({pool,clock:{now:()=>now},
+    idSource:{newId:prefix=>`${prefix}-1`},provisionWorkspace:provision,
+    creditRepository:{ensureAccount:ensure,applyJournal:journal}});
+  const oldFlag=process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED;
+  process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED='true';
+  try {
+    const result=await tested.purchaseWithTopup({orgId:'org-1',memberId:'member-1',
+      context,input:{name:'Extra',industry:'lending',pricingAcceptanceToken:
+        branchQuote(effectivePolicy({settings:{workspacePolicy:policy}},existing),existing,1).token}});
+    expect(result).toMatchObject({workspaceId:'new-workspace',status:'active',paymentSource:'topup_credits',
+      chargedTopupCredits:amount,paymentAmount:amount});
+    expect(journal).toHaveBeenCalledWith(tx,expect.objectContaining({
+      operationType:'workspace_fee_redemption',sourceType:'workspace_addon_invoice',
+      entries:expect.arrayContaining([expect.objectContaining({
+        accountId:'org-credit-pool',grantId:'paid-topup-1',amountUnits:'-5000',
+        entryType:'workspace_fee_redemption'})]),
+      positionDeltas:expect.arrayContaining([expect.objectContaining({balanceDeltaUnits:'-5000'})]),
+    }));
+    const payment=client.query.mock.calls.find(([sql])=>sql.includes('INSERT INTO billing_invoice_payments'));
+    expect(payment[1][3]).toBeNull();
+    expect(payment[1][4]).toBe('workspace-addon:credits:billing-workspace-invoice-1');
+    expect(provision).toHaveBeenCalledTimes(1);
+  } finally {
+    if(oldFlag===undefined)delete process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED;
+    else process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED=oldFlag;
+  }
+});
+
+test('insufficient unallocated top-up credits fail without provisioning a workspace',async()=>{
+  const original=client.query.getMockImplementation();
+  client.query.mockImplementation(async(sql,params=[])=>{
+    if(sql.includes('FROM billing_credit_positions p') && sql.includes('g.grant_kind'))return {rows:[
+      {grant_id:'topup-grant',account_id:'org-credit-pool',balance_units:'5100',reserved_units:'300'},
+    ]};
+    return original(sql,params);
+  });
+  const journal=jest.fn();
+  const tested=createWorkspaceAddonBilling({pool,clock:{now:()=>now},
+    idSource:{newId:prefix=>`${prefix}-1`},provisionWorkspace:provision,
+    creditRepository:{ensureAccount:async()=>({id:'fee-clearing'}),applyJournal:journal}});
+  const oldFlag=process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED;
+  process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED='true';
+  try {
+    await expect(tested.purchaseWithTopup({orgId:'org-1',memberId:'member-1',
+      context,input:{name:'Extra',industry:'lending',pricingAcceptanceToken:
+        branchQuote(effectivePolicy({settings:{workspacePolicy:policy}},existing),existing,1).token}}))
+      .rejects.toMatchObject({statusCode:402});
+    expect(journal).not.toHaveBeenCalled();
+    expect(provision).not.toHaveBeenCalled();
+  } finally {
+    if(oldFlag===undefined)delete process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED;
+    else process.env.BILLING_WORKSPACE_TOPUP_REDEMPTION_ENABLED=oldFlag;
+  }
+});
+
 test('maintenance issues one renewal invoice before expiry and suspends overdue access after grace',async()=>{
   addon={...addon,status:'active',workspace_id:'workspace-6',anchor_at:now,period_ends_at:'2026-02-28T10:00:00.000Z',grace_ends_at:'2026-03-07T10:00:00.000Z',next_action_at:'2026-02-21T10:00:00.000Z'};
   cycle={...cycle,paid_at:now};invoice.status='paid';now='2026-02-21T10:00:00.000Z';

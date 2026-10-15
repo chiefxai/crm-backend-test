@@ -1,6 +1,7 @@
 'use strict';
 
 const { createQuote } = require('../../../src/billing/modules/catalog/quote');
+const { inventoryFrom } = require('../../../src/billing/subscriptionPurchaseComposition');
 
 const money = (units) => ({ asset: 'INR', units: String(units), scale: 6 });
 const input = (overrides = {}) => ({
@@ -32,6 +33,26 @@ const input = (overrides = {}) => ({
 });
 
 describe('billing catalog quotes', () => {
+  test('accepts the SHA-256 inventory version produced by the renewal inventory builder', () => {
+    const inventory = inventoryFrom([
+      { id: 'workspace-1', industry: 'health' },
+      { id: 'workspace-2', industry: 'health' },
+      { id: 'workspace-3', industry: 'retail' },
+    ], 3, new Set());
+    expect(inventory.version).toMatch(/^sha256:[a-f0-9]{64}$/);
+    const quote = createQuote(input({ purpose: 'renewal', inventory }));
+    expect(quote.purpose).toBe('renewal');
+    expect(quote.inventory.version).toBe(inventory.version);
+    expect(quote.total).toEqual(money('201780000'));
+  });
+
+  test('preserves numeric inventory versions and rejects malformed ones', () => {
+    expect(createQuote(input()).inventory.version).toBe(7);
+    for (const version of [-1, 1.5, NaN, '', '   ', {}, []]) {
+      expect(() => createQuote(input({ inventory: { ...input().inventory, version } }))).toThrow(/inventory.version/);
+    }
+  });
+
   test('separately invoiced workspace add-ons remain in structural inventory without a second subscription fee', () => {
     const quote = createQuote(input({inventory:{...input().inventory,separatelyBilledWorkspaceCount:1}}));
     expect(quote.inventory.workspaceCount).toBe(3);

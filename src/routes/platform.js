@@ -30,6 +30,7 @@ const log = getLogger("routes.platform");
 const router = express.Router();
 router.use(requireAuthIdentityOnly, requirePlatformAdmin);
 router.use("/telephony", require("./telephonyConnectors").createPlatformRouter());
+router.use("/notifications", require("../notifications/routes").createPlatformRouter());
 
 function handleError(err, res) {
   const status = err.statusCode || 500;
@@ -381,7 +382,7 @@ router.post("/organizations", async (req, res) => {
       billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
       dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null, retentionPolicyId, retentionPolicyVersion,
       initialWorkspaces: requestedWorkspaces = [], firstBranchName = null,
-      freeTrial = false, freeTrialDays = null
+      freeTrial = false, freeTrialDays = null, freeTrialCreditsInr = null
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
     const policyTools = require('../workspaces/organizationPolicy');
@@ -406,6 +407,8 @@ router.post("/organizations", async (req, res) => {
     if (freeTrial && (!Number.isInteger(freeTrialDays) || freeTrialDays < 1 || freeTrialDays > 15)) {
       throw Object.assign(new Error('Free trial duration must be from 1 to 15 days.'), { statusCode: 400 });
     }
+    if (freeTrial && (!Number.isSafeInteger(freeTrialCreditsInr) || freeTrialCreditsInr < 0 || freeTrialCreditsInr > 10000000)) throw Object.assign(new Error('Trial credits must be a whole INR amount between ₹0 and ₹1,00,00,000.'), { statusCode: 400 });
+    if (!freeTrial && freeTrialCreditsInr != null) throw Object.assign(new Error('Trial credits require free trial to be enabled.'), { statusCode: 400 });
     if (!freeTrial && freeTrialDays != null) throw Object.assign(new Error('Free trial days require free trial to be enabled.'), { statusCode: 400 });
     if (process.env.BILLING_SUBSCRIPTION_PURCHASE_ENABLED !== 'true') {
       throw Object.assign(new Error('Enable subscription purchase before creating an organization with a trial or initial paid subscription.'), { statusCode: 503, code: 'SUBSCRIPTION_PURCHASE_DISABLED' });
@@ -474,19 +477,33 @@ router.post("/organizations", async (req, res) => {
       }
       const authId = String(callProvider.authId || "").trim();
       const authToken = String(callProvider.authToken || "").trim();
-      const phoneNumber = String(callProvider.phoneNumber || "").trim();
-      if (!authId || !authToken || !phoneNumber) {
-        return res.status(400).json({ error: "Vobiz auth ID, auth token, and phone number are required." });
+      const hasList = callProvider.phoneNumbers !== undefined;
+      if (hasList && (!Array.isArray(callProvider.phoneNumbers) || !callProvider.phoneNumbers.length || callProvider.phoneNumbers.length > 25)) {
+        return res.status(400).json({ error: "Enter between 1 and 25 call-provider phone numbers." });
       }
-      if (!(await db.isNumberAvailable(phoneNumber, null))) {
-        return organizationConflict(res, 'call_provider_number_in_use', "This call-provider number is already assigned to another organization.");
+      const phoneNumbers = hasList
+        ? callProvider.phoneNumbers.map(value => typeof value === 'string' ? value.trim() : '')
+        : [String(callProvider.phoneNumber || "").trim()];
+      if (!authId || !authToken || phoneNumbers.some(value => !/^\+[1-9]\d{7,14}$/.test(value))) {
+        return res.status(400).json({ error: "Vobiz credentials and valid E.164 phone numbers are required." });
       }
-      const { data: existingCallChannel } = await require("../db/client")
-        .from("channels").select("org_id").systemReadOnly("Check global call-provider channel ownership during organization setup").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
-      if (existingCallChannel) {
-        return organizationConflict(res, 'call_provider_channel_in_use', "This call-provider number is already connected to another organization.");
+      if (new Set(phoneNumbers).size !== phoneNumbers.length) {
+        return res.status(400).json({ error: "A phone number can only be added once to this organization." });
       }
-      validatedCallProvider = { provider, authId, authToken, phoneNumber };
+      if (hasList && callProvider.phoneNumber != null && String(callProvider.phoneNumber).trim() !== phoneNumbers[0]) {
+        return res.status(400).json({ error: "Primary phone number must match the first mapped number." });
+      }
+      for (const phoneNumber of phoneNumbers) {
+        if (!(await db.isNumberAvailable(phoneNumber, null))) {
+          return organizationConflict(res, 'call_provider_number_in_use', `Call-provider number ${phoneNumber} is already assigned to another organization.`);
+        }
+        const { data: existingCallChannel } = await require("../db/client")
+          .from("channels").select("org_id").systemReadOnly("Check global call-provider channel ownership during organization setup").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
+        if (existingCallChannel) {
+          return organizationConflict(res, 'call_provider_channel_in_use', `Call-provider number ${phoneNumber} is already connected to another organization.`);
+        }
+      }
+      validatedCallProvider = { provider, authId, authToken, phoneNumber: phoneNumbers[0], phoneNumbers };
       }
     }
 
@@ -604,7 +621,7 @@ router.post("/organizations", async (req, res) => {
     if (freeTrial) {
       try {
         const purchase = require('../billing/subscriptionPurchaseCompositionFactory').createConfiguredSubscriptionPurchaseComposition();
-        const trial = await purchase.provisionFreeTrial({ orgId: org.id, days: freeTrialDays });
+        const trial = await purchase.provisionFreeTrial({ orgId: org.id, days: freeTrialDays, creditsInr: freeTrialCreditsInr });
         initialSubscriptionPurchase = { status: 'free_trial', ...trial };
       } catch (trialError) {
         log.error('Free trial subscription provisioning failed:', {
@@ -671,6 +688,7 @@ router.post("/organizations", async (req, res) => {
         name, workspaceName, adminEmail, gcpProjectMode: "existing", gcpProjectId: validatedGcp.project.projectId,
         callProvider: validatedCallProvider?.provider || null,
         callProviderPhoneNumber: validatedCallProvider?.phoneNumber || null,
+        callProviderPhoneNumberCount: validatedCallProvider?.phoneNumbers?.length || (validatedCallProvider ? 1 : 0),
         platformTelephonyNumberId: validatedPlatformTelephonyNumberId,
         telephonyAssignmentId: telephonyAssignment?.id || null,
         billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge, workspacePolicy, initialWorkspaceCount: initialWorkspaces.length + 1, retentionPolicyId: selectedRetention?.policyId || null
@@ -701,6 +719,41 @@ router.post("/organizations", async (req, res) => {
     }
     handleError(err, res);
   }
+});
+
+// Edit non-financial organization metadata. Subscription changes MUST use
+// approved, versioned billing transitions; never overwrite the legacy plan
+// field without changing the subscription and its entitlement snapshot.
+router.patch('/organizations/:id', async (req, res) => {
+  try {
+    const input = req.body || {};
+    const allowed = ['name', 'workspaceName', 'aiMinutesLimit'];
+    if (!input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some(key => !allowed.includes(key))) {
+      return res.status(400).json({ error: 'Only organization name, workspace name and AI minutes limit can be edited here. Use subscription renewal for plan changes.' });
+    }
+    const org = await db.getOrg(req.params.id);
+    if (!org) return res.status(404).json({ error: 'Organization not found.' });
+    const patch = {};
+    if ('name' in input) {
+      if (typeof input.name !== 'string' || !input.name.trim()) return res.status(400).json({ error: 'Organization name is required.' });
+      patch.name = input.name.trim();
+    }
+    if ('workspaceName' in input) {
+      if (typeof input.workspaceName !== 'string' || !input.workspaceName.trim()) return res.status(400).json({ error: 'Workspace name is required.' });
+      patch.workspaceName = input.workspaceName.trim();
+    }
+    if ('aiMinutesLimit' in input) {
+      if (input.aiMinutesLimit !== null && (!Number.isSafeInteger(input.aiMinutesLimit) || input.aiMinutesLimit < 0)) {
+        return res.status(400).json({ error: 'AI minutes limit must be a nonnegative whole number or null.' });
+      }
+      patch.aiMinutesLimit = input.aiMinutesLimit;
+    }
+    const updated = await db.updateOrg(org.id, patch);
+    await auditLog.record(org.id, { userId: req.userId, userEmail: req.userEmail },
+      'platform.org.profile.update', 'organization', org.id, { changedFields: Object.keys(patch) });
+    res.json(updated);
+  } catch (error) { handleError(error, res); }
 });
 
 // Recover a trial for an organization whose setup completed but whose billing

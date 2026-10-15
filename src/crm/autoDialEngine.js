@@ -326,6 +326,7 @@ async function processTask(task) {
     }
 
     await db.patch("dialertasks", orgId, taskId, { autoDialEnabled: false, autoDialStatus: "completed" });
+    void require("../notifications/service").publishQuietly({ audience: "organization", orgId, workspaceId: task.workspaceId || undefined, eventKey: "campaign.completed", dedupeKey: "dialer-task:" + taskId, title: "Campaign completed", message: "Campaign \"" + task.name + "\" finished dialing all leads.", actionPath: "/campaign" });
     if (global.broadcastLog) {
       global.broadcastLog(`🤖 Auto-dial task "${task.name}" completed — every lead has been dialed.`, {
         type: "auto_dial_progress", orgId, taskId, status: "task_completed",
@@ -508,6 +509,19 @@ async function handlePlaceDialJobScoped(data) {
         log.error(`❌ [autoDialEngine] Failed to pause blocked task ${taskId} (org ${orgId}):`, patchErr.message);
       }
 
+      // A compliance rejection is a terminal campaign-level failure, not
+      // an ordinary unanswered lead. Insufficient credits are handled by
+      // the dedicated low-balance alert and are not mislabeled as failure.
+      if (complianceBlocked) {
+        void require("../notifications/service").publishQuietly({
+          audience: "organization", orgId, workspaceId: data.workspaceId || undefined,
+          eventKey: "campaign.failed",
+          dedupeKey: "campaign-compliance:" + taskId + ":" + (data.autoDialRunId || "initial"),
+          title: "Campaign failed",
+          message: 'Campaign "' + taskName + '" stopped because its calling request was blocked by compliance rules.',
+          actionPath: "/campaign",
+        });
+      }
       if (global.broadcastLog) {
         global.broadcastLog(`🤖 Auto-dial task "${taskName}" paused — ${err.message}`, {
           type: "auto_dial_progress",

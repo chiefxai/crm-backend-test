@@ -142,7 +142,8 @@ function createSubscriptionPurchaseComposition({
     });
   }
 
-  async function provisionFreeTrial({ orgId, days }) {
+  async function provisionFreeTrial({ orgId, days, creditsInr = 200 }) {
+    if (!Number.isSafeInteger(creditsInr) || creditsInr < 0 || creditsInr > 10000000) throw Object.assign(new Error('Trial credits must be a whole INR amount between 0 and 10000000.'), { statusCode: 400, code: 'INVALID_TRIAL_CREDITS' });
     if (!Number.isSafeInteger(days) || days < 1 || days > 15) throw Object.assign(new Error('Free trial duration must be from 1 to 15 days.'), { statusCode: 400, code: 'INVALID_TRIAL_DURATION' });
     const org = await resolveOrg(orgId);
     if (!org) return null;
@@ -153,7 +154,7 @@ function createSubscriptionPurchaseComposition({
     const endsAt = new Date(now.getTime() + days * 86400000).toISOString();
     const periodId = idSource.newId('billing-trial-period');
     const opId = `subscription-trial-${crypto.createHash('sha256').update(orgId).digest('hex').slice(0, 40)}`;
-    const requestFingerprint = `sha256:${crypto.createHash('sha256').update(JSON.stringify({ orgId, days, planId: planVersion.planId, planVersion: planVersion.version })).digest('hex')}`;
+    const requestFingerprint = `sha256:${crypto.createHash('sha256').update(JSON.stringify({ orgId, days, creditsInr, planId: planVersion.planId, planVersion: planVersion.version })).digest('hex')}`;
     const provisioned = await unitOfWork.runFinancial({ orgId, operationId: opId, requestFingerprint, callback: async (tx) => {
       const existing = await subscriptionRepository.getOrganizationSubscription(tx, { orgId, forUpdate: true });
       if (existing) throw Object.assign(
@@ -164,7 +165,7 @@ function createSubscriptionPurchaseComposition({
         currentPlanVersion: planVersion.version, billingAccessState: 'operational', billingSuspensionCause: null,
         restrictionDeadline: endsAt, accessPolicy: { initialUnpaidAccess: 'billing_recovery', billingTimeZone: 'UTC' }, now: now.toISOString() });
       const terms = JSON.parse(JSON.stringify(planVersion.terms));
-      const trialCreditAmount = { asset: terms.currency || 'INR', units: '20000', scale: 2 };
+      const trialCreditAmount = { asset: terms.currency || 'INR', units: String(creditsInr * 100), scale: 2 };
       terms.includedCredits = trialCreditAmount;
       const snapshot = { schemaVersion: 1, source: 'free_trial', trialDays: days, plan: { id: planVersion.planId, version: planVersion.version, terms }, terms: { ...terms, includedCredits: terms.includedCredits || { asset: 'INR', units: '0', scale: 2 } } };
       await tx.query(`INSERT INTO billing_periods (id,org_id,period_kind,starts_at,ends_at,anchor_at,terms_version,status,terms_snapshot_json,activated_at,closed_at,created_at,updated_at)
@@ -177,8 +178,8 @@ function createSubscriptionPurchaseComposition({
       const grantId = idSource.newId('billing-trial-credit-grant');
       const grantPlan = planIssueGrant({ orgId, operationId: `${opId}:credits`, adminAccountId: creditAccount.id,
         fundingClearingAccountId: clearingAccount.id, actor: { type: 'system', id: 'free-trial-provisioner' }, now: now.toISOString(),
-        reason: `Issue ₹200 free-trial credits for ${days} days`, grant: { id: grantId, kind: 'subscription', amount: trialCreditAmount,
-          sourceType: 'promotion', sourceId: periodId, sourceEventKey: 'free-trial-200-inr-v1', periodId,
+        reason: `Issue ₹${creditsInr} free-trial credits for ${days} days`, grant: { id: grantId, kind: 'subscription', amount: trialCreditAmount,
+          sourceType: 'promotion', sourceId: periodId, sourceEventKey: 'free-trial-credits-v2', periodId,
           accountScope: organizationScope(orgId), effectiveAt: now.toISOString(), expiresAt: endsAt } });
       await creditRepository.createGrant(tx, { orgId, grant: grantPlan.grant, now: now.toISOString() });
       await creditRepository.applyJournal(tx, { ...grantPlan.journal, positionDeltas: grantPlan.positionDeltas });
@@ -188,7 +189,7 @@ function createSubscriptionPurchaseComposition({
           tx, orgId, grantId, termsSnapshot: snapshot, sourceEvent: 'free-trial-provisioning', now: now.toISOString(),
         });
       }
-      return { periodId, startsAt: now.toISOString(), endsAt, days, alreadyProvisioned: false, automaticAllocation };
+      return { periodId, startsAt: now.toISOString(), endsAt, days, creditsInr, alreadyProvisioned: false, automaticAllocation };
     } });
     return provisioned;
   }
