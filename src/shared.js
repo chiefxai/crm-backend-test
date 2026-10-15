@@ -25,12 +25,23 @@ function broadcastLog(message, details = {}) {
   });
 }
 
+// A named SSE signal carries no notification body. Clients refresh their own
+// authorized, preference-filtered feed from /api/notifications.
+function broadcastNotificationHint({ orgId, workspaceId = null }) {
+  if (!orgId) return;
+  for (const client of logClients) {
+    if (client.orgId !== orgId) continue;
+    if (workspaceId && client.workspaceId !== workspaceId) continue;
+    try { client.res.write('event: notification\ndata: {}\n\n'); } catch (_) { /* client disconnected */ }
+  }
+}
+
 // Make broadcastLog available globally so telephony/engine files that fire
 // events during WS sessions can reach connected SSE clients without having
 // to import this module themselves.
 global.broadcastLog = broadcastLog;
 
-module.exports = { broadcastLog, logClients, activeSessionsCount,
+module.exports = { broadcastLog, broadcastNotificationHint, logClients, activeSessionsCount,
   getActiveSessionsCount: () => activeSessionsCount,
   incrementSessions: () => { activeSessionsCount++; },
   decrementSessions: () => { activeSessionsCount = Math.max(0, activeSessionsCount - 1); },

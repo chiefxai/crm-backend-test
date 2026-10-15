@@ -326,6 +326,7 @@ async function processTask(task) {
     }
 
     await db.patch("dialertasks", orgId, taskId, { autoDialEnabled: false, autoDialStatus: "completed" });
+    void require("../notifications/service").publishQuietly({ audience: "organization", orgId, workspaceId: task.workspaceId || undefined, eventKey: "campaign.completed", dedupeKey: "dialer-task:" + taskId, title: "Campaign completed", message: "Campaign \"" + task.name + "\" finished dialing all leads.", actionPath: "/campaign" });
     if (global.broadcastLog) {
       global.broadcastLog(`🤖 Auto-dial task "${task.name}" completed — every lead has been dialed.`, {
         type: "auto_dial_progress", orgId, taskId, status: "task_completed",

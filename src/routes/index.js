@@ -15,7 +15,9 @@ router.use("/api/channels", channelsRouter);
 router.use("/api/conversations", conversationsRouter);
 
 // Platform admin
+router.get("/api/platform/notifications/stream", require("../notifications/channels/browserSse").connectPlatformStream);
 router.use("/api/platform", require("./platform"));
+router.use("/api/notifications", require("../notifications/routes").createUserRouter());
 router.use("/api/telephony", require("./telephonyConnectors").createOrgRouter());
 
 // Billing compatibility API (authenticated and tenant-scoped).

@@ -1,0 +1,29 @@
+name: Unified notification validation
+on:
+  push:
+    branches:
+      - 'feature/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'src/notifications/**'
+      - 'src/db/migrations/2026100735-unified-notifications.js'
+      - 'src/routes/admin.js'
+      - 'src/routes/index.js'
+      - 'src/routes/platform.js'
+      - 'src/shared.js'
+      - 'tests/notifications/**'
+      - '.github/workflows/unified-notifications.yml'
+jobs:
+  notifications:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx jest --runInBand --forceExit tests/notifications/unifiedNotifications.test.js

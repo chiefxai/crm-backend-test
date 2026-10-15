@@ -82,6 +82,8 @@ router.post('/payments', requireAuth, requirePermission('billing.read'),
       if (!req.file) return res.status(400).json({ error: 'Payment proof is required.' });
       const service = createPaymentSubmitForRequest(req);
       const record = await service.submit({ command, trustedContext, proofFile: req.file });
+      void require("../notifications/service").publishQuietly({ audience:"platform", orgId:req.orgId, eventKey:"payment.submitted", dedupeKey:"payment:" + record.id,
+        title:"Payment submitted for review", message:"An organization submitted a payment receipt for review.", actionPath:"/admin/reviews?type=payments&orgId=" + encodeURIComponent(req.orgId) });
       return res.status(201).json({
         id: record.id,
         purpose: record.purpose,

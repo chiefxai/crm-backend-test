@@ -63,6 +63,12 @@ function createOrganizationSubscriptionGraceRouter({ serviceFactory, pool, polic
       const result = await getService(serviceFactory).createRequest({ orgId: req.orgId, actorId: req.userId,
         periodId: req.body.periodId, requestedUntil: req.body.requestedUntil, justification: req.body.justification,
         expectedVersion: req.body.expectedVersion, operationId: key });
+      void require('../notifications/service').publishQuietly({
+        audience:'platform',orgId:req.orgId,eventKey:'billing.grace_requested',
+        dedupeKey:'grace:' + result.id,title:'Subscription grace request',
+        message:'An organization requested additional subscription grace time.',
+        actionPath:'/admin/reviews?type=grace&orgId=' + encodeURIComponent(req.orgId),
+      });
       return res.status(201).json(result);
     } catch (error) { return errorResponse(res, error); }
   });
@@ -81,6 +87,18 @@ function createPlatformSubscriptionGraceRouter({ serviceFactory, pool } = {}) {
       const result = await getService(serviceFactory).decide({ orgId: req.params.orgId, graceRequestId: req.params.graceRequestId,
         actorId: req.userId, decision: req.body.decision, reason: req.body.reason, expectedVersion: req.body.expectedVersion,
         grantedUntil: req.body.grantedUntil, operationId: key });
+      void require('../notifications/service').publishQuietly({
+        audience:'platform',orgId:req.params.orgId,eventKey:'billing.grace_decided',
+        dedupeKey:'grace-decision:' + req.params.graceRequestId + ':' + req.body.decision,
+        title:'Subscription grace decision',message:'A grace request decision was recorded.',
+        actionPath:'/admin/reviews?type=grace&orgId=' + encodeURIComponent(req.params.orgId),
+      });
+      void require('../notifications/service').publishQuietly({
+        audience:'organization',orgId:req.params.orgId,eventKey:'billing.grace_decided',
+        dedupeKey:'grace-decision:' + req.params.graceRequestId + ':' + req.body.decision,
+        title:'Subscription grace decision',message:req.body.decision === 'approve' ? 'Your grace time request was approved.' : 'Your grace time request was denied.',
+        actionPath:'/administration/billing',
+      });
       return res.json(result);
     } catch (error) { return errorResponse(res, error); }
   });
