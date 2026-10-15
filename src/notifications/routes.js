@@ -50,6 +50,29 @@ function createUserRouter() {
 }
 function createPlatformRouter() {
   const router=routerFactory();
+  // Only authenticated Platform Admins (verified on parent router) may
+  // explicitly publish system announcements. Never expose this to org users.
+  router.post('/announcements',handler(async(req,res)=>{
+    const { audience, orgId, title, message, dedupeKey } = req.body || {};
+    if (!['platform','organization'].includes(audience)
+      || typeof title !== 'string' || !title.trim() || title.length > 150
+      || typeof message !== 'string' || !message.trim() || message.length > 4000
+      || typeof dedupeKey !== 'string' || !/^[a-zA-Z0-9:_-]{8,128}$/.test(dedupeKey))
+      throw new TypeError('A valid audience, title, message and stable announcement key are required.');
+    if (audience === 'organization' && (typeof orgId !== 'string' || !orgId.trim() || orgId.length > 191))
+      throw new TypeError('Organization announcements require a target organization.');
+    if (audience === 'organization') {
+      const { getPool } = require('../db/pool');
+      const found = await getPool().query('SELECT id FROM organizations WHERE id=? LIMIT 1',[orgId]);
+      if (!found.rows?.length) return res.status(404).json({error:'Organization not found.'});
+    }
+    const saved = await getService().publish({
+      audience,orgId:audience==='organization'?orgId:undefined,
+      eventKey:'system.announcement',dedupeKey,title:title.trim(),message:message.trim(),
+      actionPath:audience==='platform'?'/admin/overview':'/dashboard',
+    });
+    return res.status(saved.created ? 201 : 200).json(saved);
+  }));
   router.post('/stream-ticket',handler(async(req,res)=>{
     // Parent /api/platform router verifies identity and the platform-admin
     // allowlist before this short-lived SSE credential can be issued.
