@@ -121,7 +121,7 @@ async function createWorkspaceInTransaction(client, orgId, { name, industry, bra
     paidAddon = Boolean(paid[0]);
     if (!paidAddon) throw organizationPolicy.invalid('An approved workspace add-on invoice is required.',402);
   }
-  organizationPolicy.authorizeCreation(policy,existingWorkspaces,{industry,platformAdmin,pricingAcceptanceToken: paidAddon ? organizationPolicy.branchQuote(policy,existingWorkspaces,seatCount)?.token : pricingAcceptanceToken,seatCount,paidAddon});
+  organizationPolicy.authorizeCreation(policy,existingWorkspaces,{industry,platformAdmin,pricingAcceptanceToken: paidAddon ? organizationPolicy.branchQuote(policy,existingWorkspaces,seatCount,industry)?.token : pricingAcceptanceToken,seatCount,paidAddon});
   if (!billingAddonId) {
     const { rows: pending } = await client.query("SELECT COUNT(*) AS count FROM billing_workspace_addons WHERE org_id=? AND status='pending'",[orgId]);
     const reserved = Number(pending[0]?.count || 0);
@@ -323,7 +323,7 @@ async function getAuthorizationState(orgId,workspaceId,memberId) {
     WHERE w.org_id=? AND w.id=?`,[memberId || null,orgId,workspaceId]);
   return rows[0] || null;
 }
-async function getWorkspaceSetup(orgId) {
+async function getWorkspaceSetup(orgId, selectedIndustry = null) {
   await db.ready;
   const org = await require('./organizationRepository').get(orgId);
   if (!org) throw organizationPolicy.invalid('Organization not found',404);
@@ -331,6 +331,8 @@ async function getWorkspaceSetup(orgId) {
   const policy = organizationPolicy.effectivePolicy(org,workspaces);
   const { rows: seatRows } = await pool.query("SELECT COUNT(*) AS seat_count FROM org_members WHERE org_id=? AND COALESCE(NULLIF(status,''),'Active')='Active'",[orgId]);
   const seatCount = Number(seatRows[0]?.seat_count || 0);
+  const industry = selectedIndustry || policy.primaryIndustry;
+  if (!industryPacks.listIndustries().some(item => item.key === industry)) throw organizationPolicy.invalid('Select a supported workspace industry.');
   const { rows: pendingRows } = await pool.query("SELECT COUNT(*) AS count FROM billing_workspace_addons WHERE org_id=? AND status='pending'",[orgId]);
   const pendingWorkspacePurchases = Number(pendingRows[0]?.count || 0);
   const platformCap = Math.max(2,Math.min(Number(process.env.MAX_WORKSPACES_PER_ORG) || 100,1000));
@@ -338,6 +340,6 @@ async function getWorkspaceSetup(orgId) {
   return { policy, workspaces, pendingWorkspacePurchases,
     purchasesAvailable:require('../../billing/workspaceAddonBilling').purchasesEnabled(),
     currentQuote: organizationPolicy.quote(policy,workspaces,seatCount),
-    addBranchQuote: reservedLimit ? null : organizationPolicy.branchQuote(policy,workspaces,seatCount) };
+    addBranchQuote: reservedLimit ? null : organizationPolicy.branchQuote(policy,workspaces,seatCount,industry) };
 }
 module.exports = { getMemberFeatureOverride,setMemberFeatureOverride,getWorkspaceSetup, createWorkspaceInTransaction, seedIndustryObjects, getDefault, ensureDefault, ensureDefaultMembership, getActive, listForOrg, listForMember, createWorkspace, updateSettings, getProfile, getAssignment, countActiveAssignments, listMembers, setMemberAssignment, setMemberFeatureFlags, getAuthorizationState };

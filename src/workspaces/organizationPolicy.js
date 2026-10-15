@@ -85,13 +85,14 @@ function quote(policy, workspaces, seatCount = 1) {
     additionalIndustries, additionalIndustryMonthlyInr: p.additionalIndustryMonthlyInr, totalMonthlyInr,
     usageIncluded: false };
 }
-function branchQuote(policy, workspaces, seatCount = 1) {
+function branchQuote(policy, workspaces, seatCount = 1, industry = policy.primaryIndustry) {
   if (!policy.pricing || (policy.pricing.maxWorkspaces !== null && workspaces.length >= policy.pricing.maxWorkspaces)) return null;
-  const next = quote(policy, [...workspaces, { industry: policy.primaryIndustry }], seatCount);
+  const current = quote(policy, workspaces, seatCount);
+  const next = quote(policy, [...workspaces, { industry }], seatCount);
   if (!next) return null;
-  const token = crypto.createHash('sha256').update(JSON.stringify({ policy, workspaces: workspaces.map(w => [w.id, w.industry]).sort(), next })).digest('hex');
-  const paymentRequired = workspaces.length >= policy.pricing.includedWorkspaces && policy.pricing.extraWorkspaceMonthlyInr > 0;
-  return { ...next, paymentRequired, monthlyAddonInr: paymentRequired ? policy.pricing.extraWorkspaceMonthlyInr : 0,
+  const monthlyAddonInr = Math.round((next.totalMonthlyInr - (current?.totalMonthlyInr || 0)) * 100) / 100;
+  const token = crypto.createHash('sha256').update(JSON.stringify({ policy, workspaces: workspaces.map(w => [w.id, w.industry]).sort(), industry, next })).digest('hex');
+  return { ...next, paymentRequired: monthlyAddonInr > 0, monthlyAddonInr,
     upgradesToMultipleBranches: policy.mode === 'single', token };
 }
 function validateIndustryChange(currentIndustry, nextIndustry) {
@@ -101,14 +102,14 @@ function authorizeCreation(policy,workspaces,{industry,platformAdmin=false,prici
   if (!policy.pricing || (policy.pricing.maxWorkspaces !== null && workspaces.length >= policy.pricing.maxWorkspaces)) {
     throw invalid(`This subscription allows up to ${policy.pricing?.maxWorkspaces || 0} workspaces. Upgrade the subscription to add another workspace.`, 409);
   }
-  if (industry !== policy.primaryIndustry && (!platformAdmin || policy.mode !== 'mixed_industry')) {
-    throw invalid('Only platform administrators can add a different industry, and only for mixed-industry organizations.',403);
+  if (industry !== policy.primaryIndustry && policy.mode !== 'mixed_industry') {
+    throw invalid('This subscription only allows workspaces in the organization primary industry.',403);
   }
-  if (workspaces.length >= policy.pricing.includedWorkspaces && policy.pricing.extraWorkspaceMonthlyInr > 0 && !paidAddon) {
-    throw invalid('Purchase a workspace add-on and have its payment approved before creating an additional workspace.', 402);
+  const offered=branchQuote(policy,workspaces,seatCount,industry);
+  if (offered?.paymentRequired && !paidAddon) {
+    throw invalid('Purchase a workspace add-on and have its payment approved before creating this workspace.', 402);
   }
   if (!platformAdmin) {
-    const offered=branchQuote(policy,workspaces,seatCount);
     if (!offered) throw invalid('Ask a platform administrator to configure branch pricing before adding a workspace.',409);
     if (pricingAcceptanceToken!==offered.token) throw invalid('Workspace pricing changed. Refresh and accept the current monthly price.',409);
   }

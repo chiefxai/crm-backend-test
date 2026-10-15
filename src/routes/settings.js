@@ -463,7 +463,7 @@ router.get("/workspaces", requireAuth, async (req,res) => {
 });
 
 router.get('/workspace-policy', requireAuth, requirePermission('organization.read'), async(req,res)=>{
-  try {res.json(await workspaceRepository.getWorkspaceSetup(req.orgId));}
+  try {res.json(await workspaceRepository.getWorkspaceSetup(req.orgId, req.query.industry ? String(req.query.industry) : null));}
   catch(error) {res.status(error.statusCode || 500).json({error:safeErrorMessage(error)});}
 });
 
