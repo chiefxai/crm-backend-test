@@ -26,4 +26,4 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npx jest --runInBand --forceExit tests/notifications/unifiedNotifications.test.js
+      - run: npx jest --runInBand --forceExit tests/notifications/unifiedNotifications.test.js tests/notifications/billingScanner.test.js

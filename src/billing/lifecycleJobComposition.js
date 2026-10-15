@@ -54,7 +54,7 @@ function createBillingLifecycleJobs({
   return Object.freeze({ ...periodJobs, ...accessJobs });
 }
 
-const LIFECYCLE_MODES = Object.freeze(['activate', 'renewal-reminders', 'enforce-access']);
+const LIFECYCLE_MODES = Object.freeze(['activate', 'renewal-reminders', 'enforce-access', 'product-notifications']);
 function validateRunOptions({ mode, limit = 25, now = new Date().toISOString(), leadTimeSeconds = 7 * 86400 } = {}) {
   if (!LIFECYCLE_MODES.includes(mode)) throw new TypeError(`mode must be one of ${LIFECYCLE_MODES.join(', ')}.`);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('limit must be between 1 and 100.');
@@ -69,6 +69,7 @@ function validateRunOptions({ mode, limit = 25, now = new Date().toISOString(), 
 function lifecycleFlag(mode) {
   if (mode === 'activate') return 'BILLING_SUBSCRIPTION_ACTIVATION_ENABLED';
   if (mode === 'renewal-reminders') return 'BILLING_RENEWAL_REMINDERS_ENABLED';
+  if (mode === 'product-notifications') return 'BILLING_PRODUCT_NOTIFICATIONS_ENABLED';
   return 'BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED';
 }
 
@@ -80,6 +81,7 @@ async function runBillingLifecycleOnce(options, {
   if (env[lifecycleFlag(run.mode)] !== 'true') {
     return Object.freeze({ skipped: true, reason: 'disabled', mode: run.mode, scanned: 0, results: [] });
   }
+  if (run.mode === 'product-notifications') return require('../notifications/billingScanner').scanProductNotifications({ now: run.now, limit: run.limit, leadDays: Math.ceil(run.leadTimeSeconds/86400) });
   const jobs = jobsFactory();
   if (run.mode === 'activate') return jobs.activateDuePeriods({ now: run.now, limit: run.limit });
   if (run.mode === 'renewal-reminders') return jobs.queueDueRenewalEvents({ now: run.now, limit: run.limit, leadTimeSeconds: run.leadTimeSeconds });
