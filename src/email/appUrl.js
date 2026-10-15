@@ -37,4 +37,9 @@ function getPublicAppUrl() {
   return "http://localhost:5173";
 }
 
-module.exports = { getPublicAppUrl, normalizeOrigin, escapeHtml };
+/** One backend product name shared by email templates and message headers. */
+function getAppName() {
+  return String(process.env.APP_NAME || "Chief Connect").trim() || "Chief Connect";
+}
+
+module.exports = { getPublicAppUrl, normalizeOrigin, escapeHtml, getAppName };
