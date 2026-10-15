@@ -5,6 +5,7 @@ const { validatePaymentDecision } = require('../../contracts/commands');
 const { BillingDomainError, DOMAIN_ERROR_CODES } = require('../../contracts/errors');
 const { validateAmount } = require('../../kernel/amount');
 const { planIssueGrant } = require('../credits/domain');
+const { stableLifecycleId } = require('../subscriptions/periodActivationService');
 
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -69,6 +70,37 @@ function createPaymentDecisionService({
     return Object.freeze({ status: 'active', grantId, creditAmount: amount, journalId: journal.journalId, fulfillmentId: fulfillment.id });
   }
 
+  // Free-trial conversion is special: the paid billing period remains
+  // scheduled after the trial, but its paid credits are available as soon as
+  // the payment is APPROVED. Both the grant and its ledger journal commit in
+  // the same transaction as approval and the paid-period link.
+  async function issueTrialPaidCredits(tx, request, period, now) {
+    if (period.trialConversion !== true || Date.parse(period.startAt) <= Date.parse(now)) return null;
+    const amount = validateAmount(period.termsSnapshot?.terms?.includedCredits);
+    if (BigInt(amount.units) <= 0n) return null;
+    const orgId = request.orgId;
+    const grantId = stableLifecycleId('subscription-grant', `${orgId}\0${period.id}`);
+    const base = {orgId,accountType:'organization',ownerId:orgId,asset:amount.asset,scale:amount.scale,now};
+    const account = await creditRepository.ensureAccount(tx, {...base,accountPurpose:'pool'});
+    const clearing = await creditRepository.ensureAccount(tx, {...base,accountPurpose:'funding_clearing'});
+    const operationId = stableLifecycleId('early-trial-paid-grant', `${orgId}\0${period.id}`);
+    const plan = planIssueGrant({
+      orgId,operationId,adminAccountId:account.id,fundingClearingAccountId:clearing.id,
+      actor:{type:'system',id:'approved-trial-conversion'},now,
+      reason:`Issue paid plan credits early after approved trial conversion ${request.id}`,
+      grant:{
+        id:grantId,kind:'subscription',amount,sourceType:'subscription_period',
+        sourceId:period.id,sourceEventKey:'included-credits-v1',
+        periodId:period.id,paymentRequestId:request.id,
+        accountScope:{orgId,ownerType:'organization',ownerId:orgId},
+        effectiveAt:now,expiresAt:period.endAt,
+      },
+    });
+    await creditRepository.createGrant(tx,{orgId,grant:plan.grant,now});
+    const journal = await creditRepository.applyJournal(tx,{...plan.journal,positionDeltas:plan.positionDeltas});
+    return Object.freeze({grantId,amount,effectiveAt:now,expiresAt:period.endAt,journalId:journal.journalId});
+  }
+
   return Object.freeze({
     async decide({ command, trustedContext } = {}) {
       const decision = validatePaymentDecision(command, trustedContext);
@@ -127,7 +159,9 @@ function createPaymentDecisionService({
                 periodId: funding.id, effectiveAt: funding.startAt, now,
               });
             }
-            funding = Object.freeze({ status: 'scheduled', periodId: funding.id, startsAt: funding.startAt, endsAt: funding.endAt });
+            const paidCredits = await issueTrialPaidCredits(tx, request, funding, now);
+            funding = Object.freeze({ status: 'scheduled', periodId: funding.id, startsAt: funding.startAt,
+              endsAt: funding.endAt, ...(paidCredits ? { paidCreditsAvailableNow: paidCredits } : {}) });
           } else if (decision.decision === 'approve' && request.purpose === 'topup') {
             funding = await issueTopup(tx, request, decision.context.actor, decision.context.operationId, now);
           } else if (decision.decision === 'approve' && request.purpose === 'invoice') {
