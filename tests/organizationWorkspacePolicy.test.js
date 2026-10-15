@@ -42,11 +42,20 @@ test('concurrent branch or price changes invalidate accepted price quote',()=>{
     industry:'lending',pricingAcceptanceToken:token,
   })).toThrow(/pricing changed/);
 });
-test('organization admins cannot create a different industry even in mixed mode',()=>{
+test('organization admins can create a different industry in mixed mode using its selected quote',()=>{
   const mixed={...sameIndustry,mode:'mixed_industry'};
+  const alternateOffer=policy.branchQuote(mixed,first,1,'automotive');
+  expect(alternateOffer.paymentRequired).toBe(true);
+  expect(alternateOffer.monthlyAddonInr).toBe(pricing.additionalIndustryMonthlyInr);
   expect(()=>policy.authorizeCreation(mixed,first,{
     industry:'automotive',pricingAcceptanceToken:policy.branchQuote(mixed,first).token,
-  })).toThrow(/Only platform/);
+  })).toThrow(/pricing changed/);
+  expect(policy.authorizeCreation(mixed,first,{
+    industry:'automotive',pricingAcceptanceToken:alternateOffer.token,
+  }).mode).toBe('mixed_industry');
+  expect(()=>policy.authorizeCreation(sameIndustry,first,{
+    industry:'automotive',pricingAcceptanceToken:alternateOffer.token,
+  })).toThrow(/primary industry/);
 });
 test('platform admins need mixed mode to add a different industry',()=>{
   expect(()=>policy.authorizeCreation(sameIndustry,first,{industry:'automotive',platformAdmin:true})).toThrow(/mixed-industry/);
