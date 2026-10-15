@@ -97,7 +97,8 @@ function createAutomaticCreditAllocationService({ creditRepository, clock } = {}
       'Automatic allocation source and destination accounts must be distinct.', { retryable: true });
     const position = await creditRepository.getPositionForUpdate(tx, { orgId, grantId, accountId: sourceAccount.id });
     if (!position) throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'Organization pool has no position for this credit grant.');
-    const available = BigInt(position.balanceUnits) - BigInt(position.reservedUnits);
+    const balanceUnits = BigInt(position.amount.units);
+    const available = balanceUnits - BigInt(position.reservedUnits);
     if (available < 0n) throw new BillingDomainError(DOMAIN_ERROR_CODES.RETRYABLE_STORAGE, 'Credit grant position has an invalid held balance.', { retryable: true });
     if (available === 0n) return Object.freeze({ status: 'nothing_to_transfer', allocationMode: 'automatic', grantId, workspaceId: capability.workspaceId,
       heldUnits: String(position.reservedUnits) });
@@ -113,7 +114,7 @@ function createAutomaticCreditAllocationService({ creditRepository, clock } = {}
       reason: `Automatic ${grant.grantKind} allocation (${sourceEvent})`,
     });
     const journal = await creditRepository.applyJournal(tx, { ...plan.journal, positionDeltas: plan.positionDeltas });
-    return Object.freeze({ status: available < BigInt(position.balanceUnits) ? 'partially_allocated' : 'allocated',
+    return Object.freeze({ status: available < balanceUnits ? 'partially_allocated' : 'allocated',
       allocationMode: 'automatic', grantId, workspaceId: capability.workspaceId, amount,
       heldUnits: String(position.reservedUnits), journalId: journal.journalId, operationId });
   }
