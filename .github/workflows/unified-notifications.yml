@@ -8,6 +8,8 @@ on:
       - main
     paths:
       - 'src/notifications/**'
+      - 'src/email/**'
+      - 'tests/email/**'
       - 'src/db/migrations/2026100735-unified-notifications.js'
       - 'src/routes/admin.js'
       - 'src/routes/index.js'
@@ -26,4 +28,4 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npx jest --runInBand --forceExit tests/notifications/unifiedNotifications.test.js tests/notifications/billingScanner.test.js
+      - run: npx jest --runInBand --forceExit tests/notifications/unifiedNotifications.test.js tests/notifications/billingScanner.test.js tests/email/appName.test.js tests/email/appUrl.test.js
