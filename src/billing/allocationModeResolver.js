@@ -19,7 +19,15 @@ function resolveAllocationMode({ termsSnapshot, workspaces = [] } = {}) {
       manualAllocationAllowed: false, status: 'unavailable' });
   }
 
-  const mode = maxWorkspaces === 1 ? 'automatic' : 'manual';
+  // Workspace mode defines the allocation policy. A multi-workspace plan can
+  // still have a limit of one during setup or a temporary capacity constraint;
+  // it remains a manual-allocation plan for its organization admin.
+  if (structure.mode === 'single' && maxWorkspaces !== 1) {
+    return Object.freeze({ allocationMode: 'unknown', maxWorkspaces,
+      workspaceCount: workspaces.length, workspaceId: null,
+      manualAllocationAllowed: false, status: 'unavailable' });
+  }
+  const mode = structure.mode === 'single' ? 'automatic' : 'manual';
   const active = workspaces.filter(workspace => String(workspace.status).toLowerCase() === 'active');
   const capacityConflict = maxWorkspaces !== null && workspaces.length > maxWorkspaces;
   if (mode === 'manual') {
