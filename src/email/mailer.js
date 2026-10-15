@@ -10,6 +10,7 @@
 //   ALLOWED_ORIGINS — first origin used if APP_URL is unset
 
 const nodemailer = require("nodemailer");
+const { getAppName } = require("./appUrl");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("email.mailer");
 
@@ -39,7 +40,9 @@ async function sendMailResult({ to, subject, html, text }) {
     log.warn("⚠️  SMTP not configured — email skipped:", subject, "→", to);
     return { status: "skipped_unconfigured", providerMessageId: null, retryable: false, errorCode: null };
   }
-  const from = process.env.SMTP_FROM || process.env.SMTP_USER;
+  const sender = process.env.SMTP_FROM || process.env.SMTP_USER;
+  // A plain sender email gets the common display name; explicit display names stay intact.
+  const from = sender && !sender.includes("<") ? `"${getAppName()}" <${sender}>` : sender;
   try {
     const result = await getTransporter().sendMail({ from, to, subject, html, text });
     log.info(`📧 Email accepted: "${subject}" → ${to}`);
