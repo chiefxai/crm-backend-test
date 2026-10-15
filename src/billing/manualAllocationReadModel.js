@@ -58,12 +58,20 @@ async function readManualAllocationOverview(orgId, { pool = getPool(), now = new
     const workspaces = (await connection.query(
       'SELECT id,name,status FROM workspaces WHERE org_id=? ORDER BY is_default DESC,name,id', [orgId],
     )).rows;
+    const organizationRows = (await connection.query(
+      'SELECT settings FROM organizations WHERE id=?', [orgId])).rows;
+    let workspacePolicy = null;
+    try {
+      const settings = typeof organizationRows[0]?.settings === 'string'
+        ? JSON.parse(organizationRows[0].settings) : organizationRows[0]?.settings;
+      workspacePolicy = settings?.workspacePolicy || null;
+    } catch { /* Invalid legacy settings must not enable allocation. */ }
     const termsRows = (await connection.query(`SELECT terms_snapshot_json FROM organization_billing_terms
       WHERE org_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
       ORDER BY version DESC LIMIT 1`, [orgId, at, at])).rows;
     const termsValue = termsRows[0]?.terms_snapshot_json;
     const termsSnapshot = termsValue == null ? null : typeof termsValue === 'string' ? JSON.parse(termsValue) : termsValue;
-    const allocation = resolveAllocationMode({ termsSnapshot, workspaces });
+    const allocation = resolveAllocationMode({ termsSnapshot, workspacePolicy, workspaces });
     const rows = (await connection.query(`SELECT p.grant_id,p.balance_units,p.reserved_units,p.version,
         p.asset,p.scale,a.account_type,a.owner_id,g.grant_kind,g.expires_at,g.effective_at
       FROM billing_credit_positions p
