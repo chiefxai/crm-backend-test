@@ -1,10 +1,10 @@
 // src/email/templates.js — HTML email templates
 
-const { getPublicAppUrl, escapeHtml } = require("./appUrl");
+const { getPublicAppUrl, escapeHtml, getAppName } = require("./appUrl");
 
-const PRODUCT_NAME = process.env.EMAIL_PRODUCT_NAME || "ChiefVoice";
+// APP_NAME is the single brand source for all customer-facing backend emails.
 
-function simpleEmail({ subject, heading, paragraphs = [], actionUrl = null, actionLabel = "Open ChiefVoice", footer = null }) {
+function simpleEmail({ subject, heading, paragraphs = [], actionUrl = null, actionLabel, footer = null }) {\n  const PRODUCT_NAME = getAppName();\n  actionLabel ||= `Open ${PRODUCT_NAME}`;
   const safeHeading = escapeHtml(heading);
   const body = paragraphs.map((paragraph) => `<p style="margin:0 0 14px;color:#334155;font-size:15px;line-height:1.6">${escapeHtml(paragraph)}</p>`).join("");
   const action = actionUrl ? `<p style="margin:24px 0"><a href="${escapeHtml(actionUrl)}" style="display:inline-block;padding:12px 20px;background:#4f46e5;color:#fff;text-decoration:none;border-radius:8px;font-weight:700">${escapeHtml(actionLabel)}</a></p>` : "";
@@ -13,7 +13,7 @@ function simpleEmail({ subject, heading, paragraphs = [], actionUrl = null, acti
     text: [heading, ...paragraphs, actionUrl ? `${actionLabel}: ${actionUrl}` : "", footerText].filter(Boolean).join("\n\n") };
 }
 
-function welcomeEmail({ orgName, adminEmail, tempPassword, role }) {
+function welcomeEmail({ orgName, adminEmail, tempPassword, role }) {\n  const PRODUCT_NAME = getAppName();
   const appUrl = getPublicAppUrl();
   const safeOrg = escapeHtml(orgName || "your organization");
   const safeEmail = escapeHtml(adminEmail);
@@ -168,7 +168,7 @@ function contactVerificationEmail({ verificationUrl, expiresAt, orgName }) {
 }
 
 function backupReadyEmail({ downloadUrl, retentionText }) {
-  return simpleEmail({ subject: "Your ChiefVoice backup is ready", heading: "Your backup is ready",
+  return simpleEmail({ subject: `Your ${getAppName()} backup is ready`, heading: "Your backup is ready",
     paragraphs: ["Your requested CRM backup has finished processing.", retentionText || "The private download link may expire."],
     actionUrl: downloadUrl, actionLabel: "Download backup" });
 }
