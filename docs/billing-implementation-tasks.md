@@ -467,6 +467,14 @@ Acceptance: recorded deployed commits, migration status, worker/job health,
 Vercel status and opening balances; operational pause procedure available;
 rollback cannot reactivate legacy debits for already migrated funds.
 
+## Feature-specific task breakdown
+
+Subscription-aware credit distribution work is tracked separately in
+[single-workspace-auto-allocation-tasks.md](single-workspace-auto-allocation-tasks.md).
+It defines AUTOALLOC-01 through AUTOALLOC-08 and keeps financial transfers behind
+an unset, per-organization release gate until ledger accounts and grants can be
+validated.
+
 ## Reusable agent assignment prompt
 
 Copy the block below and replace TASK_ID with one task above:

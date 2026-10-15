@@ -71,11 +71,19 @@ async function readPlanCreditStatus(orgId, { pool = getPool(), getPlans = getWor
     [orgId, period.id],
   );
   const grant = grants.rows?.[0];
-  if (grant && grant.status === 'active') return {
-    ...base, currentPeriod, state: 'issued_to_organization_pool',
-    issuedThisPeriod: { asset: grant.asset, units: String(grant.amount_units),
-      scale: Number(grant.scale) },
-  };
+  if (grant && grant.status === 'active') {
+    const allocations = await pool.query(`SELECT j.id FROM billing_journals j
+      JOIN billing_journal_lines line ON line.org_id=j.org_id AND line.journal_id=j.id
+      JOIN billing_credit_accounts account ON account.org_id=line.org_id AND account.id=line.account_id
+      WHERE j.org_id=? AND j.operation_type='credit_transfer' AND line.grant_id=?
+        AND line.entry_type='transfer_in' AND account.account_type='workspace'
+      LIMIT 1`, [orgId, grant.id]);
+    return {
+      ...base, currentPeriod,
+      state: allocations.rows?.length ? 'issued_to_workspace' : 'issued_to_organization_pool',
+      issuedThisPeriod: { asset: grant.asset, units: String(grant.amount_units), scale: Number(grant.scale) },
+    };
+  }
   if (period.status === 'active') return { ...base, currentPeriod, state: 'activation_incomplete' };
   const funding = await pool.query(
     `SELECT id FROM billing_payment_fulfillments

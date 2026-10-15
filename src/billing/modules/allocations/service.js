@@ -25,6 +25,7 @@ function availableAccountArgs(orgId, scope, amount, accountPurpose = 'pool') {
 
 function createAllocationService({
   unitOfWork, allocationRepository, creditRepository, idSource, clock, authorizeAllocation,
+  validateManualTransfer,
   atomicLimit = DEFAULT_ATOMIC_LIMIT, batchLimit = DEFAULT_BATCH_LIMIT,
 } = {}) {
   if (typeof unitOfWork?.runFinancial !== 'function') throw new TypeError('Allocation service requires the billing UnitOfWork.');
@@ -220,6 +221,9 @@ function createAllocationService({
         orgId: value.orgId, operationId: value.context.operationId, requestFingerprint,
         expectedVersions: value.context.expectedVersions,
         callback: async (tx) => {
+          if (typeof validateManualTransfer === 'function') {
+            await validateManualTransfer({ tx, orgId: value.orgId, toScope: value.toScope, now });
+          }
           const grant = await creditRepository.getGrantForUpdate(tx, { orgId: value.orgId, grantId: value.grantId });
           if (!grant) throw new BillingDomainError(DOMAIN_ERROR_CODES.NOT_FOUND, 'Credit grant was not found.');
           if (value.toScope.ownerType === 'workspace') {

@@ -30,6 +30,7 @@ function topupGrantAmount(request) {
 
 function createPaymentDecisionService({
   unitOfWork, repository, creditRepository, periodLifecycle, subscriptionRepository, invoiceRepository, outbox, idSource, clock, authorizeDecision,
+  automaticAllocationService, automaticAllocationEnabled = false,
 } = {}) {
   if (typeof unitOfWork?.runFinancial !== 'function') throw new TypeError('Payment decision service requires the billing UnitOfWork.');
   for (const method of ['getForUpdate', 'saveDecision', 'markQuotePaid', 'createFulfillment']) {
@@ -62,11 +63,24 @@ function createPaymentDecisionService({
     });
     await creditRepository.createGrant(tx, { orgId: request.orgId, grant: plan.grant, now });
     const journal = await creditRepository.applyJournal(tx, { ...plan.journal, positionDeltas: plan.positionDeltas });
+    let automaticAllocation = Object.freeze({ status: 'disabled' });
+    const shouldAutomaticallyAllocate = typeof automaticAllocationEnabled === 'function'
+      ? automaticAllocationEnabled(request.orgId) === true : automaticAllocationEnabled === true;
+    if (shouldAutomaticallyAllocate) {
+      if (typeof automaticAllocationService?.allocateCreditsAutomatically !== 'function') {
+        throw new BillingDomainError(DOMAIN_ERROR_CODES.RETRYABLE_STORAGE,
+          'Automatic allocation is enabled but the allocation service is not configured.', { retryable: true });
+      }
+      automaticAllocation = await automaticAllocationService.allocateCreditsAutomatically({
+        tx, orgId: request.orgId, grantId, sourceEvent: 'approved-topup-payment', now,
+      });
+    }
     const fulfillment = await repository.createFulfillment(tx, {
       orgId: request.orgId, paymentRequestId: request.id, fulfillmentKind: 'topup_credit_grant',
-      targetId: grantId, result: { grantId, creditAmount: amount, status: 'active' }, now,
+      targetId: grantId, result: { grantId, creditAmount: amount, status: 'active', automaticAllocation }, now,
     });
-    return Object.freeze({ status: 'active', grantId, creditAmount: amount, journalId: journal.journalId, fulfillmentId: fulfillment.id });
+    return Object.freeze({ status: 'active', grantId, creditAmount: amount, journalId: journal.journalId,
+      fulfillmentId: fulfillment.id, automaticAllocation });
   }
 
   return Object.freeze({

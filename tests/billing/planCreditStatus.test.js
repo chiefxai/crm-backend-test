@@ -14,13 +14,14 @@ const row = overrides => ({
 });
 const period = {id:'period-paid',status:'scheduled',starts_at:'2026-10-01T00:00:00.000Z',
   ends_at:'2026-11-01T00:00:00.000Z' };
-function fixture({ organization = row(), periods = [], grants = [], funded = [] } = {}) {
+function fixture({ organization = row(), periods = [], grants = [], funded = [], allocations = [] } = {}) {
   const calls = [];
   const pool = { query: jest.fn(async(sql,args) => {
     calls.push({sql,args});
     if (sql.includes('FROM organizations')) return {rows:organization ? [organization] : []};
     if (sql.includes('FROM billing_periods')) return {rows:periods};
     if (sql.includes('FROM billing_credit_grants')) return {rows:grants};
+    if (sql.includes('FROM billing_journals')) return {rows:allocations};
     if (sql.includes('FROM billing_payment_fulfillments')) return {rows:funded};
     throw Error('Unexpected SQL: '+sql);
   })};
@@ -80,6 +81,13 @@ describe('monthly Enterprise plan included credit source', () => {
     const result=await readPlanCreditStatus('org-1',{pool,now});
     expect(result).toMatchObject({state:'issued_to_organization_pool',
       issuedThisPeriod:{asset:'INR',units:'250025',scale:2}});
+  });
+  test('identifies a subscription grant transferred into a workspace', async () => {
+    const {pool}=fixture({periods:[{...period,status:'active'}],grants:[
+      {id:'grant-1',status:'active',amount_units:'250025',asset:'INR',scale:2},
+    ],allocations:[{id:'journal-1'}]});
+    const result=await readPlanCreditStatus('org-1',{pool,now});
+    expect(result).toMatchObject({state:'issued_to_workspace',issuedThisPeriod:{units:'250025'}});
   });
   test('flags missing grant for active period without inventing a balance', async () => {
     const {pool}=fixture({periods:[{...period,status:'active'}]});

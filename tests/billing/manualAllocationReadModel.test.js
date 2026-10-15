@@ -1,6 +1,6 @@
 jest.mock('../../src/db/pool', () => ({ getPool: jest.fn() }));
 const {
-  availableUnits, groupBalances, previewManualAllocation, readManualAllocationOverview,
+  availableUnits, groupBalances, previewManualAllocation, readManualAllocationOverview, requireManualAllocation,
 } = require('../../src/billing/manualAllocationReadModel');
 
 const account = { kind: 'subscription', expiresAt: '2026-11-01T00:00:00.000Z',
@@ -37,6 +37,18 @@ describe('manual organization-owned credit allocations', () => {
       amount:{asset:'INR',units:'2500',scale:2},remaining:{asset:'INR',units:'6500',scale:2},
       expiresAt:'2026-11-01T00:00:00.000Z',expectedPositionVersion:7,
     });
+  });
+
+  it('fails closed when effective terms do not permit manual allocation', () => {
+    expect(() => requireManualAllocation({ allocation: {
+      allocationMode: 'automatic', status: 'ready', manualAllocationAllowed: false,
+    } })).toThrow(expect.objectContaining({ code: 'MANUAL_ALLOCATION_NOT_APPLICABLE', statusCode: 409 }));
+    expect(() => requireManualAllocation({ allocation: {
+      allocationMode: 'unknown', status: 'unavailable', manualAllocationAllowed: false,
+    } })).toThrow(expect.objectContaining({ code: 'MANUAL_ALLOCATION_NOT_APPLICABLE', statusCode: 409 }));
+    expect(() => requireManualAllocation({ allocation: {
+      allocationMode: 'manual', status: 'ready', manualAllocationAllowed: true,
+    } })).not.toThrow();
   });
 
   it('rejects missing or suspended workspace, overspend, stale version, held accounts and invalid units', () => {

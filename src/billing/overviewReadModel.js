@@ -1,6 +1,7 @@
 'use strict';
 
 const { validateId } = require('./kernel/scope');
+const { resolveAllocationMode } = require('./allocationModeResolver');
 const { toPaymentApiStatus } = require('./paymentStatus');
 const { getPool } = require('../db/pool');
 
@@ -100,15 +101,25 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = (...ar
       () => connection.query(`SELECT terms_snapshot_json FROM organization_billing_terms
         WHERE org_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
         ORDER BY version DESC LIMIT 1`, [orgId, at, at]),
+      () => connection.query(`SELECT id,status FROM workspaces WHERE org_id=? ORDER BY is_default DESC,created_at,id`, [orgId]),
     ];
     // Explicitly serialize all reads on the one snapshot transaction connection.
     const results = [];
     for (const query of queries) results.push(await query());
-    const [periodRows, paymentRows, invoiceRows, balanceRows, termsRows] = results;
+    const [periodRows, paymentRows, invoiceRows, balanceRows, termsRows, workspaceRows] = results;
     const active = periodRows.rows.find(row => row.status === 'active' && dateIso(row.starts_at) <= at && dateIso(row.ends_at) > at);
     const upcoming = periodRows.rows.find(row => row.status === 'scheduled' && dateIso(row.ends_at) > at);
     const termsValue = termsRows.rows[0]?.terms_snapshot_json;
     const subscriptionTerms = termsValue == null ? null : typeof termsValue === 'string' ? JSON.parse(termsValue) : termsValue;
+    const resolvedAllocation = resolveAllocationMode({ termsSnapshot: subscriptionTerms, workspaces: workspaceRows.rows });
+    const allocation = Object.freeze({
+      mode: resolvedAllocation.allocationMode,
+      manualAllocationAllowed: resolvedAllocation.manualAllocationAllowed,
+      workspaceLimit: resolvedAllocation.maxWorkspaces,
+      workspaceCount: resolvedAllocation.workspaceCount,
+      workspaceId: resolvedAllocation.workspaceId,
+      status: resolvedAllocation.status,
+    });
     const fallbackMode = accountRows[0].fallback_mode;
     if (!['prepaid', 'postpaid'].includes(fallbackMode)) {
       throw new TypeError('Unrecognized billing account fallback mode.');
@@ -123,6 +134,7 @@ async function readBillingOverview(orgId, { pool = getPool(), orgReader = (...ar
       recentPayments: paymentRows.rows.map(payment),
       outstandingInvoices: invoiceRows.rows.map(invoice),
       subscriptionTerms,
+      allocation,
     };
     await connection.query('COMMIT');
     started = false;

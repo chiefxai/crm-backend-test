@@ -15,6 +15,7 @@ const { createMysqlAllocationRepository } = require('./modules/allocations/repos
 const { createMysqlPostpaidRepository } = require('./modules/postpaid/repositories/mysqlPostpaidRepository');
 const { createMysqlInvoiceRepository } = require('./modules/postpaid/invoices/mysqlInvoiceRepository');
 const { createMysqlOutboxStore } = require('./adapters/mysql/outboxStore');
+const { createAutomaticCreditAllocationService, automaticAllocationsEnabled } = require('./automaticCreditAllocationService');
 
 function authorizedPlatformDecision(req, actor, orgId) {
   return isPlatformAdminIdentity(req.authClaims, req.userEmail) === true
@@ -42,15 +43,19 @@ function createPlatformPaymentDecisionForRequest(req, {
   const workspaceAddonBilling = require('./workspaceAddonBilling').createWorkspaceAddonBilling({pool,idSource,clock});
   const invoices = createMysqlInvoiceRepository({ idSource, clock, postpaidRepository: postpaid, workspaceAddonBilling });
   const outbox = createMysqlOutboxStore({ pool, clock, tokenSource: idSource });
+  const creditRepository = createMysqlCreditRepository({ idSource, clock });
+  const automaticAllocationService = createAutomaticCreditAllocationService({ creditRepository, clock });
   return createPaymentDecisionService({
     unitOfWork,
     repository: createMysqlPaymentDecisionRepository({ idSource, clock }),
-    creditRepository: createMysqlCreditRepository({ idSource, clock }),
+    creditRepository,
     periodLifecycle,
     subscriptionRepository: createMysqlSubscriptionRepository(),
     invoiceRepository: invoices,
     outbox,
     idSource, clock,
+    automaticAllocationService,
+    automaticAllocationEnabled: orgId => automaticAllocationsEnabled(orgId),
     authorizeDecision: async ({ actor, orgId }) => authorizedPlatformDecision(req, actor, orgId),
   });
 }
