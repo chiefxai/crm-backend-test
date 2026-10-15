@@ -92,13 +92,21 @@ function createManualTransferService(req, { pool = getPool() } = {}) {
     allocationRepository: createMysqlAllocationRepository({ idSource, clock }),
     idSource, clock,
     validateManualTransfer: async ({ tx, orgId: scopedOrgId, toScope, now }) => {
+      const organizationRows = (await tx.query(
+        'SELECT settings FROM organizations WHERE id=?', [scopedOrgId])).rows;
+      let workspacePolicy = null;
+      try {
+        const settings = typeof organizationRows[0]?.settings === 'string'
+          ? JSON.parse(organizationRows[0].settings) : organizationRows[0]?.settings;
+        workspacePolicy = settings?.workspacePolicy || null;
+      } catch { /* Invalid legacy settings must not enable allocation. */ }
       const termsRows = (await tx.query(`SELECT terms_snapshot_json FROM organization_billing_terms
         WHERE org_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
         ORDER BY effective_from DESC,version DESC LIMIT 1`, [scopedOrgId, now, now])).rows;
       const workspaceRows = (await tx.query('SELECT id,status FROM workspaces WHERE org_id=? ORDER BY id', [scopedOrgId])).rows;
       const value = termsRows[0]?.terms_snapshot_json;
       const termsSnapshot = value == null ? null : typeof value === 'string' ? JSON.parse(value) : value;
-      const capability = resolveAllocationMode({ termsSnapshot, workspaces: workspaceRows });
+      const capability = resolveAllocationMode({ termsSnapshot, workspacePolicy, workspaces: workspaceRows });
       requireManualAllocation({ allocation: capability });
       if (!workspaceRows.some(workspace => workspace.id === toScope.ownerId && String(workspace.status).toLowerCase() === 'active')) {
         throw Object.assign(new Error('Credits cannot be allocated to an inactive workspace.'), { statusCode: 409 });
