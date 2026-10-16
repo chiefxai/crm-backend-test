@@ -1116,6 +1116,12 @@ router.post("/organizations/:id/reactivate", async (req, res) => {
     const org = await db.getOrg(id);
     if (!org) return res.status(404).json({ error: "Organization not found" });
     const graceDays = req.body?.graceDays;
+    if (graceDays == null) {
+      const updated = await db.updateOrg(id, { status: "Active" });
+      const actor = { userId: req.userId, userEmail: req.userEmail };
+      await auditLog.record(id, actor, "platform.org.reactivate", "organization", id, { name: org.name });
+      return res.json(updated);
+    }
     if (!Number.isSafeInteger(graceDays) || graceDays < 1 || graceDays > 7) {
       return res.status(400).json({ error: "graceDays must be a whole number from 1 to 7." });
     }
@@ -1128,7 +1134,7 @@ router.post("/organizations/:id/reactivate", async (req, res) => {
       orgId: id, actorId: req.userId, days: graceDays,
       reason: "Platform admin reactivation", operationId: idempotencyKey,
     });
-    const updated = await db.updateOrg(id, { status: "Active" });
+    const updated = await db.getOrg(id);
     const actor = { userId: req.userId, userEmail: req.userEmail };
     await auditLog.record(id, actor, "platform.org.reactivate", "organization", id, {
       name: org.name, graceDays: grace.days, grantedUntil: grace.grantedUntil,
