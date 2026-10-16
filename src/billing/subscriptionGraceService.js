@@ -136,6 +136,8 @@ function createSubscriptionGraceService({ unitOfWork, repository, pool, idSource
         const updated = await repository.updateBillingAccess(tx, { orgId, expectedVersion: subscription.version,
           billingAccessState: 'operational', billingSuspensionCause: null, restrictionDeadline: grantedUntil, now });
         if (!updated) throw domainError('VERSION_CONFLICT', 'Subscription changed while platform grace was being granted.');
+        // Keep organization access and billing grace in the same transaction.
+        await tx.query("UPDATE organizations SET status='Active' WHERE id=?", [orgId]);
         return { orgId, days, grantedUntil, reason: String(reason || '').trim(), subscription: updated };
       },
     });
