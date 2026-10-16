@@ -109,7 +109,40 @@ function createSubscriptionGraceService({ unitOfWork, repository, pool, idSource
       return updatedRequest;
     }});
   }
-  return Object.freeze({ createRequest, decide });
+  async function grantPlatformGrace({ orgId, actorId, days, reason, operationId }) {
+    const now = iso(clock.now());
+    const nowMs = Date.parse(now);
+    if (!Number.isSafeInteger(days) || days < 1 || days > resolvedPolicy.grace.maxDaysPerPeriod) {
+      throw domainError('GRACE_DAYS_INVALID', 'Platform grace must be from 1 to ' + resolvedPolicy.grace.maxDaysPerPeriod + ' days.', 400);
+    }
+    return unitOfWork.runLifecycle({
+      orgId, operationId, requestFingerprint: fingerprint({ orgId, actorId, days, reason, operationId }),
+      callback: async (tx) => {
+        const subscription = await repository.getOrganizationSubscription(tx, { orgId, forUpdate: true });
+        if (!subscription) throw domainError('SUBSCRIPTION_NOT_FOUND', 'Organization subscription was not found.', 404);
+        const cause = subscription.billingSuspensionCause;
+        if (subscription.billingAccessState === 'security_suspended' || cause === 'security' || cause === 'security_suspension') {
+          throw domainError('SECURITY_SUSPENSION', 'A security suspension must be cleared through the security review process.');
+        }
+        if (!subscription.currentPeriodId) throw domainError('PERIOD_NOT_FOUND', 'An active subscription period is required to grant access grace.');
+        const period = rowsOf(await tx.query('SELECT ends_at,status FROM billing_periods WHERE org_id=? AND id=? FOR UPDATE', [orgId, subscription.currentPeriodId]))[0];
+        if (!period || !['active', 'scheduled', 'expired'].includes(String(period.status).toLowerCase())) {
+          throw domainError('PERIOD_NOT_FOUND', 'A current subscription billing period is required to grant access grace.');
+        }
+        const periodEnd = Date.parse(iso(period.ends_at));
+        const currentDeadline = subscription.restrictionDeadline ? Date.parse(subscription.restrictionDeadline) : 0;
+        const base = new Date(Math.max(nowMs, periodEnd, currentDeadline)).toISOString();
+        const grantedUntil = shiftCalendarDays(base, days, { timeZone: resolvedPolicy.billingTimeZone });
+        const updated = await repository.updateBillingAccess(tx, { orgId, expectedVersion: subscription.version,
+          billingAccessState: 'operational', billingSuspensionCause: null, restrictionDeadline: grantedUntil, now });
+        if (!updated) throw domainError('VERSION_CONFLICT', 'Subscription changed while platform grace was being granted.');
+        // Keep organization access and billing grace in the same transaction.
+        await tx.query("UPDATE organizations SET status='Active' WHERE id=?", [orgId]);
+        return { orgId, days, grantedUntil, reason: String(reason || '').trim(), subscription: updated };
+      },
+    });
+  }
+  return Object.freeze({ createRequest, decide, grantPlatformGrace });
 }
 
 function createConfiguredSubscriptionGraceService({ pool, idSource = { newId: (prefix) => `${prefix}-${crypto.randomUUID()}` }, clock = { now: () => new Date().toISOString() }, policy } = {}) {
