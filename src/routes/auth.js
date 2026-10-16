@@ -127,6 +127,10 @@ router.get("/me", requireAuth, async (req, res) => {
         workspaceName: org.workspaceName,subscriptionPlan: org.subscriptionPlan } : null,
       authorization: req.authorization,
       workspace: activeWorkspace,
+      subscriptionAccess: req.subscriptionAccess ? {
+        state: req.subscriptionAccess.state,
+        deadlinePassed: req.subscriptionAccess.deadlinePassed,
+      } : null,
       workspaceCapabilities: { multipleWorkspaces: multipleWorkspacesEnabled(), sharing: workspaceSharingEnabled() },
     });
   } catch (err) {
