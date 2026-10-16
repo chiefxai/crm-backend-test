@@ -1115,11 +1115,25 @@ router.post("/organizations/:id/reactivate", async (req, res) => {
     const { id } = req.params;
     const org = await db.getOrg(id);
     if (!org) return res.status(404).json({ error: "Organization not found" });
-
+    const graceDays = req.body?.graceDays;
+    if (!Number.isSafeInteger(graceDays) || graceDays < 1 || graceDays > 7) {
+      return res.status(400).json({ error: "graceDays must be a whole number from 1 to 7." });
+    }
+    const idempotencyKey = req.get("Idempotency-Key");
+    if (!idempotencyKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(idempotencyKey)) {
+      return res.status(400).json({ error: "A valid Idempotency-Key header is required." });
+    }
+    const graceService = require("../billing/subscriptionGraceService").createConfiguredSubscriptionGraceService();
+    const grace = await graceService.grantPlatformGrace({
+      orgId: id, actorId: req.userId, days: graceDays,
+      reason: "Platform admin reactivation", operationId: idempotencyKey,
+    });
     const updated = await db.updateOrg(id, { status: "Active" });
     const actor = { userId: req.userId, userEmail: req.userEmail };
-    await auditLog.record(id, actor, "platform.org.reactivate", "organization", id, { name: org.name });
-    res.json(updated);
+    await auditLog.record(id, actor, "platform.org.reactivate", "organization", id, {
+      name: org.name, graceDays: grace.days, grantedUntil: grace.grantedUntil,
+    });
+    res.json({ organization: updated, grace: { days: grace.days, grantedUntil: grace.grantedUntil } });
   } catch (err) {
     handleError(err, res);
   }
