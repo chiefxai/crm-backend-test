@@ -1,7 +1,7 @@
 'use strict';
 
 const FEATURE_FLAG = 'BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED';
-const BILLING_PATH = /^\\/api\\/billing(?:\\/|$)/;
+const BILLING_PATH = /^\/api\/billing(?:\/|$)/;
 const NOTIFICATION_READ_PATH = '/api/notifications/read';
 const SESSION_PATHS = new Set(['/api/auth/me', '/api/auth/roles', '/api/settings/me']);
 const BILLING_SUSPENSION_CAUSES = new Set([
@@ -13,8 +13,8 @@ const rowsOf = (value) => Array.isArray(value) && Array.isArray(value[0]) ? valu
 function deadlineTimestamp(value) {
   if (value instanceof Date) return value.getTime();
   const raw = String(value);
-  const normalized = /^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d/.test(raw)
-    ? `${raw.replace(' ', 'T').replace(/(\\.\\d{3})\\d+$/, '$1')}Z` : raw;
+  const normalized = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/.test(raw)
+    ? `${raw.replace(' ', 'T').replace(/(\.\d{3})\d+$/, '$1')}Z` : raw;
   return Date.parse(normalized);
 }
 
