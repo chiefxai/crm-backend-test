@@ -1,7 +1,8 @@
 'use strict';
 
 const FEATURE_FLAG = 'BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED';
-const BILLING_PATH = /^\/api\/billing(?:\/|$)/;
+const BILLING_PATH = /^\\/api\\/billing(?:\\/|$)/;
+const NOTIFICATION_READ_PATH = '/api/notifications/read';
 const SESSION_PATHS = new Set(['/api/auth/me', '/api/auth/roles', '/api/settings/me']);
 const BILLING_SUSPENSION_CAUSES = new Set([
   'initial_subscription_unpaid', 'subscription_payment_overdue', 'subscription_expired',
@@ -12,8 +13,8 @@ const rowsOf = (value) => Array.isArray(value) && Array.isArray(value[0]) ? valu
 function deadlineTimestamp(value) {
   if (value instanceof Date) return value.getTime();
   const raw = String(value);
-  const normalized = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d/.test(raw)
-    ? `${raw.replace(' ', 'T').replace(/(\.\d{3})\d+$/, '$1')}Z` : raw;
+  const normalized = /^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d/.test(raw)
+    ? `${raw.replace(' ', 'T').replace(/(\\.\\d{3})\\d+$/, '$1')}Z` : raw;
   return Date.parse(normalized);
 }
 
@@ -28,6 +29,7 @@ function enabled() { return process.env[FEATURE_FLAG] === 'true'; }
 async function enforceSubscriptionAccess(req, res, { pool, isEnabled = enabled } = {}) {
   if (!isEnabled()) return true;
   const path = new URL(req.originalUrl || req.url, 'http://local').pathname.toLowerCase();
+  const notificationRead = req.method === 'POST' && path === NOTIFICATION_READ_PATH;
   let result;
   try {
     const db = pool || require('../db/pool').getPool();
@@ -67,20 +69,20 @@ async function enforceSubscriptionAccess(req, res, { pool, isEnabled = enabled }
   }
   if (state === 'operational') {
     if (!deadlinePassed) return true;
-    if (BILLING_PATH.test(path)) return true;
+    if (BILLING_PATH.test(path) || notificationRead) return true;
     res.status(403).json({ code: 'SUBSCRIPTION_SUSPENDED', error: 'Subscription access is suspended. Resolve billing or contact the platform team.' });
     return false;
   }
   const recoveryRead = req.method === 'GET' && SESSION_PATHS.has(path);
 
   if (state === 'billing_recovery') {
-    if (BILLING_PATH.test(path) || recoveryRead) return true;
+    if (BILLING_PATH.test(path) || recoveryRead || notificationRead) return true;
     res.status(402).json({ code: 'SUBSCRIPTION_PAYMENT_REQUIRED', error: 'Complete subscription payment to use organization features.' });
     return false;
   }
 
   if (state === 'billing_suspended') {
-    if (BILLING_SUSPENSION_CAUSES.has(cause) && (BILLING_PATH.test(path) || recoveryRead)) return true;
+    if (BILLING_SUSPENSION_CAUSES.has(cause) && (BILLING_PATH.test(path) || recoveryRead || notificationRead)) return true;
     res.status(403).json({ code: 'SUBSCRIPTION_SUSPENDED', error: 'Subscription access is suspended. Resolve billing or contact the platform team.' });
     return false;
   }
