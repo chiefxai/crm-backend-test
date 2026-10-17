@@ -2,7 +2,7 @@
 
 const FEATURE_FLAG = 'BILLING_SUBSCRIPTION_ACCESS_ENFORCEMENT_ENABLED';
 const BILLING_PATH = /^\/api\/billing(?:\/|$)/;
-const NOTIFICATION_READ_PATH = '/api/notifications/read';
+const NOTIFICATION_READ_PATHS = new Set(['/api/notifications/read','/api/notifications/clear']);
 const SESSION_PATHS = new Set(['/api/auth/me', '/api/auth/roles', '/api/settings/me']);
 const BILLING_SUSPENSION_CAUSES = new Set([
   'initial_subscription_unpaid', 'subscription_payment_overdue', 'subscription_expired',
@@ -29,7 +29,7 @@ function enabled() { return process.env[FEATURE_FLAG] === 'true'; }
 async function enforceSubscriptionAccess(req, res, { pool, isEnabled = enabled } = {}) {
   if (!isEnabled()) return true;
   const path = new URL(req.originalUrl || req.url, 'http://local').pathname.toLowerCase();
-  const notificationRead = req.method === 'POST' && path === NOTIFICATION_READ_PATH;
+  const notificationRead = req.method === 'POST' && NOTIFICATION_READ_PATHS.has(path);
   let result;
   try {
     const db = pool || require('../db/pool').getPool();

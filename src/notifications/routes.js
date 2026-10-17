@@ -41,6 +41,7 @@ function mountCommon(router,audience) {
     if (req.body?.id != null && (typeof req.body.id !== 'string' || !/^[a-f0-9-]{36}$/i.test(req.body.id))) throw new TypeError('Invalid notification id.');
     return res.json(await getService().markRead({...scope(req),id:req.body?.id || null}));
   }));
+  router.post('/clear',handler(async(req,res) => res.json(await getService().clear(scope(req)))));
 }
 function createUserRouter() {
   const router=routerFactory();

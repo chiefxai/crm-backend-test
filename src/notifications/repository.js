@@ -36,9 +36,10 @@ function createRepository(pool = getPool()) {
     const { rows } = await pool.query(
       'SELECT n.id,n.event_key,n.title,n.message,n.action_path,n.occurred_at,n.org_id,n.workspace_id,r.read_at FROM app_notifications n ' +
       'LEFT JOIN app_notification_reads r ON r.notification_id=n.id AND r.user_id=? ' +
+      'LEFT JOIN app_notification_dismissals d ON d.notification_id=n.id AND d.user_id=? ' +
       "LEFT JOIN app_notification_preferences p ON p.user_id=? AND p.audience=? AND p.event_key=n.event_key AND p.channel='browser' " +
-      'WHERE ' + selected.sql + ' AND (p.enabled IS NULL OR p.enabled=1) ORDER BY n.occurred_at DESC,n.id DESC LIMIT ?',
-      [userId,userId,audience,...selected.args,Math.min(100,Math.max(1,Number(limit)||50))]);
+      'WHERE ' + selected.sql + ' AND d.notification_id IS NULL AND (p.enabled IS NULL OR p.enabled=1) ORDER BY n.occurred_at DESC,n.id DESC LIMIT ?',
+      [userId,userId,userId,audience,...selected.args,Math.min(100,Math.max(1,Number(limit)||50))]);
     return rows.map(row => ({
       id: row.id, eventKey: row.event_key, title: row.title, message: row.message,
       actionPath: row.action_path, occurredAt: row.occurred_at, readAt: row.read_at || null,
@@ -53,6 +54,14 @@ function createRepository(pool = getPool()) {
       'INSERT IGNORE INTO app_notification_reads (notification_id,user_id,read_at) SELECT n.id,?,UTC_TIMESTAMP(6) FROM app_notifications n WHERE ' + selected.sql + identity,
       [userId,...selected.args,...(id ? [id] : [])]);
     return { updated: affectedRows };
+  }
+  async function clear({ audience, orgId, workspaceId, userId }) {
+    const selected = filter({ audience, orgId, workspaceId });
+    const { affectedRows } = await pool.query(
+      'INSERT IGNORE INTO app_notification_dismissals (notification_id,user_id,dismissed_at) ' +
+      'SELECT n.id,?,UTC_TIMESTAMP(6) FROM app_notifications n WHERE ' + selected.sql,
+      [userId,...selected.args]);
+    return { cleared: affectedRows };
   }
   async function preferences({ audience, userId }) {
     const rows = (await pool.query('SELECT event_key,channel,enabled FROM app_notification_preferences WHERE user_id=? AND audience=?', [userId,audience])).rows;
@@ -108,6 +117,6 @@ function createRepository(pool = getPool()) {
         args);
     }
   }
-  return { rememberUser, create, list, markRead, preferences, setPreferences, enqueueEmailRecipients };
+  return { rememberUser, create, list, markRead, clear, preferences, setPreferences, enqueueEmailRecipients };
 }
 module.exports = { createRepository };

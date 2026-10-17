@@ -5,10 +5,10 @@ const requestAuthority = new AsyncLocalStorage();
 const ORGANIZATION_ROLES = ['Owner','Organization Admin','Billing Admin','Member'];
 const WORKSPACE_ROLES = ['Workspace Admin','Manager','Member','Viewer'];
 const ORG_PERMISSIONS = {
-  Owner: ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit','billing.credit.allocate','billing.allocation_rules.manage'],
-  'Organization Admin': ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit','billing.credit.allocate','billing.allocation_rules.manage'],
-  'Billing Admin': ['organization.read','billing.read','billing.organization.read','billing.payment.submit'],
-  Member: [],
+  Owner: ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit','billing.credit.allocate','billing.allocation_rules.manage','notifications.read'],
+  'Organization Admin': ['organization.read','organization.manage','organization.members.read','organization.members.manage','billing.read','billing.organization.read','billing.payment.submit','billing.credit.allocate','billing.allocation_rules.manage','notifications.read'],
+  'Billing Admin': ['organization.read','billing.read','billing.organization.read','billing.payment.submit','notifications.read'],
+  Member: ['notifications.read'],
 };
 const WORKSPACE_PERMISSIONS = {
   'Workspace Admin': ['workspace.read','workspace.write','workspace.delete','workspace.settings.manage','workspace.members.manage','workspace.audit.read','workspace.call','workspace.share.propose','workspace.share.copy','billing.read'],
@@ -48,6 +48,7 @@ function requestPermission(req) {
   const read = ['GET','HEAD','OPTIONS'].includes(req.method);
   if (['/api/auth/me','/api/auth/roles','/api/settings/me'].includes(path)) return null;
   if (path === '/api/settings/workspace-policy') return 'organization.read';
+  if (/^\/api\/notifications(?:\/|$)/.test(path)) return 'notifications.read';
   if (path === '/api/settings/workspaces') return read ? 'organization.read' : 'organization.manage';
   if (path === '/api/settings/organization/workspace-features') return read ? 'organization.read' : 'organization.manage';
   if (/^\/api\/settings\/organization\/workspace-features\//.test(path)) return 'organization.manage';
