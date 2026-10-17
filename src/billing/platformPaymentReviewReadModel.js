@@ -59,6 +59,7 @@ function mapRow(row) {
   return {
     id: row.id,
     orgId: row.org_id,
+    organizationName: row.organization_name || null,
     purpose: row.purpose,
     status: row.status,
     version: Number(row.version),
@@ -94,7 +95,7 @@ async function listPlatformPaymentReviews({ status = 'pending_verification', lim
     args.push(after.createdAt, after.createdAt, after.id);
   }
   args.push(size + 1);
-  const result = await pool.query(`SELECT billing_payment_requests.id,billing_payment_requests.org_id,billing_payment_requests.purpose,
+  const result = await pool.query(`SELECT billing_payment_requests.id,billing_payment_requests.org_id,organizations.name AS organization_name,billing_payment_requests.purpose,
     billing_payment_requests.status,billing_payment_requests.version,billing_payment_requests.expected_amount_units,
     billing_payment_requests.received_amount_units,billing_payment_requests.asset,billing_payment_requests.scale,
     billing_payment_requests.payment_reference,billing_payment_requests.proof_object_key,billing_payment_requests.submitted_at,
@@ -104,7 +105,9 @@ async function listPlatformPaymentReviews({ status = 'pending_verification', lim
       JOIN billing_workspace_addons a ON a.org_id=c.org_id AND a.id=c.addon_id
       WHERE c.org_id=billing_payment_requests.org_id AND c.invoice_id=billing_payment_requests.invoice_id LIMIT 1) AS workspace_addon_name,
     DATE_FORMAT(billing_payment_requests.created_at,'%Y-%m-%d %H:%i:%s.%f') AS created_cursor
-    FROM billing_payment_requests LEFT JOIN billing_quotes q
+    FROM billing_payment_requests
+    LEFT JOIN organizations ON organizations.id=billing_payment_requests.org_id
+    LEFT JOIN billing_quotes q
       ON q.org_id=billing_payment_requests.org_id AND q.id=billing_payment_requests.quote_id
       ${where} ORDER BY billing_payment_requests.created_at DESC,billing_payment_requests.id DESC LIMIT ?`, args);
   if (!Array.isArray(result?.rows)) throw new TypeError('Invalid billing query result.');
