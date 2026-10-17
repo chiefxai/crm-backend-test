@@ -65,10 +65,19 @@ function createAutomaticCreditAllocationService({ creditRepository, clock } = {}
       WHERE org_id=? AND effective_from<=? AND (effective_to IS NULL OR effective_to>?)
       ORDER BY effective_from DESC,version DESC LIMIT 1`, [orgId, now, now]))[0]?.terms_snapshot_json;
     const parsedTerms = typeof termSnapshot === 'string' ? JSON.parse(termSnapshot) : termSnapshot;
+    const organization = rowsOf(await tx.query(
+      'SELECT settings FROM organizations WHERE id=?', [orgId],
+    ))[0];
+    let workspacePolicy = null;
+    try {
+      const settings = typeof organization?.settings === 'string'
+        ? JSON.parse(organization.settings) : organization?.settings;
+      workspacePolicy = settings?.workspacePolicy || null;
+    } catch { /* Invalid legacy settings must not enable automatic allocation. */ }
     const workspaces = rowsOf(await tx.query(
       'SELECT id,status FROM workspaces WHERE org_id=? ORDER BY id FOR UPDATE', [orgId],
     ));
-    const capability = resolveAllocationMode({ termsSnapshot: parsedTerms, workspaces });
+    const capability = resolveAllocationMode({ termsSnapshot: parsedTerms, workspacePolicy, workspaces });
     if (capability.allocationMode === 'manual') {
       return Object.freeze({ status: 'not_applicable', allocationMode: 'manual', grantId });
     }
